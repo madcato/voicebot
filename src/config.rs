@@ -12,10 +12,6 @@ pub struct Config {
     pub bit_depth: u16,
     /// Audio format identifier
     pub audio_format: String,
-    /// VAD WebSocket URL
-    // pub vad_ws_url: String,
-    /// STT WebSocket URL
-    pub stt_ws_url: String,
     /// Audio chunk duration in milliseconds
     pub chunk_ms: u32,
     /// Audio input device name (None = use default device)
@@ -40,10 +36,6 @@ impl Config {
                 .parse()
                 .context("Invalid AUDIO_BIT_DEPTH")?,
             audio_format: env::var("AUDIO_FORMAT").unwrap_or_else(|_| "pcm_s16le".to_string()),
-            // vad_ws_url: env::var("VAD_WS_URL")
-            //     .context("VAD_WS_URL environment variable is required")?,
-            stt_ws_url: env::var("STT_WS_URL")
-                .context("STT_WS_URL environment variable is required")?,
             chunk_ms: env::var("AUDIO_CHUNK_MS")
                 .unwrap_or_else(|_| "100".to_string())
                 .parse()

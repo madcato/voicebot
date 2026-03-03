@@ -56,26 +56,11 @@ async fn main() -> Result<()> {
     // Start audio capture
     let samples_per_chunk = config.samples_per_chunk();
     let _stream = audio_capture.start_capture(raw_tx, samples_per_chunk)?;
-
-    // Spawn WebSocket client tasks first
-    // let vad_client = WebSocketClient::new(config.vad_ws_url.clone(), "VAD".to_string(), None);
-
-    // let vad_handle = tokio::spawn(async move {
-    //     if let Err(e) = vad_client.run(vad_rx).await {
-    //         error!("VAD client error: {}", e);
-    //     }
-    // });
-
-    let stt_client = WebSocketClient::new(
-        config.stt_ws_url.clone(), 
-        "STT".to_string(), 
-        Some(connection_status_tx)
-    );
     
     let stt_handle = tokio::spawn(async move {
-        if let Err(e) = stt_client.run(stt_rx).await {
-            error!("STT client error: {}", e);
-        }
+        // if let Err(e) = stt_client.run(stt_rx).await {
+        //     error!("STT client error: {}", e);
+        // }
     });
     
     // Spawn audio transformation task - only starts after WebSocket connection succeeds
@@ -101,11 +86,7 @@ async fn main() -> Result<()> {
                 error!("Transform task error: {}", e);
             }
         }
-        // result = vad_handle => {
-        //     if let Err(e) = result {
-        //         error!("VAD task error: {}", e);
-        //     }
-        // }
+        
         result = stt_handle => {
             if let Err(e) = result {
                 error!("STT task error: {}", e);
@@ -122,7 +103,6 @@ async fn run_transformer_after_connection(
     source_sample_rate: u32,
     source_channels: u16,
     raw_rx: async_channel::Receiver<AudioChunk>,
-    // vad_tx: Sender<TransformedAudio>,
     stt_tx: Sender<TransformedAudio>,
     connection_status_rx: async_channel::Receiver<bool>,
 ) {
@@ -150,7 +130,6 @@ async fn run_transformer(
     source_sample_rate: u32,
     source_channels: u16,
     raw_rx: async_channel::Receiver<AudioChunk>,
-    // vad_tx: Sender<TransformedAudio>,
     stt_tx: Sender<TransformedAudio>,
 ) {
     let mut transformer = match AudioTransformer::new(&config, source_sample_rate, source_channels) {
@@ -170,10 +149,6 @@ async fn run_transformer(
                 // Clone the data since we need to send to two destinations
                 // let vad_audio = transformed.clone();
                 let stt_audio = transformed;
-
-                // if let Err(e) = vad_tx.try_send(vad_audio) {
-                //     error!("Failed to send to VAD channel: {}", e);
-                // }
 
                 if let Err(e) = stt_tx.try_send(stt_audio) {
                     error!("Failed to send to STT channel: {}", e);
