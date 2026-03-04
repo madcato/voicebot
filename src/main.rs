@@ -4,7 +4,7 @@ mod s2s;
 
 use anyhow::Result;
 use async_channel::bounded;
-use tracing::{error, info};
+use tracing::{error, info, debug};
 use tracing_subscriber::EnvFilter;
 
 use crate::audio::audio_capture::{AudioCapture, AudioChunk};
@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
     let (tx, rx) = bounded(AUDIO_CHANNEL_CAPACITY);
     let _stream = audio_capture.start_capture(tx, samples_per_chunk)?;
 
-    let mut vad = VoiceActivityDetector::new(source_sample_rate);
+    let mut vad = VoiceActivityDetector::new(source_sample_rate)?;
     let mut speech_buffer = AudioBuffer::new(source_sample_rate, MAX_SPEECH_BUFFER_SECS);
 
     info!("Audio pipeline running. Speak to interact...");
@@ -119,7 +119,9 @@ async fn main() -> Result<()> {
                             Err(e) => error!("S2S processing error: {}", e),
                         }
                     }
-                    VadResult::Silence => {}
+                    VadResult::Silence => {
+                        debug!("SILENCE")
+                    }
                 }
             }
         } => {}

@@ -46,3 +46,6 @@ uuid = { version = "1.21.0", features = ["v4"] }
 
 # Tools
 sysinfo = "0.38.3"
+
+# Voice Activity Detection
+voice_activity_detector = "0.2.1"
