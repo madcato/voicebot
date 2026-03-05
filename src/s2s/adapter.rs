@@ -16,6 +16,11 @@ impl S2SAdapter {
         Ok(Self { model, config })
     }
 
+    /// Create an adapter from a pre-built model instance (useful for testing).
+    pub fn with_model(model: Box<dyn S2SModel + Send + Sync>, config: ModelConfig) -> Self {
+        Self { model, config }
+    }
+
     /// Create a model instance based on type
     async fn create_model(
         model_type: ModelType,

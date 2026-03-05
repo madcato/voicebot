@@ -14,6 +14,6 @@ pub use audio::buffer::AudioBuffer;
 pub use audio::output::AudioOutput;
 pub use db::Database;
 pub use mcp::McpServer;
-pub use s2s::{S2SAdapter, S2SRequest, S2SResponse, ModelType, ModelConfig};
+pub use s2s::{S2SAdapter, S2SModel, S2SRequest, S2SResponse, ModelType, ModelConfig};
 pub use session::{SessionManager, ConversationContext, Message, MessageRole};
 pub use tools::{ToolRouter, ToolRegistry};
