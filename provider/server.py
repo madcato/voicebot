@@ -14,7 +14,7 @@ Environment variables:
     HOST             bind address  (default: 0.0.0.0)
     PORT             bind port     (default: 8000)
     API_KEY          optional bearer token to require (default: none)
-    FRAMES_PER_CHUNK audio frames decoded per streaming chunk (default: 10)
+
     MAX_NEW_TOKENS   default generation limit (default: 2048)
 """
 
@@ -50,7 +50,7 @@ MODEL_ID = os.environ.get("MODEL_ID", "mlx-community/LFM2.5-Audio-1.5B-4bit")
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
 API_KEY = os.environ.get("API_KEY", "")
-FRAMES_PER_CHUNK = int(os.environ.get("FRAMES_PER_CHUNK", "10"))
+
 MAX_NEW_TOKENS = int(os.environ.get("MAX_NEW_TOKENS", "2048"))
 
 model: Optional[LFM2AudioModel] = None
@@ -132,7 +132,12 @@ def _infer(
     max_tokens: int,
 ) -> tuple[np.ndarray, int, Optional[str]]:
     """
-    Run LFM2.5-Audio speech-to-speech inference using streaming generation.
+    Run LFM2.5-Audio speech-to-speech inference.
+
+    Collects all audio tokens during generation then decodes them in one call
+    with processor.decode_audio — the method available in the current mlx-audio
+    release.  (The HuggingFace model card documents decode_with_detokenizer for
+    chunked streaming, but that method is not yet shipped in the library.)
 
     Returns:
         waveform     — float32 numpy array (mono, model.sample_rate Hz)
@@ -160,10 +165,9 @@ def _infer(
     # Open the assistant turn before generation
     chat.new_turn("assistant")
 
-    # ── Streaming generation ───────────────────────────────────────────────────
+    # ── Generation — collect all tokens ────────────────────────────────────────
     text_pieces: list[str] = []
-    audio_buffer: list[mx.array] = []
-    decoded_chunks: list[np.ndarray] = []
+    audio_tokens: list[mx.array] = []
 
     for token, modality in model.generate_interleaved(
         **dict(chat),
@@ -178,25 +182,18 @@ def _infer(
         elif modality == LFMModality.AUDIO_OUT:
             if token[0].item() == AUDIO_EOS_TOKEN:
                 break
-            audio_buffer.append(token)
+            audio_tokens.append(token)
 
-            # Decode every FRAMES_PER_CHUNK frames to keep memory bounded
-            if len(audio_buffer) >= FRAMES_PER_CHUNK:
-                codes = mx.stack(audio_buffer, axis=1)[None, :]  # (1, 8, T)
-                chunk = processor.decode_with_detokenizer(codes)
-                decoded_chunks.append(np.array(chunk[0]))
-                audio_buffer = []
-
-    # Flush any remaining audio frames
-    if audio_buffer:
-        codes = mx.stack(audio_buffer, axis=1)[None, :]  # (1, 8, T)
-        chunk = processor.decode_with_detokenizer(codes)
-        decoded_chunks.append(np.array(chunk[0]))
-
-    # ── Assemble outputs ───────────────────────────────────────────────────────
-    waveform = np.concatenate(decoded_chunks) if decoded_chunks else np.zeros(
-        model.sample_rate, dtype=np.float32
-    )
+    # ── Decode audio ────────────────────────────────────────────────────────────
+    # Stack collected tokens → (1, 8, T) then decode to waveform.
+    # Shape mirrors the TTS example from the model card:
+    #   mx.stack(tokens, axis=0)[None, :].transpose(0, 2, 1) → (1, 8, T)
+    if audio_tokens:
+        codes = mx.stack(audio_tokens, axis=0)[None, :].transpose(0, 2, 1)  # (1, 8, T)
+        waveform_mx = processor.decode_audio(codes)
+        waveform = np.array(waveform_mx[0])
+    else:
+        waveform = np.zeros(model.sample_rate, dtype=np.float32)
     output_text = "".join(text_pieces) or None
 
     logger.info(
