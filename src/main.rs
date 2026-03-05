@@ -4,11 +4,13 @@ mod s2s;
 
 use anyhow::Result;
 use async_channel::bounded;
+use std::sync::Arc;
 use tracing::{error, info, debug};
 use tracing_subscriber::EnvFilter;
 
 use crate::audio::audio_capture::{AudioCapture, AudioChunk};
 use crate::audio::buffer::AudioBuffer;
+use crate::audio::output::AudioOutput;
 use crate::audio::vad::{VadResult, VoiceActivityDetector};
 use crate::s2s::adapter::{S2SAdapter, S2SRequest};
 use crate::s2s::models::{ModelConfig, ModelType};
@@ -51,8 +53,16 @@ async fn main() -> Result<()> {
 
     // Initialize S2S adapter
     let model_config = ModelConfig::default();
-    let mut s2s = S2SAdapter::new(ModelType::LlamaOmni, model_config).await?;
+    let mut s2s = S2SAdapter::new(ModelType::LFM, model_config).await?;
     info!("S2S model initialized: {}", s2s.model_info().model_type.as_str());
+
+    // Initialize audio output
+    let audio_output = Arc::new(AudioOutput::new()?);
+    info!(
+        "Audio output: {} Hz, {} ch",
+        audio_output.sample_rate(),
+        audio_output.channels()
+    );
 
     // Audio pipeline: capture -> channel -> VAD -> buffer -> S2S
     let samples_per_chunk = config.samples_per_chunk();
@@ -108,14 +118,24 @@ async fn main() -> Result<()> {
                         match s2s.process(request).await {
                             Ok(response) => {
                                 if let Some(text) = &response.output_text {
-                                    info!("S2S response text: {}", text);
+                                    info!("S2S response: {}", text);
                                 }
                                 info!(
-                                    "S2S audio response: {} samples @ {}Hz: {}",
+                                    "Playing {} samples @ {} Hz",
                                     response.audio.len(),
                                     response.sample_rate,
-                                    response.output_text.unwrap_or("None".to_string())
                                 );
+                                let out = Arc::clone(&audio_output);
+                                let audio = response.audio;
+                                let sr = response.sample_rate;
+                                if let Err(e) = tokio::task::spawn_blocking(move || {
+                                    out.play_blocking(&audio, sr)
+                                })
+                                .await
+                                .expect("playback task panicked")
+                                {
+                                    error!("Audio playback error: {}", e);
+                                }
                             }
                             Err(e) => error!("S2S processing error: {}", e),
                         }

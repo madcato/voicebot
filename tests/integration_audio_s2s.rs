@@ -1,4 +1,5 @@
-//! Integration test: audio processing pipeline from simulated microphone to S2S model.
+//! Integration test: audio processing pipeline from simulated microphone to S2S model,
+//! and from S2S response to speaker output.
 //!
 //! Pipeline under test (mirrors main.rs):
 //!
@@ -8,6 +9,8 @@
 //!       → AudioBuffer (accumulate on Speech*)
 //!       → S2SAdapter → S2SModel (mock)
 //!       → S2SResponse
+//!       → AudioOutput::prepare (resample + channel expand)
+//!       → speaker (not exercised in tests — hardware-free)
 //!
 //! AudioCapture (CPAL, requires hardware) is intentionally bypassed: the test
 //! injects audio chunks directly into the pipeline, which is the correct
@@ -18,8 +21,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use async_trait::async_trait;
 use voicebot::{
-    AudioBuffer, ModelConfig, S2SAdapter, S2SModel, S2SRequest, S2SResponse, VadResult,
-    VoiceActivityDetector,
+    AudioBuffer, AudioOutput, ModelConfig, S2SAdapter, S2SModel, S2SRequest, S2SResponse,
+    VadResult, VoiceActivityDetector,
 };
 
 // ── Constants matching main.rs ─────────────────────────────────────────────────
@@ -406,4 +409,146 @@ async fn test_pipeline_multiple_utterances() {
     );
     // At most 2 utterances can be detected given our two bursts.
     assert!(reqs.len() <= 2, "cannot produce more utterances than bursts");
+}
+
+// ── AudioOutput::prepare tests (hardware-free) ────────────────────────────────
+
+/// Identity: same rate, mono → samples pass through unchanged.
+#[test]
+fn test_output_prepare_identity() {
+    let samples = vec![0.1f32, 0.5, -0.3, 0.0, -0.8];
+    let out = AudioOutput::prepare(&samples, 16_000, 16_000, 1).unwrap();
+    assert_eq!(out.len(), samples.len());
+    for (a, b) in samples.iter().zip(out.iter()) {
+        assert!((a - b).abs() < 1e-6, "samples must be unchanged: {a} ≠ {b}");
+    }
+}
+
+/// Empty input → empty output regardless of rates or channels.
+#[test]
+fn test_output_prepare_empty_input() {
+    let out = AudioOutput::prepare(&[], 24_000, 48_000, 2).unwrap();
+    assert!(out.is_empty());
+}
+
+/// Upsampling 24 kHz → 48 kHz should approximately double the sample count.
+#[test]
+fn test_output_prepare_upsample_24k_to_48k() {
+    let samples = vec![0.0f32; 24_000]; // 1 s of silence at 24 kHz
+    let out = AudioOutput::prepare(&samples, 24_000, 48_000, 1).unwrap();
+    let expected = 48_000usize;
+    let tolerance = expected / 20; // 5 %
+    assert!(
+        (out.len() as i64 - expected as i64).abs() < tolerance as i64,
+        "expected ~{expected} samples after 24→48 kHz upsample, got {}",
+        out.len()
+    );
+}
+
+/// Downsampling 48 kHz → 16 kHz should approximately cut the sample count to a third.
+#[test]
+fn test_output_prepare_downsample_48k_to_16k() {
+    let samples = vec![0.0f32; 48_000]; // 1 s at 48 kHz
+    let out = AudioOutput::prepare(&samples, 48_000, 16_000, 1).unwrap();
+    let expected = 16_000usize;
+    let tolerance = expected / 20; // 5 %
+    assert!(
+        (out.len() as i64 - expected as i64).abs() < tolerance as i64,
+        "expected ~{expected} samples after 48→16 kHz downsample, got {}",
+        out.len()
+    );
+}
+
+/// Mono → stereo: each sample must be duplicated for both channels.
+#[test]
+fn test_output_prepare_mono_to_stereo() {
+    let samples = vec![0.1f32, 0.5, -0.3];
+    let out = AudioOutput::prepare(&samples, 16_000, 16_000, 2).unwrap();
+    assert_eq!(out.len(), samples.len() * 2, "stereo doubles sample count");
+    // Interleaved layout: L0 R0 L1 R1 …
+    for (i, &src) in samples.iter().enumerate() {
+        assert!((out[i * 2] - src).abs() < 1e-6, "L channel mismatch at {i}");
+        assert!((out[i * 2 + 1] - src).abs() < 1e-6, "R channel mismatch at {i}");
+    }
+}
+
+/// Mono → quad (4 ch): each sample repeated four times.
+#[test]
+fn test_output_prepare_mono_to_quad() {
+    let samples = vec![0.25f32, -0.5];
+    let out = AudioOutput::prepare(&samples, 16_000, 16_000, 4).unwrap();
+    assert_eq!(out.len(), 8);
+    for chunk in out.chunks(4) {
+        for &s in chunk {
+            assert!((s - chunk[0]).abs() < 1e-6, "all channels must be equal");
+        }
+    }
+}
+
+/// Combined: resample 24 kHz → 48 kHz AND expand mono → stereo.
+/// Output length should be approximately 2 × 2 × input length.
+#[test]
+fn test_output_prepare_resample_and_expand() {
+    let samples = vec![0.0f32; 24_000]; // 1 s at 24 kHz mono
+    let out = AudioOutput::prepare(&samples, 24_000, 48_000, 2).unwrap();
+    let expected = 48_000 * 2; // stereo at 48 kHz
+    let tolerance = expected / 20;
+    assert!(
+        (out.len() as i64 - expected as i64).abs() < tolerance as i64,
+        "expected ~{expected} interleaved samples, got {}",
+        out.len()
+    );
+}
+
+/// All prepared samples must stay within [-1.0, 1.0] after resampling.
+#[test]
+fn test_output_prepare_samples_in_range() {
+    // Use a non-trivial waveform to exercise the resampler's filter.
+    let samples: Vec<f32> = (0..24_000)
+        .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 24_000.0).sin() * 0.9)
+        .collect();
+    let out = AudioOutput::prepare(&samples, 24_000, 48_000, 2).unwrap();
+    for &s in &out {
+        assert!(
+            s >= -1.01 && s <= 1.01,
+            "resampled sample {s} outside [-1, 1]"
+        );
+    }
+}
+
+/// S2S mock response audio passes through AudioOutput::prepare correctly.
+/// Verifies the full output stage of the pipeline end-to-end (minus hardware).
+#[tokio::test]
+async fn test_pipeline_s2s_response_to_output_prepare() {
+    let (mut adapter, _) = mock_adapter();
+
+    // Build a request with 0.5 s of audio.
+    let request = S2SRequest {
+        audio: vec![0.0f32; SAMPLE_RATE as usize / 2],
+        sample_rate: SAMPLE_RATE,
+        context: vec![],
+        tools: None,
+        stream: false,
+    };
+
+    // MockS2SModel returns 1 s at 24 kHz.
+    let response = adapter.process(request).await.unwrap();
+    assert_eq!(response.sample_rate, 24_000);
+    assert_eq!(response.audio.len(), 24_000);
+
+    // Simulate what main.rs does: prepare for a 48 kHz stereo device.
+    let prepared =
+        AudioOutput::prepare(&response.audio, response.sample_rate, 48_000, 2).unwrap();
+
+    // Should be approximately 2 s × 48 000 Hz × 2 ch = 192 000 samples.
+    let expected = 96_000usize; // 48_000 * 2 ch
+    let tolerance = expected / 20;
+    assert!(
+        (prepared.len() as i64 - expected as i64).abs() < tolerance as i64,
+        "expected ~{expected} samples for 48 kHz stereo, got {}",
+        prepared.len()
+    );
+    for &s in &prepared {
+        assert!(s >= -1.01 && s <= 1.01, "output sample {s} out of range");
+    }
 }
