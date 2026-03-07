@@ -20,6 +20,9 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
 - **Barge-in**: user speech cancels active LLM/TTS pipeline instantly via `Arc<AtomicBool>`
 - Persistent SQLite conversation history — restored on startup
 - LLM session rollback on barge-in interruption
+- **Tool use**: `<tool_call>` XML detection mid-stream; LLM loops back after tool result; `current_time` built-in
+- **Context summarization**: auto-triggers at 75% of context window; keeps last N turns verbatim; summary persisted in DB and restored on restart
+- **User profile**: background LLM extraction of user facts after every turn; stored in `user_profile` SQLite table; injected into system prompt on startup
 
 ---
 
@@ -46,16 +49,32 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
                     ┌─────────────▼─────────────┐
                     │  LLM (streaming HTTP SSE)  │
                     │  llama.cpp, cache_prompt   │
-                    └─────────────┬─────────────┘
-                                  │  tokens → sentences
-                    ┌─────────────▼─────────────┐
-                    │  TTS (macOS say)           │
-                    │  sentence-by-sentence      │
-                    └─────────────┬─────────────┘
+                    └──────┬──────────┬──────────┘
+                    text   │    <tool_call>?
+                           │          │
+                           │   ┌──────▼──────────┐
+                           │   │  ToolRegistry   │
+                           │   │  execute tool   │
+                           │   └──────┬──────────┘
+                           │   re-call LLM with result
+                           │          │
+                    ┌──────▼──────────▼──────────┐
+                    │  TTS (macOS say)            │
+                    │  sentence-by-sentence       │
+                    └─────────────┬──────────────┘
                                   │  f32 PCM
                     ┌─────────────▼─────────────┐
                     │  AudioOutput (CPAL)        │
                     │  resample + play_blocking  │
+                    └───────────────────────────┘
+                                  │  (turn complete)
+                    ┌─────────────▼─────────────┐
+                    │  maybe_summarize()         │  ← if prompt > 75% context
+                    │  background LLM call       │
+                    └─────────────┬─────────────┘
+                    ┌─────────────▼─────────────┐
+                    │  extract_facts() [spawn]   │  ← fire-and-forget
+                    │  update user_profile DB    │
                     └───────────────────────────┘
 ```
 
@@ -68,13 +87,15 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
 | Audio buffer | `src/audio/buffer.rs` | Accumulates speech chunks |
 | Audio output | `src/audio/output.rs` | CPAL playback, resample, cancel support |
 | STT | `src/stt/whisper.rs` | whisper-rs, cached WhisperState (no Metal re-init) |
-| LLM client | `src/llm/client.rs` | Streaming SSE client for llama.cpp |
-| LLM session | `src/llm/session.rs` | Accumulated prompt + KV-cache state |
+| LLM client | `src/llm/client.rs` | Streaming SSE + one-shot completion for llama.cpp |
+| LLM session | `src/llm/session.rs` | Accumulated prompt, turn tracking, summarization |
 | TTS | `src/tts/say.rs` | macOS `say` subprocess, WAV parsing |
 | Sentence splitter | `src/tts/sentence.rs` | Buffers tokens, emits complete sentences |
-| Database | `src/db/database.rs` | SQLite via sqlx, sessions + messages |
+| Tools | `src/tools/` | `Tool` trait + `ToolRegistry`; `current_time` built-in |
+| Profile | `src/profile/mod.rs` | User fact extraction, JSON parsing, context builder |
+| Database | `src/db/database.rs` | SQLite: sessions, messages, summary, user_profile |
 | Config | `src/config.rs` | Environment-based configuration |
-| Main loop | `src/main.rs` | VAD loop + barge-in + pipeline orchestration |
+| Main loop | `src/main.rs` | VAD loop + barge-in + pipeline + summarization + profile |
 
 ---
 
@@ -85,13 +106,15 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
 | `VOICEBOT_LANGUAGE` | `es` | Language for STT and TTS voice selection |
 | `SAY_VOICE` | `Marisol (Enhanced)` | macOS voice name |
 | `WHISPER_MODEL` | — | Path to `.bin` Whisper model |
-| `LLM_URL` | — | llama.cpp base URL |
+| `LLM_URL` | `http://localhost:8080` | llama.cpp base URL |
 | `LLM_SYSTEM_PROMPT` | — | System prompt for the LLM |
-| `LLM_MAX_TOKENS` | — | Max generation tokens |
-| `LLM_TEMPERATURE` | — | LLM temperature |
+| `LLM_MAX_TOKENS` | `400` | Max generation tokens per response |
+| `LLM_TEMPERATURE` | `0.7` | LLM sampling temperature |
+| `LLM_CONTEXT_TOKENS` | `4096` | Model context window size; triggers summarization at 75% |
+| `LLM_SUMMARY_KEEP_TURNS` | `6` | Recent (role, content) turns kept verbatim after summarization |
 | `AUDIO_DEVICE` | system default | Input device name substring |
 | `AUDIO_OUTPUT_DEVICE` | system default | Output device name substring |
-| `DB_PATH` | — | SQLite database file path |
+| `DB_PATH` | `data/voicebot.db` | SQLite database file path |
 | `LIST_AUDIO_DEVICES` | `0` | Print devices and exit |
 
 ---
@@ -111,36 +134,37 @@ cargo run -- --list-devices
 
 ## Roadmap — Feature Analysis
 
-This section analyzes each planned feature: design approach, implementation challenges, and integration points with the current pipeline.
+This section documents implemented features and analyzes pending ones.
 
 ---
 
-### 1. Tool Use (Function Calling)
+### 1. Tool Use (Function Calling) ✅ Implemented
 
-**Goal:** The LLM can call tools (web search, calendar, file read, shell commands, etc.) and receive results before generating its spoken response.
+**Goal:** The LLM can call tools and receive results before generating its spoken response.
 
-**Approach:**
+**Implementation:**
 
-llama.cpp supports OpenAI-compatible function calling when the model has been trained for it (e.g., Qwen, Mistral, LLaMA-3.1+). The pipeline becomes a loop instead of a straight pass:
+Tool calls use a prompt-engineering approach with XML markers: `<tool_call>tool_name</tool_call>`. This works with any LLM without requiring native function-calling support.
 
 ```
-STT → LLM call →  text response?   → TTS → Speaker
-                  tool_call?  → execute tool → LLM call (with tool result) → ...
+STT → LLM streams tokens
+         │
+         ├── regular text → SentenceSplitter → TTS (streaming)
+         └── <tool_call>name</tool_call> detected at end-of-stream
+                  │
+                  ▼ (TTS suppressed for tool call text)
+             ToolRegistry.execute(name)
+                  │
+             add_tool_result() → session prompt updated
+                  │
+             LLM re-called → streams spoken response → TTS
 ```
 
-**Implementation steps:**
-1. Add `tools: Vec<ToolDefinition>` to `LlmSession`; include them in the llama.cpp payload as `"tools": [...]`
-2. Parse the LLM response for tool calls (JSON in the token stream, or a `tool_calls` field in the final SSE message)
-3. Route the call to the appropriate executor (built-in, MCP, agent — see below)
-4. Append the tool result to the accumulated prompt as a `tool` turn
-5. Re-call the LLM; repeat until a plain text response is returned
-6. Feed final text to TTS as normal
+**Key design:** Tool call XML contains no punctuation, so `SentenceSplitter` never emits it mid-stream. Detection happens safely at end-of-stream before the final `flush()`.
 
-**Voice UX consideration:** Tool calls can add 1–10 seconds of latency. Options:
-- Play a short "thinking" audio clip while waiting
-- The LLM can be instructed to acknowledge out loud before calling a tool ("Déjame buscar eso..." → TTS plays → tool executes → LLM continues)
+**Adding a new tool:** implement `trait Tool { fn name(); fn description(); fn run() -> String; }` and call `registry.register(MyTool)` in `main()`.
 
-**Key challenge:** Streaming SSE + tool call detection. Tool call JSON is emitted mid-stream; the current sentence splitter needs to be extended to detect and suppress tool-call tokens from TTS output.
+**Built-in tools:** `current_time` — returns local date and time.
 
 ---
 
@@ -294,117 +318,82 @@ Useful when the agent's API expects specific input formats, or when responses ar
 
 ---
 
-### 6. Context Summarization
+### 6. Context Summarization ✅ Implemented
 
-**Goal:** Prevent the LLM context window from filling up during long conversations by automatically summarizing old turns.
+**Goal:** Prevent the LLM context window from filling up during long conversations.
 
-**Approach:**
+**Implementation:**
 
-The `LlmSession` accumulated prompt grows without bound. When it approaches the model's context limit:
+Triggered automatically at the end of each pipeline turn, after the assistant response is saved.
 
-1. **Detect:** Track approximate token count (chars / 3.5 is a reasonable estimate). Trigger at ~75% of the configured context window.
-2. **Summarize:** Send the old conversation to the LLM with a summarization prompt:
-   ```
-   Summarize this conversation concisely, preserving all important facts, decisions, and context:
-   [old turns]
-   ```
-3. **Replace:** Reconstruct `accumulated_prompt` as:
-   ```
-   <|im_start|>system
-   {original system prompt}
+- **Detection:** `chars / 3.5 > context_tokens * 75%` — rough token estimate; tunable via `LLM_CONTEXT_TOKENS`
+- **Summarization:** one-shot LLM call (`slot_id: -1`, `temperature: 0.3`) asking to summarize the old turns in the same language as the conversation
+- **Compaction:** `LlmSession::apply_summary()` rebuilds `accumulated_prompt` as:
+  ```
+  <|im_start|>system
+  {original system prompt}
 
-   [CONVERSATION SUMMARY]
-   {summary}
-   <|im_end|>
-   <|im_start|>user
-   {current turn}...
-   ```
-4. **Reset KV-cache:** Set `cache_prompt: false` for the first call after summarization (the prompt has changed structurally, so the old KV-cache is invalid). Then resume `cache_prompt: true`.
+  [CONVERSATION SUMMARY]
+  {summary text}
+  <|im_end|>
+  {last N turns verbatim}
+  ```
+- **Persistence:** summary text and cutoff message ID saved in `sessions.summary` / `sessions.summary_through_id`; on next startup only messages after the cutoff are loaded
 
-**Strategy:** Keep the last N turns verbatim (e.g., last 5) and summarize everything before them. This preserves recent context fully while compressing the distant past.
-
-**Implementation in `LlmSession`:**
-```rust
-impl LlmSession {
-    pub fn needs_summarization(&self, context_limit_tokens: usize) -> bool { ... }
-    pub fn apply_summary(&mut self, summary: &str, keep_recent_turns: usize) { ... }
-}
-```
-
-Summarization is triggered asynchronously between pipeline runs (not during active speech) to avoid adding latency.
-
-**DB persistence:** The summary is stored in the database so that on restart the conversation context is still compact and available.
+**Config:** `LLM_CONTEXT_TOKENS=4096`, `LLM_SUMMARY_KEEP_TURNS=6`
 
 ---
 
-### 7. User Profile Extraction and Injection
+### 7. User Profile Extraction and Injection ✅ Implemented
 
-**Goal:** Automatically learn facts about the user (name, location, job, hobbies, preferences, personality) from conversation, store them persistently, and inject them into every LLM system prompt so the assistant always has personal context.
+**Goal:** Learn facts about the user from conversation and inject them into every system prompt.
 
-**Approach:**
+**Implementation:**
 
-**Extraction (background, after each turn):**
+**Extraction** — `tokio::spawn` fire-and-forget after every completed turn:
+- One-shot LLM call (`slot_id: -1`, `temperature: 0.1`, `n_predict: 256`)
+- Prompt instructs the model to return a JSON array: `[{"key": "name", "value": "Daniel", "confidence": 0.95}]`
+- Keys are normalized to `lowercase_underscores`; markdown code fences stripped before parsing
+- Standard key names suggested in prompt: `name`, `age`, `city`, `job`, `hobby_N`, `skill`, `communication_style`, `personality_trait`, etc.
 
-After the pipeline completes a turn, spawn a background task that sends the last exchange to the LLM with an extraction prompt:
-
-```
-From the following conversation excerpt, extract any new facts about the user.
-Return ONLY a JSON array: [{"key": "name", "value": "Daniel", "confidence": 0.9}]
-If no new facts, return [].
-
-[User]: {transcript}
-[Assistant]: {response}
-```
-
-Facts are stored in a `user_profile` SQLite table:
+**Storage** (`user_profile` table):
 ```sql
 CREATE TABLE user_profile (
-    key       TEXT PRIMARY KEY,   -- "name", "city", "job", "hobby_1", etc.
-    value     TEXT NOT NULL,
-    confidence REAL NOT NULL,
-    source    TEXT,               -- which conversation turn revealed it
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 1.0,
     updated_at TEXT NOT NULL
 );
+-- Upsert: only overwrites if new confidence is strictly higher
 ```
 
-**Profile categories to extract:**
-- **Identity**: name, age, gender, nationality
-- **Location**: city, country, timezone
-- **Professional**: job title, company, field, skills
-- **Personal**: hobbies, interests, family situation, pets
-- **Preferences**: communication style, topics of interest, things they dislike
-- **Psychological**: personality traits inferred from conversation patterns (cautious, curious, direct, etc.)
-
-**Injection into system prompt:**
-
-On startup, load the profile and build a `{{user_context}}` block that is appended to the system prompt:
-
+**Injection** — on startup, facts with `confidence >= 0.5` are formatted and prepended to the system prompt:
 ```
 [USER PROFILE]
-Name: Daniel | City: Madrid | Job: Software Engineer
-Interests: Rust, AI, voice interfaces
-Communication style: direct, technical, prefers Spanish
+name: Daniel
+city: Madrid
+job: software engineer
+hobby_1: Rust
+communication_style: direct, technical
 ```
 
-Low-confidence facts (< 0.5) are omitted or marked as uncertain. Facts are updated if contradicted by new information.
-
-**Privacy note:** All profile data stays local in SQLite. No data leaves the machine.
+**Privacy:** all data stays local in SQLite. Nothing leaves the machine.
 
 ---
 
-## Implementation Priority
+## Implementation Status
 
-| Priority | Feature | Effort | Impact |
-|----------|---------|--------|--------|
-| 1 | User profile extraction + injection | Medium | High — improves every conversation immediately |
-| 2 | Context summarization | Medium | High — essential for long-running sessions |
-| 3 | Tool use (function calling) | High | High — unlocks real-world utility |
-| 4 | MCP integration | Medium | High — huge tool ecosystem for free |
-| 5 | Proactive conversations | Medium | Medium — needed for async agents |
-| 6 | Agent delegation | High | Medium — depends on tool use + proactive |
-| 7 | Agent intermediary | Low | Medium — relatively simple once agents work |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Tool use (`current_time`) | ✅ Done | XML-based detection, extensible `Tool` trait |
+| Context summarization | ✅ Done | Auto-trigger at 75% context; persisted in DB |
+| User profile extraction + injection | ✅ Done | Background LLM extraction; `user_profile` table |
+| MCP integration | Planned | `src/mcp/` module; JSON-RPC over stdio/HTTP |
+| Agent delegation | Planned | Depends on tool use + proactive events |
+| Proactive conversations | Planned | `tokio::select!` proactive channel + idle timer |
+| Agent intermediary | Planned | Voice proxy for existing text agents |
 
-Features 1 and 2 are self-contained improvements to the existing pipeline and can be implemented without touching the tool/agent layer. Features 3–7 form a dependency chain: tools → MCP → agents → proactive → intermediary.
+Pending features form a dependency chain: MCP → agent delegation → proactive conversations → intermediary.
 
 ---
 

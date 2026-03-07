@@ -84,4 +84,5 @@ exec llama-server \
     --mlock \
     --parallel 1 \
     --repeat-penalty 1.1 \
+    --reasoning-budget 0 \
     --verbose
