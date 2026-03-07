@@ -34,6 +34,13 @@ pub struct Config {
     /// macOS `say` voice name (SAY_VOICE). List with: say -v ?
     pub say_voice: String,
 
+    // ── Context summarization ─────────────────────────────────────────────────
+    /// Approximate context window of the LLM model in tokens.
+    /// Summarization triggers when the prompt exceeds 75% of this limit.
+    pub llm_context_tokens: usize,
+    /// Number of most-recent (role, content) turns to keep verbatim after summarization.
+    pub llm_summary_keep_turns: usize,
+
     // ── Persistence ───────────────────────────────────────────────────────────
     pub db_path: String,
 }
@@ -92,6 +99,16 @@ impl Config {
             // TTS
             say_voice: env::var("SAY_VOICE")
                 .unwrap_or_else(|_| "Marisol (Enhanced)".to_string()),
+
+            // Context summarization
+            llm_context_tokens: env::var("LLM_CONTEXT_TOKENS")
+                .unwrap_or_else(|_| "4096".to_string())
+                .parse()
+                .context("Invalid LLM_CONTEXT_TOKENS")?,
+            llm_summary_keep_turns: env::var("LLM_SUMMARY_KEEP_TURNS")
+                .unwrap_or_else(|_| "6".to_string())
+                .parse()
+                .context("Invalid LLM_SUMMARY_KEEP_TURNS")?,
 
             // DB
             db_path: env::var("DB_PATH")

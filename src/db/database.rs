@@ -38,11 +38,24 @@ impl Database {
                 id TEXT PRIMARY KEY,
                 created_at TEXT NOT NULL,
                 closed_at TEXT,
-                is_active INTEGER NOT NULL DEFAULT 1
+                is_active INTEGER NOT NULL DEFAULT 1,
+                summary TEXT,
+                summary_through_id INTEGER NOT NULL DEFAULT 0
             )",
         )
         .execute(&self.pool)
         .await?;
+
+        // Additive migration: add summary columns to existing databases.
+        // SQLite does not support IF NOT EXISTS for ADD COLUMN, so we ignore the error.
+        let _ = sqlx::query("ALTER TABLE sessions ADD COLUMN summary TEXT")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query(
+            "ALTER TABLE sessions ADD COLUMN summary_through_id INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&self.pool)
+        .await;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS messages (
@@ -67,7 +80,6 @@ impl Database {
     }
 
     /// Return the last active session ID, or create a new one.
-    /// This is the main entry point on startup — restores conversation context.
     pub async fn get_or_create_session(&self) -> Result<Uuid> {
         let row = sqlx::query(
             "SELECT id FROM sessions WHERE is_active = 1 ORDER BY created_at DESC LIMIT 1",
@@ -98,26 +110,93 @@ impl Database {
         Ok(())
     }
 
-    /// Load all text messages for a session as (role, content) pairs.
-    /// Used to reconstruct the LLM accumulated prompt on startup.
-    pub async fn get_session_messages(&self, session_id: Uuid) -> Result<Vec<(String, String)>> {
-        let rows = sqlx::query(
-            "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id ASC",
+    /// Load the session's summary (if any) and the messages after the summary cutoff.
+    ///
+    /// Returns `(summary_text, recent_messages)`. If no summary exists, all messages
+    /// are returned. Used on startup to restore the LLM session efficiently.
+    pub async fn get_session_context(
+        &self,
+        session_id: Uuid,
+    ) -> Result<(Option<String>, Vec<(String, String)>)> {
+        let row = sqlx::query(
+            "SELECT summary, summary_through_id FROM sessions WHERE id = ?",
         )
         .bind(session_id.to_string())
+        .fetch_one(&self.pool)
+        .await?;
+
+        let summary: Option<String> = row.try_get("summary")?;
+        let through_id: i64 = row.try_get("summary_through_id").unwrap_or(0);
+
+        let messages = self.get_messages_after_id(session_id, through_id).await?;
+        Ok((summary, messages))
+    }
+
+    /// Load messages with id > after_id. If after_id is 0, loads all messages.
+    pub async fn get_messages_after_id(
+        &self,
+        session_id: Uuid,
+        after_id: i64,
+    ) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query(
+            "SELECT role, content FROM messages
+             WHERE session_id = ? AND id > ?
+             ORDER BY id ASC",
+        )
+        .bind(session_id.to_string())
+        .bind(after_id)
         .fetch_all(&self.pool)
         .await?;
 
-        let messages = rows
+        Ok(rows
             .into_iter()
             .map(|row| {
                 let role: String = row.try_get("role").unwrap_or_default();
                 let content: String = row.try_get("content").unwrap_or_default();
                 (role, content)
             })
-            .collect();
+            .collect())
+    }
 
-        Ok(messages)
+    /// Return the message id at a 0-based offset within a session (ordered by id ASC).
+    ///
+    /// Used to determine the cutoff point before saving a summary: the summary covers
+    /// all messages up to and including this id.
+    pub async fn get_message_id_at_offset(
+        &self,
+        session_id: Uuid,
+        offset: usize,
+    ) -> Result<Option<i64>> {
+        let row = sqlx::query(
+            "SELECT id FROM messages WHERE session_id = ? ORDER BY id ASC LIMIT 1 OFFSET ?",
+        )
+        .bind(session_id.to_string())
+        .bind(offset as i64)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| r.try_get::<i64, _>("id").unwrap_or(0)))
+    }
+
+    /// Persist the conversation summary and the id of the last summarized message.
+    ///
+    /// On the next startup, only messages with id > through_message_id will be loaded,
+    /// and the summary will be injected into the system prompt.
+    pub async fn save_summary(
+        &self,
+        session_id: Uuid,
+        summary: &str,
+        through_message_id: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE sessions SET summary = ?, summary_through_id = ? WHERE id = ?",
+        )
+        .bind(summary)
+        .bind(through_message_id)
+        .bind(session_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Persist a single message turn.
@@ -137,13 +216,11 @@ impl Database {
 
     pub async fn close_session(&self, session_id: Uuid) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "UPDATE sessions SET closed_at = ?, is_active = 0 WHERE id = ?",
-        )
-        .bind(now)
-        .bind(session_id.to_string())
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("UPDATE sessions SET closed_at = ?, is_active = 0 WHERE id = ?")
+            .bind(now)
+            .bind(session_id.to_string())
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

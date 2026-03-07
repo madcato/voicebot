@@ -64,8 +64,12 @@ async fn main() -> Result<()> {
     // ── Database ─────────────────────────────────────────────────────────────
     let db = Database::new(&config.db_path).await?;
     let session_id = db.get_or_create_session().await?;
-    let history = db.get_session_messages(session_id).await?;
-    info!("Loaded {} messages from history", history.len());
+    let (summary, history) = db.get_session_context(session_id).await?;
+    info!(
+        "Loaded {} messages from history (summary: {})",
+        history.len(),
+        if summary.is_some() { "yes" } else { "no" }
+    );
 
     // ── LLM session ───────────────────────────────────────────────────────────
     // Append tool instructions to the system prompt so the LLM knows how to call tools.
@@ -73,6 +77,7 @@ async fn main() -> Result<()> {
     let llm_session = Arc::new(Mutex::new(LlmSession::from_history(
         &system_prompt,
         config.llm_slot_id,
+        summary.as_deref(),
         &history,
     )));
 
@@ -182,14 +187,16 @@ async fn main() -> Result<()> {
 
                         cancel.store(false, Ordering::SeqCst);
 
-                        let cancel_c      = Arc::clone(&cancel);
-                        let stt_c         = Arc::clone(&stt);
-                        let tts_c         = Arc::clone(&tts);
-                        let audio_out_c   = Arc::clone(&audio_output);
-                        let llm_session_c = Arc::clone(&llm_session);
-                        let llm_client_c  = llm_client.clone();
-                        let db_c          = db.clone();
-                        let tools_c       = Arc::clone(&tools);
+                        let cancel_c        = Arc::clone(&cancel);
+                        let stt_c           = Arc::clone(&stt);
+                        let tts_c           = Arc::clone(&tts);
+                        let audio_out_c     = Arc::clone(&audio_output);
+                        let llm_session_c   = Arc::clone(&llm_session);
+                        let llm_client_c    = llm_client.clone();
+                        let db_c            = db.clone();
+                        let tools_c         = Arc::clone(&tools);
+                        let context_tokens  = config.llm_context_tokens;
+                        let keep_turns      = config.llm_summary_keep_turns;
 
                         pipeline_handle = Some(tokio::spawn(async move {
                             run_pipeline(
@@ -204,6 +211,8 @@ async fn main() -> Result<()> {
                                 session_id,
                                 tts_sample_rate,
                                 tools_c,
+                                context_tokens,
+                                keep_turns,
                             )
                             .await;
                         }));
@@ -325,6 +334,8 @@ async fn run_pipeline(
     session_id: Uuid,
     tts_sample_rate: u32,
     tools: Arc<ToolRegistry>,
+    context_tokens: usize,
+    summary_keep_turns: usize,
 ) {
     macro_rules! check_cancel {
         () => {
@@ -431,4 +442,82 @@ async fn run_pipeline(
     }
 
     llm_session.lock().unwrap().add_assistant_turn(&final_response);
+
+    // ── Context summarization (runs after the turn is complete) ───────────────
+    maybe_summarize(&llm_session, &llm_client, &db, session_id, context_tokens, summary_keep_turns).await;
+}
+
+/// Summarize old conversation turns if the prompt is approaching the context limit.
+///
+/// Runs after every completed pipeline turn. Builds a summary of old turns,
+/// injects it into the session prompt, and persists it to the DB so future
+/// restarts can restore the compact context.
+async fn maybe_summarize(
+    llm_session: &Arc<Mutex<LlmSession>>,
+    llm_client: &LlamaClient,
+    db: &Database,
+    session_id: Uuid,
+    context_tokens: usize,
+    keep_turns: usize,
+) {
+    let needs = llm_session.lock().unwrap().needs_summarization(context_tokens);
+    if !needs {
+        return;
+    }
+
+    let (summary_prompt, turns_to_summarize) = {
+        let s = llm_session.lock().unwrap();
+        let prompt = s.build_summary_prompt(keep_turns);
+        let count = s.summarizable_turn_count(keep_turns);
+        (prompt, count)
+    };
+
+    let Some(prompt) = summary_prompt else {
+        return;
+    };
+
+    info!("Context limit approaching — summarizing {} old turns...", turns_to_summarize);
+
+    let summary = match llm_client.complete(&prompt).await {
+        Ok(s) if !s.is_empty() => s,
+        Ok(_) => {
+            warn!("Summarization returned empty result, skipping");
+            return;
+        }
+        Err(e) => {
+            warn!("Summarization failed: {}", e);
+            return;
+        }
+    };
+
+    info!("Summary: {}", summary);
+
+    // Find the DB message id of the last turn that is being summarized.
+    // Each turn in `turns` corresponds to one row in messages (alternating User/Assistant),
+    // so the last summarized message is at 0-based offset (turns_to_summarize - 1).
+    let through_id = match db
+        .get_message_id_at_offset(session_id, turns_to_summarize - 1)
+        .await
+    {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            warn!("Could not find message offset for summary cutpoint, skipping");
+            return;
+        }
+        Err(e) => {
+            warn!("DB error finding summary cutpoint: {}", e);
+            return;
+        }
+    };
+
+    if let Err(e) = db.save_summary(session_id, &summary, through_id).await {
+        warn!("Failed to persist summary: {}", e);
+    }
+
+    llm_session.lock().unwrap().apply_summary(&summary, keep_turns);
+
+    info!(
+        "Summarization complete — prompt compacted (keeping {} recent turns)",
+        keep_turns
+    );
 }

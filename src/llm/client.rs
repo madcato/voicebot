@@ -99,6 +99,40 @@ impl LlamaClient {
         Ok(rx)
     }
 
+    /// One-shot (non-streaming) completion. Used for summarization.
+    ///
+    /// Sends `cache_prompt: false` and `slot_id: -1` so it does not interfere
+    /// with the main conversation's KV-cache slot.
+    pub async fn complete(&self, prompt: &str) -> Result<String> {
+        let payload = serde_json::json!({
+            "prompt": prompt,
+            "n_predict": 512,
+            "cache_prompt": false,
+            "slot_id": -1,
+            "temperature": 0.3,
+            "stream": false,
+            "stop": ["<|im_end|>", "<|im_start|>"],
+        });
+
+        let response = self
+            .client
+            .post(&self.completion_url)
+            .json(&payload)
+            .send()
+            .await
+            .context("Failed to reach llama.cpp server for summarization")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("llama.cpp summarization error {}: {}", status, body);
+        }
+
+        let json: serde_json::Value = response.json().await?;
+        let text = json["content"].as_str().unwrap_or("").trim().to_string();
+        Ok(text)
+    }
+
     /// Check if the llama.cpp server is reachable.
     pub async fn health_check(&self, base_url: &str) -> bool {
         let url = format!("{}/health", base_url.trim_end_matches('/'));
