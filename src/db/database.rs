@@ -6,6 +6,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 /// SQLite database for persistent chat history.
+#[derive(Clone)]
 pub struct Database {
     pool: SqlitePool,
 }
