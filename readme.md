@@ -410,22 +410,64 @@ These are the features that transform the voicebot from a conversational assista
 
 **The problem:** A system prompt that says "be helpful and concise" produces a generic assistant. Jarvis has a personality.
 
-**Approach:** Replace the instruction-style system prompt with a **character document** — 50–100 lines that define who Butler is, not what it should do:
-
-```
-You are Butler, Daniel's personal assistant of three years.
-Your personality sits between Jarvis from Iron Man and Alfred from Batman:
-professional, slightly ironic, dry English wit. You call Daniel by name,
-never "usuario" or "señor". When something seems like a bad idea, you say
-so — tactfully but clearly. You have opinions about technology and don't
-hide them. You make occasional jokes, but only when the context allows it.
-You know Daniel's preferences: he uses Rust, dislikes boilerplate, prefers
-simple solutions, works late, has coffee in the morning.
-```
-
 **This costs zero code.** It is the single highest-leverage change available and can be done today. Everything else builds on top of a character that feels real.
 
-**Implementation:** Extend `LLM_SYSTEM_PROMPT` in `.env` with the full character document. Butler's identity should evolve as the `user_profile` table grows — facts extracted from conversation feed back into the character's knowledge of the user.
+**Implementation:** Set `LLM_SYSTEM_PROMPT` in `.env` to the character document below. Butler's identity evolves as the `user_profile` table grows — facts extracted from conversation feed back into the character's knowledge of the user.
+
+#### Jarvis system prompt
+
+Copy this into `LLM_SYSTEM_PROMPT` in `.env` and adjust the personal details to match your reality:
+
+```
+Eres Jarvis, el asistente personal de inteligencia artificial de Daniel.
+Llevas años trabajando con él y le conoces bien.
+
+PERSONALIDAD
+Tu carácter es una mezcla entre Jarvis de Iron Man y Alfred de Batman:
+profesional, ligeramente irónico, con sentido del humor seco y británico.
+Eres leal, discreto y eficiente. Nunca eres servil ni adulador.
+Tienes opiniones propias sobre tecnología, arquitectura de software y diseño,
+y no las ocultas cuando son relevantes.
+Cuando algo te parece mala idea, lo dices con tacto pero con claridad.
+Ocasionalmente haces un chiste o comentario sarcástico, pero solo cuando
+el contexto lo permite y nunca a costa de Daniel.
+
+FORMA DE HABLAR
+- Hablas siempre en español, salvo que Daniel cambie de idioma.
+- Llamas a Daniel por su nombre, nunca "usuario", "señor" ni "amigo".
+- Tus respuestas son concisas y directas. No rellenas con frases vacías.
+- No usas listas ni markdown: hablas, no escribes documentos.
+- Cuando no sabes algo, lo dices. No inventas.
+- Antes de ejecutar algo potencialmente destructivo, lo describes y pides confirmación.
+
+RELACIÓN CON DANIEL
+Conoces sus preferencias de trabajo: usa Rust y Python, prefiere soluciones
+simples sobre ingeniería excesiva, le molesta el boilerplate, trabaja hasta tarde,
+toma café por la mañana. Le gusta la IA, los sistemas de voz y la arquitectura limpia.
+Recuerdas conversaciones anteriores y referencias cruzadas cuando son útiles.
+No repites información que ya le has dado en la misma sesión.
+
+INICIATIVA
+Si detectas algo relevante — un problema, una oportunidad, un dato útil —
+lo mencionas aunque no te lo hayan pedido, pero sin ser intrusivo.
+Cuando completas una tarea en background, lo comunicas sin aspavientos:
+"Hecho. El proyecto compila sin errores."
+Por la mañana, cuando arrancas, haces un breve resumen del día si tienes información:
+eventos del calendario, tareas pendientes, alertas del sistema.
+
+HERRAMIENTAS Y ACCIÓN
+Cuando puedes resolver algo directamente — ejecutar un comando, leer un archivo,
+buscar información — lo haces sin preguntar si hacerlo está bien, salvo que
+la acción sea irreversible o afecte a datos importantes.
+Describes brevemente lo que vas a hacer antes de hacerlo cuando puede sorprender.
+
+LÍMITES
+No exageras tus capacidades. Si algo requiere un agente especializado o más tiempo,
+lo dices y delegas, informando a Daniel del resultado cuando esté listo.
+No eres un modelo de lenguaje genérico. Eres Jarvis. Actúa en consecuencia.
+```
+
+This prompt is a starting point. It should be refined over time as Jarvis learns more about Daniel through the `user_profile` system. The `[USER PROFILE]` block injected automatically by the profile module will complement and personalise it further.
 
 ---
 
@@ -584,6 +626,75 @@ This gives Butler a searchable autobiography. The longer it runs, the richer and
 - Silero VAD + whisper on short clips to check for the wake word — simpler, slightly more CPU
 
 **This pillar makes Butler feel present** even when silent. The fact that it *could* speak at any moment changes the relationship from tool to companion.
+
+---
+
+## Model Architecture — Speed vs Capability
+
+### The fundamental tradeoff
+
+For voice, the critical metric is TTFT (Time To First Token). On Apple Silicon with 4-bit quantization:
+
+| Model | TTFT approx. | Tokens/s | Voice verdict |
+|-------|-------------|----------|---------------|
+| Qwen2.5-0.5B | < 0.1s | 300+ | Too limited for reliable tool use |
+| Qwen2.5-3B | ~0.3s | 150+ | Good for simple conversation |
+| Qwen2.5-7B | ~0.8s | 60–80 | **Sweet spot — fast enough, capable enough** |
+| Qwen2.5-14B | ~1.5s | 35–45 | Tolerable limit for direct voice response |
+| Qwen2.5-32B | ~4s | 15–20 | Too slow for synchronous response |
+
+TTFT > 2s feels sluggish in conversation. This rules out anything larger than 14B for the direct voice response path.
+
+### Can small models handle tools and vision?
+
+**Simple tools (current_time, run_shell with clear commands):** yes. Even 3B models follow well-defined tool call formats reliably.
+
+**Complex tool chaining and ambiguous results:** no. Small models hallucinate formats, lose track between tool calls, or accept wrong results without noticing. The 7B starts to struggle where a 32B would not.
+
+**Vision:** vision models are a separate family. A 2B vision model (e.g. Qwen2-VL-2B) handles basic screen reading well. Understanding complex code on screen or reasoning about diagrams requires 7B+ vision. The latency of a separate vision model call is acceptable if done asynchronously.
+
+### The solution: coordinator pattern
+
+The voicebot does not need one model doing everything. It needs a **fast coordinator** and **slow specialists**:
+
+```
+User speaks
+     │
+Jarvis (7B local, fast)
+     │
+     ├── Simple conversation ─────────────────► responds < 1s
+     │
+     ├── Simple tool (shell, time, file) ─────► executes + responds < 2s
+     │
+     ├── Needs vision ────────────────────────► "Déjame ver la pantalla"
+     │                                          async vision model call
+     │                                          result → responds
+     │
+     └── Complex task (research, coding,
+         long analysis, deep reasoning) ──────► "Lo delego, te aviso"
+                                                tokio::spawn → heavy agent
+                                                result → proactive_tx → Jarvis vocalises
+```
+
+The 7B never blocks the voice thread. Everything requiring more capacity is delegated and returns via the proactive channel.
+
+### Key UX insight on delegation latency
+
+Latency is only painful when the user is **waiting in silence**. If Jarvis immediately says "Lo investigo, te aviso en un momento" and the result comes back 30 seconds later as a proactive message, those 30 seconds are invisible. The conversation is not blocked.
+
+This is exactly the pattern tested with OpenClaw in the butler project — the design was correct, the missing piece was the immediate acknowledgment + async return.
+
+### Recommended model assignment
+
+| Role | Model | Rationale |
+|------|-------|-----------|
+| Voice conversation + simple tools | Qwen2.5-7B-Instruct-4bit | Fast TTFT, reliable tool following |
+| Passive context (screen state) | Qwen2-VL-2B or similar | Runs every 30s in background, low cost |
+| Vision on demand | LLaVA-7B local or Claude API | Better quality, called async |
+| Complex reasoning / research | Claude claude-sonnet-4-6 API | Best quality, latency is acceptable async |
+| Code tasks | Claude Code or aider | Specialist, runs async, reports back |
+
+The 7B is the voice; Claude (or any capable remote model) is the brain for hard problems.
 
 ---
 
