@@ -17,6 +17,7 @@ impl LlamaClient {
         Self {
             client: reqwest::Client::new(),
             completion_url: format!("{}/completion", base_url.trim_end_matches('/')),
+            // completion_url: format!("{}/v1/chat/completions", base_url.trim_end_matches('/')), // for mlx-lm
             max_tokens,
             temperature,
         }
