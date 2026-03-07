@@ -2,6 +2,7 @@ pub mod audio;
 pub mod config;
 pub mod db;
 pub mod llm;
+pub mod profile;
 pub mod stt;
 pub mod tools;
 pub mod tts;

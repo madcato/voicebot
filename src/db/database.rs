@@ -76,6 +76,18 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        // User profile: one row per fact key, updated in place.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS user_profile (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 1.0,
+                updated_at TEXT NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -221,6 +233,56 @@ impl Database {
             .bind(session_id.to_string())
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    // ── User profile ──────────────────────────────────────────────────────────
+
+    /// Load all profile facts ordered by key.
+    pub async fn load_user_profile(&self) -> Result<Vec<(String, String, f64)>> {
+        let rows = sqlx::query(
+            "SELECT key, value, confidence FROM user_profile ORDER BY key ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let key: String = r.try_get("key").unwrap_or_default();
+                let value: String = r.try_get("value").unwrap_or_default();
+                let confidence: f64 = r.try_get("confidence").unwrap_or(1.0);
+                (key, value, confidence)
+            })
+            .collect())
+    }
+
+    /// Insert or update a profile fact.
+    ///
+    /// An existing fact is only overwritten when the new confidence is strictly
+    /// higher — this prevents low-quality inferences from degrading confirmed facts.
+    pub async fn upsert_profile_fact(
+        &self,
+        key: &str,
+        value: &str,
+        confidence: f64,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO user_profile (key, value, confidence, updated_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET
+                 value      = excluded.value,
+                 confidence = excluded.confidence,
+                 updated_at = excluded.updated_at
+             WHERE excluded.confidence > user_profile.confidence",
+        )
+        .bind(key)
+        .bind(value)
+        .bind(confidence)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 

@@ -99,6 +99,37 @@ impl LlamaClient {
         Ok(rx)
     }
 
+    /// One-shot completion with a short token budget. Used for structured
+    /// extractions (profile facts, etc.) that produce brief outputs.
+    pub async fn complete_short(&self, prompt: &str) -> Result<String> {
+        let payload = serde_json::json!({
+            "prompt": prompt,
+            "n_predict": 256,
+            "cache_prompt": false,
+            "slot_id": -1,
+            "temperature": 0.1,
+            "stream": false,
+            "stop": ["<|im_end|>", "<|im_start|>"],
+        });
+
+        let response = self
+            .client
+            .post(&self.completion_url)
+            .json(&payload)
+            .send()
+            .await
+            .context("Failed to reach llama.cpp server for extraction")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("llama.cpp extraction error {}: {}", status, body);
+        }
+
+        let json: serde_json::Value = response.json().await?;
+        Ok(json["content"].as_str().unwrap_or("").trim().to_string())
+    }
+
     /// One-shot (non-streaming) completion. Used for summarization.
     ///
     /// Sends `cache_prompt: false` and `slot_id: -1` so it does not interfere

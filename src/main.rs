@@ -2,6 +2,7 @@ mod audio;
 mod config;
 mod db;
 mod llm;
+mod profile;
 mod stt;
 mod tools;
 mod tts;
@@ -24,6 +25,7 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::llm::{LlamaClient, LlmSession};
 use crate::stt::WhisperStt;
+use crate::profile::{build_profile_context, extract_facts, ProfileFact};
 use crate::tools::{CurrentTimeTool, ToolRegistry};
 use crate::tts::{SayTts, SentenceSplitter};
 
@@ -71,9 +73,25 @@ async fn main() -> Result<()> {
         if summary.is_some() { "yes" } else { "no" }
     );
 
+    // ── User profile ──────────────────────────────────────────────────────────
+    let profile_facts: Vec<ProfileFact> = db
+        .load_user_profile()
+        .await?
+        .into_iter()
+        .map(|(key, value, confidence)| ProfileFact { key, value, confidence })
+        .collect();
+    if !profile_facts.is_empty() {
+        info!("Loaded {} user profile facts", profile_facts.len());
+    }
+
     // ── LLM session ───────────────────────────────────────────────────────────
-    // Append tool instructions to the system prompt so the LLM knows how to call tools.
-    let system_prompt = format!("{}{}", config.llm_system_prompt, tools.system_prompt_section());
+    // System prompt = base + user profile context + tool instructions.
+    let system_prompt = format!(
+        "{}{}{}",
+        config.llm_system_prompt,
+        build_profile_context(&profile_facts),
+        tools.system_prompt_section()
+    );
     let llm_session = Arc::new(Mutex::new(LlmSession::from_history(
         &system_prompt,
         config.llm_slot_id,
@@ -443,8 +461,27 @@ async fn run_pipeline(
 
     llm_session.lock().unwrap().add_assistant_turn(&final_response);
 
-    // ── Context summarization (runs after the turn is complete) ───────────────
+    // ── Context summarization ─────────────────────────────────────────────────
     maybe_summarize(&llm_session, &llm_client, &db, session_id, context_tokens, summary_keep_turns).await;
+
+    // ── User profile extraction (fire-and-forget background task) ─────────────
+    // Spawned after the turn is fully committed so it never delays the next response.
+    {
+        let llm_client_c = llm_client.clone();
+        let db_c = db.clone();
+        let transcript_c = transcript.clone();
+        let response_c = final_response.clone();
+        tokio::spawn(async move {
+            let facts = extract_facts(&llm_client_c, &transcript_c, &response_c).await;
+            for fact in facts {
+                if let Err(e) = db_c.upsert_profile_fact(&fact.key, &fact.value, fact.confidence).await {
+                    warn!("Failed to save profile fact '{}': {}", fact.key, e);
+                } else {
+                    debug!("Profile: {} = {} ({:.0}%)", fact.key, fact.value, fact.confidence * 100.0);
+                }
+            }
+        });
+    }
 }
 
 /// Summarize old conversation turns if the prompt is approaching the context limit.
