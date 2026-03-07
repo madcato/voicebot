@@ -1,219 +1,428 @@
 # Voicebot
 
-A voice AI chatbot built in Rust using Speech-to-Speech (S2S) models for natural voice interactions.
+A voice AI assistant built in Rust — real-time speech-to-speech pipeline with barge-in, persistent memory, and extensible tool/agent integration.
 
-## Overview
+---
 
-Voicebot is a mono-user voice assistant that provides AI-powered conversational capabilities with tool integration and external agent support. It leverages modern S2S models for seamless voice-to-voice communication.
+## Current State
 
-## Features
+The core pipeline is fully operational:
 
-- **Speech-to-Speech Models**: Direct voice-to-voice interaction using state-of-the-art S2S models
-- **Tool Integration**: Extensible tool system via Model Context Protocol (MCP)
-- **External Agents**: Integration with external agents like OpenClaw
-- **Local Data Storage**: SQLite database for persistent user data
-- **Mono-user Design**: Optimized for single-user experience
+```
+Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → SentenceSplitter → macOS say TTS → Speaker
+```
+
+**Implemented features:**
+- Real-time voice capture (CPAL), Silero VAD with pre-roll buffer
+- Whisper.cpp STT (Metal GPU, state cached across utterances)
+- Streaming LLM via llama.cpp HTTP (`cache_prompt=true`, KV-cache reuse across turns)
+- Sentence-by-sentence TTS playback — first sentence plays while next is being generated
+- **Barge-in**: user speech cancels active LLM/TTS pipeline instantly via `Arc<AtomicBool>`
+- Persistent SQLite conversation history — restored on startup
+- LLM session rollback on barge-in interruption
+
+---
 
 ## Architecture
 
-- **Language**: Rust
-- **Database**: SQLite
-- **AI Models**: S2S (Speech-to-Speech)
-- **Protocol**: MCP (Model Context Protocol) for tool integration
+### Current pipeline
 
-### System Architecture Diagram
-
-```mermaid
-graph TB
-    %% Input Layer
-    MIC[Microphone] -->|Audio Stream| VAD[Voice Activity Detector]
-    VAD -->|Active Speech| AUDIO_BUF[Audio Buffer]
-    
-    %% Session Management
-    AUDIO_BUF -->|Audio Chunks| SESSION[Session Manager]
-    SESSION -->|Manage Context| DB[(SQLite Database)]
-    SESSION -->|Session State| HISTORY[Conversation History]
-    
-    %% S2S Model Layer with Adapter Pattern
-    SESSION -->|Audio Input| ADAPTER[S2S Model Adapter]
-    
-    subgraph S2S_MODELS[Interchangeable S2S Models]
-        LLAMA_OMNI[LLaMA-Omni]
-        MOSHI[Moshi]
-        ULTRAVOX[Ultravox]
-        LFM[LFM2.5-Audio]
-    end
-    
-    ADAPTER -.->|Load Model| S2S_MODELS
-    S2S_MODELS -.->|Model Interface| ADAPTER
-    
-    %% Tool Integration
-    ADAPTER <-->|Tool Calls| TOOL_ROUTER[Tool Router]
-    TOOL_ROUTER <-->|MCP Protocol| MCP_SERVER[MCP Server]
-    
-    subgraph TOOLS[Available Tools]
-        TOOL1[File Operations]
-        TOOL2[Web Search]
-        TOOL3[Calendar]
-        TOOL4[Custom Tools]
-    end
-    
-    MCP_SERVER <-->|Execute| TOOLS
-    
-    %% External Agents
-    TOOL_ROUTER <-->|Agent Protocol| AGENTS[External Agents]
-    
-    subgraph EXT_AGENTS[External Agents]
-        OPENCLAW[OpenClaw]
-        AGENT2[Other Agents]
-    end
-    
-    AGENTS <--> EXT_AGENTS
-    
-    %% Output Layer
-    ADAPTER -->|Audio Response| AUDIO_PROC[Audio Processor]
-    AUDIO_PROC -->|Processed Audio| SPEAKER[Speaker]
-    
-    %% Tool Results Flow
-    TOOLS -.->|Results| MCP_SERVER
-    MCP_SERVER -.->|Tool Output| TOOL_ROUTER
-    TOOL_ROUTER -.->|Context Update| ADAPTER
-    
-    %% Styling
-    classDef hardware fill:#e1f5ff,stroke:#01579b,stroke-width:2px
-    classDef processing fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
-    classDef storage fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px
-    classDef models fill:#fff3e0,stroke:#e65100,stroke-width:2px
-    classDef tools fill:#fce4ec,stroke:#880e4f,stroke-width:2px
-    classDef agents fill:#e0f2f1,stroke:#004d40,stroke-width:2px
-    
-    class MIC,SPEAKER hardware
-    class VAD,AUDIO_BUF,AUDIO_PROC,SESSION processing
-    class DB,HISTORY storage
-    class ADAPTER,S2S_MODELS,LLAMA_OMNI,MOSHI,ULTRAVOX,LFM models
-    class TOOL_ROUTER,MCP_SERVER,TOOLS,TOOL1,TOOL2,TOOL3,TOOL4 tools
-    class AGENTS,EXT_AGENTS,OPENCLAW,AGENT2 agents
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  VAD loop (tokio, non-blocking)                                 │
+│                                                                  │
+│  Mic → VAD ──SpeechEnd──► spawn pipeline task ──────────────►  │
+│              │                                                   │
+│              └──SpeechStart──► cancel flag + abort task         │
+└─────────────────────────────────────────────────────────────────┘
+                                  │
+                         pipeline task (async)
+                                  │
+                    ┌─────────────▼─────────────┐
+                    │  STT (spawn_blocking)      │
+                    │  Whisper.cpp + Metal GPU   │
+                    └─────────────┬─────────────┘
+                                  │  transcript
+                    ┌─────────────▼─────────────┐
+                    │  LLM (streaming HTTP SSE)  │
+                    │  llama.cpp, cache_prompt   │
+                    └─────────────┬─────────────┘
+                                  │  tokens → sentences
+                    ┌─────────────▼─────────────┐
+                    │  TTS (macOS say)           │
+                    │  sentence-by-sentence      │
+                    └─────────────┬─────────────┘
+                                  │  f32 PCM
+                    ┌─────────────▼─────────────┐
+                    │  AudioOutput (CPAL)        │
+                    │  resample + play_blocking  │
+                    └───────────────────────────┘
 ```
 
-### Component Responsibilities
+### Key modules
 
-| Component | Description |
-|-----------|-------------|
-| **Microphone** | Captures raw audio input from the user |
-| **Voice Activity Detector (VAD)** | Detects when the user is speaking vs. silence |
-| **Audio Buffer** | Temporarily stores audio chunks for processing |
-| **Session Manager** | Manages conversation state, context, and user sessions |
-| **S2S Model Adapter** | Abstraction layer for interchangeable S2S models |
-| **S2S Models** | Pluggable speech-to-speech models (LLaMA-Omni, Moshi, etc.) |
-| **Tool Router** | Routes tool calls between the S2S model and available tools |
-| **MCP Server** | Implements Model Context Protocol for tool integration |
-| **Tools** | Various capabilities (file ops, web search, calendar, etc.) |
-| **External Agents** | Integration with external AI agents like OpenClaw |
-| **Audio Processor** | Post-processes audio response before output |
-| **Speaker** | Outputs audio responses to the user |
-| **SQLite Database** | Persists conversation history and user data |
+| Module | File | Description |
+|--------|------|-------------|
+| Audio capture | `src/audio/audio_capture.rs` | CPAL mic input, normalizes to f32 |
+| VAD | `src/audio/vad.rs` | Silero energy VAD, pre-roll buffer |
+| Audio buffer | `src/audio/buffer.rs` | Accumulates speech chunks |
+| Audio output | `src/audio/output.rs` | CPAL playback, resample, cancel support |
+| STT | `src/stt/whisper.rs` | whisper-rs, cached WhisperState (no Metal re-init) |
+| LLM client | `src/llm/client.rs` | Streaming SSE client for llama.cpp |
+| LLM session | `src/llm/session.rs` | Accumulated prompt + KV-cache state |
+| TTS | `src/tts/say.rs` | macOS `say` subprocess, WAV parsing |
+| Sentence splitter | `src/tts/sentence.rs` | Buffers tokens, emits complete sentences |
+| Database | `src/db/database.rs` | SQLite via sqlx, sessions + messages |
+| Config | `src/config.rs` | Environment-based configuration |
+| Main loop | `src/main.rs` | VAD loop + barge-in + pipeline orchestration |
 
-### Data Flow
-
-1. **Input Path**: Microphone → VAD → Audio Buffer → Session Manager → S2S Adapter → Model
-2. **Tool Execution**: Model → Tool Router → MCP Server → Tools → Results back to Model
-3. **Agent Interaction**: Model → Tool Router → External Agents → Results back to Model
-4. **Output Path**: Model → S2S Adapter → Audio Processor → Speaker
-5. **Persistence**: Session Manager ↔ SQLite Database (continuous state management)
-
-## Available Open Source S2S Models
-
-The following open source Speech-to-Speech models can be run locally:
-
-### Production-Ready Models
-
-- **[LFM2.5-Audio](https://huggingface.co/LiquidAI/LFM2.5-Audio-1.5B)** - LFM2.5-Audio-1.5B is Liquid AI's updated end-to-end audio foundation model. Key improvements include a custom, LFM based audio detokenizer, llama.cpp compatible GGUFs for CPU inference, and better ASR and TTS performance.
-- **[LLaMA-Omni](https://github.com/ictnlp/llama-omni)** - Low-latency end-to-end speech interaction model built on Llama-3.1-8B-Instruct, aiming for GPT-4o level capabilities
-- **[LLaMA-Omni 2](https://arxiv.org/abs/2505.02625)** - Series of models (0.5B to 14B parameters) with autoregressive streaming speech synthesis, built on Qwen2.5, achieving sub-second response times
-- **[Moshi](https://github.com/kyutai-labs/moshi)** - Real-time voice LLM with full-duplex conversation support (can listen and respond simultaneously), uses dual-stream output architecture
-- **[Ultravox](https://github.com/fixie-ai/ultravox)** - Whisper + Llama hybrid model for speech-to-speech interaction
-
-### Research & Experimental Models
-
-- **[Hugging Face Speech-to-Speech](https://github.com/huggingface/speech-to-speech)** - Modular, open-source effort for GPT-4o-like capabilities
-- **[CleanS2S](https://github.com/opendilab/cleans2s)** - High-quality streaming S2S interactive agent in a single file
-- **[MooER-omni](https://github.com/MooreThreads/MooER)** - End-to-end speech interaction models with training and inference code
-- **[StreamSpeech](https://github.com/ictnlp/StreamSpeech)** - All-in-one seamless model for offline and simultaneous speech recognition, translation, and synthesis
-- **[SpireLM](https://github.com/utter-project/spirelm)** - 7B parameter decoder-only model with speech-centric capabilities
-
-### Key Considerations
-
-- Models like LLaMA-Omni 2 and Moshi offer response times under 300ms
-- Audio tokenization via neural codecs (e.g., EnCodec) enables transformer processing
-- Trade-offs include higher token costs (~10x) and reduced output control compared to cascade architectures
-- Full-duplex models like Moshi provide more natural conversation flow
-
-## Prerequisites
-
-- Rust (latest stable version)
-- SQLite 3
-
-## Installation
-
-```bash
-# Clone the repository
-git clone <repository-url>
-cd voicebot
-
-# Build the project
-cargo build --release
-```
-
-## Usage
-
-```bash
-# Run the voicebot
-cargo run --release
-```
+---
 
 ## Configuration
 
-Configuration details will be documented as the project develops.
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `VOICEBOT_LANGUAGE` | `es` | Language for STT and TTS voice selection |
+| `SAY_VOICE` | `Marisol (Enhanced)` | macOS voice name |
+| `WHISPER_MODEL` | — | Path to `.bin` Whisper model |
+| `LLM_URL` | — | llama.cpp base URL |
+| `LLM_SYSTEM_PROMPT` | — | System prompt for the LLM |
+| `LLM_MAX_TOKENS` | — | Max generation tokens |
+| `LLM_TEMPERATURE` | — | LLM temperature |
+| `AUDIO_DEVICE` | system default | Input device name substring |
+| `AUDIO_OUTPUT_DEVICE` | system default | Output device name substring |
+| `DB_PATH` | — | SQLite database file path |
+| `LIST_AUDIO_DEVICES` | `0` | Print devices and exit |
 
-## Project Structure
+---
 
-```
-voicebot/
-├── src/           # Source code
-├── models/        # AI Models
-├── Cargo.toml     # Rust dependencies
-└── readme.md      # This file
-```
-
-## Development
+## Commands
 
 ```bash
-# Run in development mode
-cargo run
-
-# Run tests
+cargo build --release
+cargo run --release
 cargo test
-
-# Format code
 cargo fmt
-
-# Lint code
 cargo clippy
+cargo run -- --list-devices
 ```
 
-## Roadmap
+---
 
-- [ ] Core S2S model integration
-- [ ] SQLite database schema and persistence layer
-- [ ] MCP tool system implementation
-- [ ] OpenClaw agent integration
-- [ ] Voice input/output handling
-- [ ] Configuration system
+## Roadmap — Feature Analysis
+
+This section analyzes each planned feature: design approach, implementation challenges, and integration points with the current pipeline.
+
+---
+
+### 1. Tool Use (Function Calling)
+
+**Goal:** The LLM can call tools (web search, calendar, file read, shell commands, etc.) and receive results before generating its spoken response.
+
+**Approach:**
+
+llama.cpp supports OpenAI-compatible function calling when the model has been trained for it (e.g., Qwen, Mistral, LLaMA-3.1+). The pipeline becomes a loop instead of a straight pass:
+
+```
+STT → LLM call →  text response?   → TTS → Speaker
+                  tool_call?  → execute tool → LLM call (with tool result) → ...
+```
+
+**Implementation steps:**
+1. Add `tools: Vec<ToolDefinition>` to `LlmSession`; include them in the llama.cpp payload as `"tools": [...]`
+2. Parse the LLM response for tool calls (JSON in the token stream, or a `tool_calls` field in the final SSE message)
+3. Route the call to the appropriate executor (built-in, MCP, agent — see below)
+4. Append the tool result to the accumulated prompt as a `tool` turn
+5. Re-call the LLM; repeat until a plain text response is returned
+6. Feed final text to TTS as normal
+
+**Voice UX consideration:** Tool calls can add 1–10 seconds of latency. Options:
+- Play a short "thinking" audio clip while waiting
+- The LLM can be instructed to acknowledge out loud before calling a tool ("Déjame buscar eso..." → TTS plays → tool executes → LLM continues)
+
+**Key challenge:** Streaming SSE + tool call detection. Tool call JSON is emitted mid-stream; the current sentence splitter needs to be extended to detect and suppress tool-call tokens from TTS output.
+
+---
+
+### 2. MCP (Model Context Protocol) Integration
+
+**Goal:** Connect to MCP servers to expose a broad ecosystem of tools (filesystem, browser, GitHub, Slack, databases, etc.) without implementing each tool manually.
+
+**Approach:**
+
+MCP uses a JSON-RPC protocol over stdio (subprocess) or SSE (HTTP). The voicebot acts as an MCP client:
+
+```
+LLM tool_call
+     │
+     ▼
+ToolRouter
+     │
+     ├── built-in tools (Rust functions)
+     ├── MCP servers (subprocess/HTTP JSON-RPC)
+     └── agents (see feature 3)
+```
+
+**Implementation steps:**
+1. Restore `src/tools/` and `src/mcp/` modules (currently gutted from the codebase)
+2. `McpClient`: spawns/connects to MCP servers, implements `initialize` + `tools/list` + `tools/call` JSON-RPC methods
+3. `ToolRouter`: on each tool call from the LLM, tries built-ins first, then queries registered MCP servers
+4. Tool schemas from MCP (`tools/list`) are translated to llama.cpp-compatible JSON Schema and injected into the LLM payload
+
+**Config:** MCP servers configured via a JSON/TOML file, e.g.:
+```toml
+[[mcp_servers]]
+name = "filesystem"
+command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/home/user"]
+
+[[mcp_servers]]
+name = "brave-search"
+command = ["npx", "-y", "@modelcontextprotocol/server-brave-search"]
+env = { BRAVE_API_KEY = "..." }
+```
+
+**Key challenge:** MCP servers are typically Node.js/Python subprocesses. Need async stdin/stdout communication without blocking the tokio event loop — use `tokio::process::Command` with async I/O.
+
+---
+
+### 3. Agent Delegation
+
+**Goal:** The LLM can delegate complex tasks (deep research, code generation, long-running automation) to specialized agents. Results are routed back through the LLM, which summarizes them into a voice response.
+
+**Two delegation modes:**
+
+**Synchronous (simple tasks, < 5s):**
+```
+LLM calls "run_agent" tool → agent executes → result → LLM → TTS
+```
+Identical to tool use. The agent is just a long-running tool.
+
+**Asynchronous (long tasks — research, coding, etc.):**
+```
+User: "Research X and tell me the summary"
+LLM → TTS: "Lo investigo, te aviso en unos minutos"
+              ↓
+         agent runs in background (tokio::spawn)
+              ↓ (minutes later)
+         agent completes → pushes to proactive_tx channel
+              ↓
+         LLM synthesizes result → TTS plays proactively
+```
+
+**Implementation steps:**
+1. `AgentManager` in `src/agents/`: registry of available agents with their capabilities and API contracts
+2. `run_agent` tool definition: `{ name, task_description, async: bool }`
+3. For async mode: `tokio::spawn` the agent task; on completion, push a `ProactiveEvent::AgentResult { agent, result }` to a channel that the main VAD loop listens to (see Feature 5)
+4. The LLM is given agent descriptions at startup so it knows when to delegate
+
+**Agent protocol options:**
+- HTTP API (OpenAI-compatible agents, OpenClaw, etc.)
+- Claude SDK / Anthropic API (for sub-agents using Claude)
+- Local subprocess with structured I/O
+
+---
+
+### 4. Proactive Conversations (Bot-Initiated Speech)
+
+**Goal:** The bot can speak without being prompted by the user — to deliver agent results, reminders, greetings, or contextual observations.
+
+**Approach:**
+
+The main `tokio::select!` loop is extended with a proactive events channel:
+
+```rust
+enum ProactiveEvent {
+    AgentResult { task: String, result: String },
+    Reminder { message: String },
+    Scheduled { prompt: String },
+}
+
+tokio::select! {
+    chunk = audio_rx.recv()    => { /* VAD processing */ }
+    event = proactive_rx.recv() => { run_proactive_pipeline(event, ...).await }
+    _ = ctrl_c()               => { /* shutdown */ }
+}
+```
+
+**Event sources:**
+- **Agent completion**: async agent task pushes to `proactive_tx` when done
+- **Scheduler**: background task fires at configured times (reminders, daily briefings)
+- **Idle trigger**: after N minutes of silence, LLM generates a contextual observation or question (configurable, off by default)
+- **External trigger**: Unix socket or local HTTP endpoint that external processes can POST to
+
+**Voice UX:**
+- Play a subtle audio cue before speaking proactively (so the user isn't startled)
+- Respect barge-in — user can interrupt proactive speech exactly like regular responses
+- Check if the user appears to be in the middle of speaking before interrupting with a proactive message
+
+**Key challenge:** Idle detection in the current VAD loop. The VAD only sees `Silence`/`Speech` events. Need a timer that resets on any `Speech` or `SpeechEnd` event, and fires a proactive event after a configurable idle timeout.
+
+---
+
+### 5. Voicebot as Agent Intermediary
+
+**Goal:** The voicebot acts as a voice interface to any existing text-based agent or service — translating user voice to the agent's input format and the agent's text output to speech.
+
+**Approach:**
+
+This is a generalization of agent delegation. The voicebot becomes a transparent voice proxy:
+
+```
+User voice → STT → voicebot LLM (optional) → agent API → response text → TTS
+```
+
+Two proxy modes:
+
+**Transparent proxy** (voicebot just relays, no LLM involved):
+```
+STT transcript → agent API → response → TTS
+```
+Useful when the agent is a full conversational AI (e.g., another Claude instance, a specialized chatbot). Latency is minimized.
+
+**Mediated proxy** (voicebot LLM reformulates):
+```
+STT transcript → local LLM reformulates/enriches → agent API → response → local LLM summarizes → TTS
+```
+Useful when the agent's API expects specific input formats, or when responses are too long/technical for direct speech.
+
+**Implementation:**
+- `AgentProxy` struct: wraps an agent's API client, configured with input/output transformers
+- The voicebot's system prompt can include: "You are the voice interface for [Agent X]. Translate user requests into queries for it and summarize its responses conversationally."
+- Configurable per-agent: whether to use the mediated or transparent mode
+
+**Integration with current architecture:** The `run_pipeline` function gets an optional `agent_proxy` parameter. If set, after STT the transcript goes to the proxy instead of (or alongside) the local LLM.
+
+---
+
+### 6. Context Summarization
+
+**Goal:** Prevent the LLM context window from filling up during long conversations by automatically summarizing old turns.
+
+**Approach:**
+
+The `LlmSession` accumulated prompt grows without bound. When it approaches the model's context limit:
+
+1. **Detect:** Track approximate token count (chars / 3.5 is a reasonable estimate). Trigger at ~75% of the configured context window.
+2. **Summarize:** Send the old conversation to the LLM with a summarization prompt:
+   ```
+   Summarize this conversation concisely, preserving all important facts, decisions, and context:
+   [old turns]
+   ```
+3. **Replace:** Reconstruct `accumulated_prompt` as:
+   ```
+   <|im_start|>system
+   {original system prompt}
+
+   [CONVERSATION SUMMARY]
+   {summary}
+   <|im_end|>
+   <|im_start|>user
+   {current turn}...
+   ```
+4. **Reset KV-cache:** Set `cache_prompt: false` for the first call after summarization (the prompt has changed structurally, so the old KV-cache is invalid). Then resume `cache_prompt: true`.
+
+**Strategy:** Keep the last N turns verbatim (e.g., last 5) and summarize everything before them. This preserves recent context fully while compressing the distant past.
+
+**Implementation in `LlmSession`:**
+```rust
+impl LlmSession {
+    pub fn needs_summarization(&self, context_limit_tokens: usize) -> bool { ... }
+    pub fn apply_summary(&mut self, summary: &str, keep_recent_turns: usize) { ... }
+}
+```
+
+Summarization is triggered asynchronously between pipeline runs (not during active speech) to avoid adding latency.
+
+**DB persistence:** The summary is stored in the database so that on restart the conversation context is still compact and available.
+
+---
+
+### 7. User Profile Extraction and Injection
+
+**Goal:** Automatically learn facts about the user (name, location, job, hobbies, preferences, personality) from conversation, store them persistently, and inject them into every LLM system prompt so the assistant always has personal context.
+
+**Approach:**
+
+**Extraction (background, after each turn):**
+
+After the pipeline completes a turn, spawn a background task that sends the last exchange to the LLM with an extraction prompt:
+
+```
+From the following conversation excerpt, extract any new facts about the user.
+Return ONLY a JSON array: [{"key": "name", "value": "Daniel", "confidence": 0.9}]
+If no new facts, return [].
+
+[User]: {transcript}
+[Assistant]: {response}
+```
+
+Facts are stored in a `user_profile` SQLite table:
+```sql
+CREATE TABLE user_profile (
+    key       TEXT PRIMARY KEY,   -- "name", "city", "job", "hobby_1", etc.
+    value     TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    source    TEXT,               -- which conversation turn revealed it
+    updated_at TEXT NOT NULL
+);
+```
+
+**Profile categories to extract:**
+- **Identity**: name, age, gender, nationality
+- **Location**: city, country, timezone
+- **Professional**: job title, company, field, skills
+- **Personal**: hobbies, interests, family situation, pets
+- **Preferences**: communication style, topics of interest, things they dislike
+- **Psychological**: personality traits inferred from conversation patterns (cautious, curious, direct, etc.)
+
+**Injection into system prompt:**
+
+On startup, load the profile and build a `{{user_context}}` block that is appended to the system prompt:
+
+```
+[USER PROFILE]
+Name: Daniel | City: Madrid | Job: Software Engineer
+Interests: Rust, AI, voice interfaces
+Communication style: direct, technical, prefers Spanish
+```
+
+Low-confidence facts (< 0.5) are omitted or marked as uncertain. Facts are updated if contradicted by new information.
+
+**Privacy note:** All profile data stays local in SQLite. No data leaves the machine.
+
+---
+
+## Implementation Priority
+
+| Priority | Feature | Effort | Impact |
+|----------|---------|--------|--------|
+| 1 | User profile extraction + injection | Medium | High — improves every conversation immediately |
+| 2 | Context summarization | Medium | High — essential for long-running sessions |
+| 3 | Tool use (function calling) | High | High — unlocks real-world utility |
+| 4 | MCP integration | Medium | High — huge tool ecosystem for free |
+| 5 | Proactive conversations | Medium | Medium — needed for async agents |
+| 6 | Agent delegation | High | Medium — depends on tool use + proactive |
+| 7 | Agent intermediary | Low | Medium — relatively simple once agents work |
+
+Features 1 and 2 are self-contained improvements to the existing pipeline and can be implemented without touching the tool/agent layer. Features 3–7 form a dependency chain: tools → MCP → agents → proactive → intermediary.
+
+---
+
+## S2S Model Reference
+
+Available open-source Speech-to-Speech models (alternative to the current STT+LLM+TTS cascade):
+
+| Model | Params | Notes |
+|-------|--------|-------|
+| [LFM2.5-Audio](https://huggingface.co/LiquidAI/LFM2.5-Audio-1.5B) | 1.5B | llama.cpp GGUF compatible, best option for local S2S |
+| [LLaMA-Omni 2](https://arxiv.org/abs/2505.02625) | 0.5B–14B | Qwen2.5 base, streaming synthesis, sub-second latency |
+| [Moshi](https://github.com/kyutai-labs/moshi) | — | Full-duplex (listen + respond simultaneously) |
+| [Ultravox](https://github.com/fixie-ai/ultravox) | — | Whisper + LLaMA hybrid |
+
+The current cascade (Whisper + llama.cpp + say) is preferred for now because it supports streaming sentence-by-sentence TTS while the LLM is still generating — true S2S models don't stream output token-by-token in a way that maps to sentence-level TTS.
+
+---
 
 ## License
 
-Private project - All rights reserved
-
-## Notes
-
-This is a private project for personal use.
+Private project — all rights reserved.
