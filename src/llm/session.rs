@@ -51,6 +51,21 @@ impl LlmSession {
         self.accumulated_prompt.push_str("<|im_end|>\n");
     }
 
+    /// Inject a tool result after the LLM emitted a tool call mid-turn.
+    ///
+    /// Call this after the LLM has generated `tool_call_text` (e.g. `<tool_call>current_time</tool_call>`)
+    /// and before the second LLM call that should produce the spoken response.
+    pub fn add_tool_result(&mut self, tool_call_text: &str, result: &str) {
+        // accumulated_prompt already ends with `<|im_start|>assistant\n`
+        // Append what the LLM generated, close the assistant turn, add tool turn, reopen assistant.
+        self.accumulated_prompt.push_str(tool_call_text);
+        self.accumulated_prompt.push_str("<|im_end|>\n");
+        self.accumulated_prompt.push_str("<|im_start|>tool\n");
+        self.accumulated_prompt.push_str(result);
+        self.accumulated_prompt.push_str("<|im_end|>\n");
+        self.accumulated_prompt.push_str("<|im_start|>assistant\n");
+    }
+
     pub fn prompt(&self) -> &str {
         &self.accumulated_prompt
     }

@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod llm;
 mod stt;
+mod tools;
 mod tts;
 
 use anyhow::Result;
@@ -10,6 +11,7 @@ use async_channel::bounded;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -22,6 +24,7 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::llm::{LlamaClient, LlmSession};
 use crate::stt::WhisperStt;
+use crate::tools::{CurrentTimeTool, ToolRegistry};
 use crate::tts::{SayTts, SentenceSplitter};
 
 const AUDIO_CHANNEL_CAPACITY: usize = 200;
@@ -53,6 +56,11 @@ async fn main() -> Result<()> {
 
     info!("Language: {}", config.language);
 
+    // ── Tools ─────────────────────────────────────────────────────────────────
+    let mut tool_registry = ToolRegistry::new();
+    tool_registry.register(CurrentTimeTool);
+    let tools = Arc::new(tool_registry);
+
     // ── Database ─────────────────────────────────────────────────────────────
     let db = Database::new(&config.db_path).await?;
     let session_id = db.get_or_create_session().await?;
@@ -60,8 +68,10 @@ async fn main() -> Result<()> {
     info!("Loaded {} messages from history", history.len());
 
     // ── LLM session ───────────────────────────────────────────────────────────
+    // Append tool instructions to the system prompt so the LLM knows how to call tools.
+    let system_prompt = format!("{}{}", config.llm_system_prompt, tools.system_prompt_section());
     let llm_session = Arc::new(Mutex::new(LlmSession::from_history(
-        &config.llm_system_prompt,
+        &system_prompt,
         config.llm_slot_id,
         &history,
     )));
@@ -111,7 +121,6 @@ async fn main() -> Result<()> {
     let mut pre_roll: VecDeque<Vec<f32>> = VecDeque::with_capacity(PRE_ROLL_CHUNKS + 1);
 
     // ── Barge-in state ────────────────────────────────────────────────────────
-    // Shared cancellation flag: set to true to stop the active pipeline immediately.
     let cancel = Arc::new(AtomicBool::new(false));
     let mut pipeline_handle: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -138,14 +147,12 @@ async fn main() -> Result<()> {
                 match vad.process(&mono) {
                     VadResult::SpeechStart => {
                         // ── Barge-in ─────────────────────────────────────────
-                        // User speaks while pipeline is active: cancel it immediately.
                         if let Some(h) = pipeline_handle.take() {
                             info!("Barge-in detected — cancelling active pipeline");
                             cancel.store(true, Ordering::SeqCst);
                             h.abort();
                         }
 
-                        // Prepend pre-roll so the utterance onset is not clipped
                         for pre in pre_roll.drain(..) {
                             speech_buffer.push(&pre);
                         }
@@ -168,23 +175,21 @@ async fn main() -> Result<()> {
 
                         info!("Speech: {}ms — starting pipeline", duration_ms);
 
-                        // Cancel any still-running pipeline before starting the new one
                         if let Some(h) = pipeline_handle.take() {
                             cancel.store(true, Ordering::SeqCst);
                             h.abort();
                         }
 
-                        // Arm a fresh cancellation token for the new pipeline
                         cancel.store(false, Ordering::SeqCst);
 
-                        // Clone everything the pipeline task needs
-                        let cancel_c       = Arc::clone(&cancel);
-                        let stt_c          = Arc::clone(&stt);
-                        let tts_c          = Arc::clone(&tts);
-                        let audio_out_c    = Arc::clone(&audio_output);
-                        let llm_session_c  = Arc::clone(&llm_session);
-                        let llm_client_c   = llm_client.clone();
-                        let db_c           = db.clone();
+                        let cancel_c      = Arc::clone(&cancel);
+                        let stt_c         = Arc::clone(&stt);
+                        let tts_c         = Arc::clone(&tts);
+                        let audio_out_c   = Arc::clone(&audio_output);
+                        let llm_session_c = Arc::clone(&llm_session);
+                        let llm_client_c  = llm_client.clone();
+                        let db_c          = db.clone();
+                        let tools_c       = Arc::clone(&tools);
 
                         pipeline_handle = Some(tokio::spawn(async move {
                             run_pipeline(
@@ -198,12 +203,12 @@ async fn main() -> Result<()> {
                                 db_c,
                                 session_id,
                                 tts_sample_rate,
+                                tools_c,
                             )
                             .await;
                         }));
                     }
                     VadResult::Silence => {
-                        // Keep a rolling window of recent audio for pre-roll
                         pre_roll.push_back(mono);
                         if pre_roll.len() > PRE_ROLL_CHUNKS {
                             pre_roll.pop_front();
@@ -214,7 +219,6 @@ async fn main() -> Result<()> {
         } => {}
         _ = tokio::signal::ctrl_c() => {
             info!("Shutting down...");
-            // Cancel any active pipeline gracefully
             cancel.store(true, Ordering::SeqCst);
             if let Some(h) = pipeline_handle.take() {
                 h.abort();
@@ -225,11 +229,90 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Full STT → LLM → TTS pipeline for a single utterance.
+/// Stream LLM tokens into TTS, sentence by sentence.
 ///
-/// Runs as an independent tokio task so the VAD loop stays responsive.
-/// Checks `cancel` at every stage; if set, rolls back the LLM session
-/// state and returns immediately so the next utterance starts clean.
+/// Returns `(full_response, tool_name)`. If the LLM emitted a tool call,
+/// `tool_name` is `Some(name)` and the tool call text was NOT sent to TTS.
+async fn stream_and_tts(
+    mut token_rx: mpsc::Receiver<String>,
+    cancel: &Arc<AtomicBool>,
+    tts: &Arc<SayTts>,
+    audio_output: &Arc<AudioOutput>,
+    tts_sample_rate: u32,
+    tools: &ToolRegistry,
+) -> (String, Option<String>) {
+    let mut sentence_buf = SentenceSplitter::new();
+    let mut full_response = String::new();
+
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return (full_response, None);
+        }
+
+        let token = token_rx.recv().await;
+        let is_done = token.is_none();
+        let token = token.unwrap_or_default();
+
+        full_response.push_str(&token);
+
+        // At end-of-stream: check for tool call BEFORE flushing to TTS.
+        // Tool call XML has no punctuation, so the SentenceSplitter never
+        // emits it mid-stream — it only appears at flush time.
+        let sentences_to_play: Vec<String> = if is_done {
+            if let Some(name) = tools.parse_tool_call(&full_response) {
+                // Tool call detected — do NOT flush to TTS, return immediately.
+                return (full_response, Some(name));
+            }
+            let mut v = Vec::new();
+            if let Some(s) = sentence_buf.push(&token) { v.push(s); }
+            if let Some(s) = sentence_buf.flush()      { v.push(s); }
+            v
+        } else if let Some(s) = sentence_buf.push(&token) {
+            vec![s]
+        } else {
+            vec![]
+        };
+
+        for sentence in sentences_to_play {
+            if cancel.load(Ordering::SeqCst) {
+                return (full_response, None);
+            }
+
+            info!("TTS: {:?}", sentence);
+
+            let tts_c = Arc::clone(tts);
+            let sentence_c = sentence.clone();
+            let samples = match tokio::task::spawn_blocking(move || tts_c.synthesize(&sentence_c)).await {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => { error!("TTS error: {}", e); continue; }
+                Err(e)     => { error!("TTS task panicked: {}", e); continue; }
+            };
+
+            if cancel.load(Ordering::SeqCst) {
+                return (full_response, None);
+            }
+
+            let out_c    = Arc::clone(audio_output);
+            let cancel_c = Arc::clone(cancel);
+            if let Err(e) = tokio::task::spawn_blocking(move || {
+                out_c.play_blocking(&samples, tts_sample_rate, &cancel_c)
+            })
+            .await
+            .expect("playback task panicked")
+            {
+                error!("Playback error: {}", e);
+            }
+        }
+
+        if is_done {
+            break;
+        }
+    }
+
+    (full_response, None)
+}
+
+/// Full STT → LLM → (tools →)* TTS pipeline for a single utterance.
 async fn run_pipeline(
     audio: Vec<f32>,
     cancel: Arc<AtomicBool>,
@@ -241,6 +324,7 @@ async fn run_pipeline(
     db: Database,
     session_id: Uuid,
     tts_sample_rate: u32,
+    tools: Arc<ToolRegistry>,
 ) {
     macro_rules! check_cancel {
         () => {
@@ -267,97 +351,84 @@ async fn run_pipeline(
 
     info!("User: {}", transcript);
 
-    // Snapshot accumulated_prompt so we can roll back if cancelled mid-response
     let prompt_snapshot = llm_session.lock().unwrap().accumulated_prompt.clone();
 
-    // Add user turn; get a clone for the LLM call (avoids holding the lock during streaming)
     let session_for_llm = {
         let mut s = llm_session.lock().unwrap();
         s.add_user_turn(&transcript);
         s.clone()
     };
 
-    // Persist user message
     if let Err(e) = db.save_message(session_id, "User", &transcript).await {
         warn!("Failed to save user message: {}", e);
     }
 
     check_cancel!();
 
-    // ── LLM streaming ─────────────────────────────────────────────────────────
-    let mut token_rx = match llm_client.stream(&session_for_llm).await {
-        Ok(r)  => r,
-        Err(e) => { error!("LLM stream error: {}", e); return; }
-    };
+    // ── LLM streaming (with optional tool call loop) ───────────────────────────
+    // We allow at most one tool call per user turn (sufficient for simple tools).
+    let mut session_snapshot = session_for_llm;
+    let mut final_response = String::new();
 
-    let mut sentence_buf = SentenceSplitter::new();
-    let mut full_response = String::new();
-
-    'token_loop: loop {
-        check_cancel!();
-
-        let token = token_rx.recv().await;
-        let is_done = token.is_none();
-        let token = token.unwrap_or_default();
-
-        full_response.push_str(&token);
-
-        let sentences_to_play: Vec<String> = if is_done {
-            let mut v = Vec::new();
-            if let Some(s) = sentence_buf.push(&token) { v.push(s); }
-            if let Some(s) = sentence_buf.flush()      { v.push(s); }
-            v
-        } else if let Some(s) = sentence_buf.push(&token) {
-            vec![s]
-        } else {
-            vec![]
+    'pipeline: {
+        // First LLM call
+        let token_rx = match llm_client.stream(&session_snapshot).await {
+            Ok(r)  => r,
+            Err(e) => { error!("LLM stream error: {}", e); break 'pipeline; }
         };
 
-        // ── TTS + playback, sentence by sentence ──────────────────────────────
-        for sentence in sentences_to_play {
+        let (llm_text, tool_name) =
+            stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, &tools).await;
+
+        check_cancel!();
+
+        if let Some(name) = tool_name {
+            // ── Tool execution ────────────────────────────────────────────────
+            let result = tools.execute(&name);
+            info!("Tool `{}` → {}", name, result);
+
+            // Inject tool result and reopen assistant turn
+            {
+                let mut s = llm_session.lock().unwrap();
+                s.add_tool_result(&llm_text, &result);
+            }
+            session_snapshot = llm_session.lock().unwrap().clone();
+
             check_cancel!();
 
-            info!("TTS: {:?}", sentence);
-
-            let tts_c = Arc::clone(&tts);
-            let sentence_c = sentence.clone();
-            let samples = match tokio::task::spawn_blocking(move || tts_c.synthesize(&sentence_c)).await {
-                Ok(Ok(s)) => s,
-                Ok(Err(e)) => { error!("TTS error: {}", e); continue; }
-                Err(e)     => { error!("TTS task panicked: {}", e); continue; }
+            // Second LLM call — produces the spoken response
+            let token_rx2 = match llm_client.stream(&session_snapshot).await {
+                Ok(r)  => r,
+                Err(e) => { error!("LLM stream error (post-tool): {}", e); break 'pipeline; }
             };
 
+            let (response2, _) =
+                stream_and_tts(token_rx2, &cancel, &tts, &audio_output, tts_sample_rate, &tools).await;
+
             check_cancel!();
 
-            let audio_out_c = Arc::clone(&audio_output);
-            let cancel_c    = Arc::clone(&cancel);
-            if let Err(e) = tokio::task::spawn_blocking(move || {
-                audio_out_c.play_blocking(&samples, tts_sample_rate, &cancel_c)
-            })
-            .await
-            .expect("playback task panicked")
-            {
-                error!("Playback error: {}", e);
-            }
+            final_response = response2;
+        } else {
+            final_response = llm_text;
         }
-
-        if is_done { break 'token_loop; }
     }
 
     // ── Finalise or roll back ─────────────────────────────────────────────────
     if cancel.load(Ordering::SeqCst) {
-        // Interrupted mid-response: undo the user turn so the next request
-        // starts from a consistent session state.
         llm_session.lock().unwrap().accumulated_prompt = prompt_snapshot;
         info!("Pipeline cancelled — session rolled back");
         return;
     }
 
-    info!("Assistant: {}", full_response);
+    if final_response.is_empty() {
+        return;
+    }
 
-    if let Err(e) = db.save_message(session_id, "Assistant", &full_response).await {
+    info!("Assistant: {}", final_response);
+
+    if let Err(e) = db.save_message(session_id, "Assistant", &final_response).await {
         warn!("Failed to save assistant message: {}", e);
     }
 
-    llm_session.lock().unwrap().add_assistant_turn(&full_response);
+    llm_session.lock().unwrap().add_assistant_turn(&final_response);
 }

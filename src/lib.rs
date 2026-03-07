@@ -3,6 +3,7 @@ pub mod config;
 pub mod db;
 pub mod llm;
 pub mod stt;
+pub mod tools;
 pub mod tts;
 
 pub use audio::buffer::AudioBuffer;
