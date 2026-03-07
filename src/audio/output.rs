@@ -4,7 +4,7 @@ use cpal::{Device, StreamConfig};
 use rubato::{FftFixedIn, Resampler};
 use std::sync::{Arc, Condvar, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tracing::info;
+use tracing::{info, debug};
 
 pub struct AudioOutput {
     device: Device,
@@ -12,24 +12,36 @@ pub struct AudioOutput {
 }
 
 impl AudioOutput {
-    pub fn new() -> Result<Self> {
+    pub fn new(device_name: Option<&str>) -> Result<Self> {
         let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .context("No output device available")?;
+
+        let device = if let Some(name) = device_name {
+            host.output_devices()
+                .context("Failed to enumerate output devices")?
+                .find(|d| d.name().map(|n| n.contains(name)).unwrap_or(false))
+                .with_context(|| format!("Output device '{}' not found", name))?
+        } else {
+            host.default_output_device()
+                .context("No output device available")?
+        };
+
+        info!("Output device: {}", device.name().unwrap_or_default());
 
         let supported = device
             .default_output_config()
             .context("Failed to get default output config")?;
 
+        // Cap to stereo — multi-channel virtual devices (BlackHole 8ch, etc.) cause issues
+        let channels = supported.channels().min(2);
+
         info!(
-            "Output device: {} Hz, {} ch",
+            "Output config: {}Hz, {}ch",
             supported.sample_rate(),
-            supported.channels()
+            channels
         );
 
         let config = StreamConfig {
-            channels: supported.channels(),
+            channels,
             sample_rate: supported.sample_rate(),
             buffer_size: cpal::BufferSize::Default,
         };
@@ -87,6 +99,11 @@ impl AudioOutput {
         if prepared.is_empty() {
             return Ok(());
         }
+
+        debug!(
+            "play_blocking: {} samples in, source={}Hz → device={}Hz {}ch, prepared={}",
+            samples.len(), source_rate, self.sample_rate(), self.channels(), prepared.len()
+        );
 
         let total = prepared.len();
 

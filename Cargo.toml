@@ -44,8 +44,8 @@ voice_activity_detector = "0.2"
 # HTTP client for LLM streaming (SSE)
 reqwest = { version = "0.12", features = ["json", "stream"] }
 
-# STT — whisper.cpp embedded
-whisper-rs = "0.14"
+# STT — whisper.cpp embedded (Metal GPU on Apple Silicon)
+whisper-rs = { version = "0.15", features = ["metal"] }
 
 # Sentence boundary detection for TTS streaming
 regex = "1"

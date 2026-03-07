@@ -7,6 +7,7 @@ mod tts;
 
 use anyhow::Result;
 use async_channel::bounded;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -24,6 +25,9 @@ use crate::tts::{PiperTts, SentenceSplitter};
 const AUDIO_CHANNEL_CAPACITY: usize = 200;
 const MAX_SPEECH_BUFFER_SECS: u32 = 30;
 const MIN_SPEECH_DURATION_MS: u32 = 800;
+/// Pre-roll: chunks of audio kept before speech starts and prepended on SpeechStart.
+/// Covers the VAD onset delay (~256ms) plus margin. At 512 samples/chunk @16kHz ≈ 32ms/chunk → 15 chunks ≈ 480ms.
+const PRE_ROLL_CHUNKS: usize = 15;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -85,7 +89,7 @@ async fn main() -> Result<()> {
     let tts = Arc::new(tts);
 
     // ── Audio output ──────────────────────────────────────────────────────────
-    let audio_output = Arc::new(AudioOutput::new()?);
+    let audio_output = Arc::new(AudioOutput::new(config.audio_output_device.as_deref())?);
     info!(
         "Audio output: {}Hz, {}ch",
         audio_output.sample_rate(),
@@ -103,6 +107,7 @@ async fn main() -> Result<()> {
 
     let mut vad = VoiceActivityDetector::new(source_sample_rate)?;
     let mut speech_buffer = AudioBuffer::new(source_sample_rate, MAX_SPEECH_BUFFER_SECS);
+    let mut pre_roll: VecDeque<Vec<f32>> = VecDeque::with_capacity(PRE_ROLL_CHUNKS + 1);
 
     info!("Ready. Speak to interact...");
 
@@ -125,7 +130,14 @@ async fn main() -> Result<()> {
                 };
 
                 match vad.process(&mono) {
-                    VadResult::SpeechStart | VadResult::Speech => {
+                    VadResult::SpeechStart => {
+                        // Prepend buffered pre-roll audio so the onset is not clipped
+                        for pre in pre_roll.drain(..) {
+                            speech_buffer.push(&pre);
+                        }
+                        speech_buffer.push(&mono);
+                    }
+                    VadResult::Speech => {
                         speech_buffer.push(&mono);
                     }
                     VadResult::SpeechEnd => {
@@ -205,6 +217,8 @@ async fn main() -> Result<()> {
                                 let audio_out = Arc::clone(&audio_output);
                                 let sentence_clone = sentence.clone();
 
+                                info!("TTS synthesizing: {:?}", sentence_clone);
+
                                 // Synthesize sentence — piper returns f32 samples directly
                                 let samples_f32 = match tokio::task::spawn_blocking(move || {
                                     tts_ref.synthesize(&sentence_clone)
@@ -215,6 +229,8 @@ async fn main() -> Result<()> {
                                     Ok(Err(e)) => { error!("TTS error: {}", e); continue; }
                                     Err(e) => { error!("TTS task panicked: {}", e); continue; }
                                 };
+
+                                info!("TTS samples: {} ({}ms @{}Hz)", samples_f32.len(), samples_f32.len() as u32 * 1000 / tts_sample_rate, tts_sample_rate);
 
                                 if let Err(e) = tokio::task::spawn_blocking(move || {
                                     audio_out.play_blocking(&samples_f32, tts_sample_rate)
@@ -247,9 +263,14 @@ async fn main() -> Result<()> {
                         }
                         vad.reset();
                         speech_buffer.clear();
+                        pre_roll.clear();
                     }
                     VadResult::Silence => {
-                        debug!("Silence");
+                        // Keep a rolling window of recent audio for pre-roll
+                        pre_roll.push_back(mono);
+                        if pre_roll.len() > PRE_ROLL_CHUNKS {
+                            pre_roll.pop_front();
+                        }
                     }
                 }
             }

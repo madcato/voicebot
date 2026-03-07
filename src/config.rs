@@ -9,6 +9,7 @@ pub struct Config {
     pub channels: u16,
     pub chunk_ms: u32,
     pub audio_device: Option<String>,
+    pub audio_output_device: Option<String>,
     pub list_devices: bool,
 
     // ── Language ─────────────────────────────────────────────────────────────
@@ -56,6 +57,7 @@ impl Config {
                 .parse()
                 .context("Invalid AUDIO_CHUNK_MS")?,
             audio_device: env::var("AUDIO_DEVICE").ok(),
+            audio_output_device: env::var("AUDIO_OUTPUT_DEVICE").ok(),
             list_devices: env::var("LIST_AUDIO_DEVICES")
                 .map(|v| v == "1" || v.to_lowercase() == "true")
                 .unwrap_or(false),
@@ -65,7 +67,7 @@ impl Config {
 
             // STT
             whisper_model: env::var("WHISPER_MODEL")
-                .unwrap_or_else(|_| "models/ggml-medium.bin".to_string()),
+                .unwrap_or_else(|_| "models/ggml-large-v3-turbo.bin".to_string()),
 
             // LLM
             llm_url: env::var("LLM_URL")

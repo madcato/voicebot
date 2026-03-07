@@ -37,15 +37,17 @@ impl WhisperStt {
             .full(params, audio)
             .context("Whisper transcription failed")?;
 
-        let num_segments = state.full_n_segments().context("Failed to get segment count")?;
+        let num_segments = state.full_n_segments();
         let mut text = String::new();
         for i in 0..num_segments {
-            let segment = state
-                .full_get_segment_text(i)
-                .context("Failed to get segment text")?;
-            text.push_str(segment.trim());
-            if i < num_segments - 1 {
-                text.push(' ');
+            if let Some(seg) = state.get_segment(i) {
+                let seg_text = seg.to_str().unwrap_or("").trim().to_string();
+                if !seg_text.is_empty() {
+                    if !text.is_empty() {
+                        text.push(' ');
+                    }
+                    text.push_str(&seg_text);
+                }
             }
         }
 
