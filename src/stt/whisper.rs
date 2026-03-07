@@ -1,8 +1,19 @@
 use anyhow::{Context, Result};
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use std::sync::Mutex;
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
 
+/// Persistent Whisper STT.
+///
+/// `WhisperState` initialises the Metal GPU backend (`ggml_metal_init`) on
+/// creation and tears it down (`ggml_metal_free`) on drop. Creating a fresh
+/// state per utterance wastes ~200 ms re-loading Metal kernels each time.
+///
+/// We allocate the state once in `new()` and reuse it across calls via a
+/// `Mutex`, keeping Metal resident in GPU memory for the process lifetime.
 pub struct WhisperStt {
-    ctx: WhisperContext,
+    _ctx: WhisperContext,
+    /// Reusable inference state — owns Metal buffers and KV caches.
+    state: Mutex<WhisperState>,
     language: String,
 }
 
@@ -11,18 +22,25 @@ impl WhisperStt {
         let ctx = WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
             .context("Failed to load Whisper model")?;
 
-        tracing::info!("Whisper model loaded: {} (language: {})", model_path, language);
+        let state = ctx.create_state().context("Failed to create Whisper state")?;
+
+        tracing::info!(
+            "Whisper model loaded: {} (language: {}) — Metal state cached",
+            model_path,
+            language
+        );
 
         Ok(Self {
-            ctx,
+            _ctx: ctx,
+            state: Mutex::new(state),
             language: language.to_string(),
         })
     }
 
     /// Transcribe mono f32 audio sampled at 16 kHz.
-    /// This is CPU-intensive — call from `tokio::task::spawn_blocking`.
+    /// CPU-intensive — call from `tokio::task::spawn_blocking`.
     pub fn transcribe(&self, audio: &[f32]) -> Result<String> {
-        let mut state = self.ctx.create_state().context("Failed to create Whisper state")?;
+        let mut state = self.state.lock().unwrap();
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 0 });
         params.set_language(Some(&self.language));
@@ -30,7 +48,6 @@ impl WhisperStt {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
-        // Single segment gives cleaner output for short utterances
         params.set_single_segment(false);
 
         state
