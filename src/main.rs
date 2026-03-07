@@ -20,7 +20,7 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::llm::{LlamaClient, LlmSession};
 use crate::stt::WhisperStt;
-use crate::tts::{PiperTts, SentenceSplitter};
+use crate::tts::{SayTts, SentenceSplitter};
 
 const AUDIO_CHANNEL_CAPACITY: usize = 200;
 const MAX_SPEECH_BUFFER_SECS: u32 = 30;
@@ -82,9 +82,9 @@ async fn main() -> Result<()> {
     .await??;
     let stt = Arc::new(stt);
 
-    // ── TTS (piper) — load in blocking thread ────────────────────────────────
-    let piper_config = config.piper_model_path().to_string();
-    let tts = tokio::task::spawn_blocking(move || PiperTts::new(&piper_config)).await??;
+    // ── TTS (say) ─────────────────────────────────────────────────────────────
+    let say_voice = config.say_voice.clone();
+    let tts = tokio::task::spawn_blocking(move || SayTts::new(&say_voice)).await??;
     let tts_sample_rate = tts.sample_rate();
     let tts = Arc::new(tts);
 

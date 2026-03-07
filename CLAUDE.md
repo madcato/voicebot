@@ -40,7 +40,7 @@ Microphone
   → LLM client (llama.cpp HTTP, streaming SSE, cache_prompt=true)
       tokens streamed as they arrive
   → SentenceSplitter (buffer until punctuation boundary)
-  → TTS (piper-rs, embedded Piper ONNX)
+  → TTS (macOS `say`, subprocess)
       synthesizes sentence by sentence
   → AudioOutput (CPAL speaker)
 ```
@@ -50,7 +50,7 @@ Microphone
 - **Single binary**: no inter-service communication; all stages connected by `tokio::sync` channels
 - **STT→LLM latency trick**: partial Whisper transcripts are accumulated in a `String`; when VAD signals end-of-speech the full transcript is sent to llama.cpp with `cache_prompt=true`. The KV-cache already holds previous turns, so only the new user turn needs prefill.
 - **LLM→TTS streaming**: LLM tokens arrive via SSE and are buffered until a sentence boundary (`.`, `!`, `?`, `;`, `:`) — then that sentence is synthesized immediately. While sentence N plays, sentence N+1 is being generated and synthesized.
-- **Language**: Spanish by default, English supported. Configurable via `VOICEBOT_LANGUAGE` env var (`es` or `en`). Affects both Whisper transcription hint and the Piper voice model selected.
+- **Language**: Spanish by default, English supported. Configurable via `VOICEBOT_LANGUAGE` env var (`es` or `en`). Affects the Whisper transcription hint and the `SAY_VOICE` selected.
 - **LLM backend**: external llama.cpp server (`llama-server`). The voicebot maintains the accumulated prompt string in-memory and passes `slot_id` + `cache_prompt=true` for KV reuse across turns (mirrors `stateful-llm-server.py` from the butler project but in-process).
 
 ### Key Modules
@@ -71,9 +71,11 @@ Microphone
 - `session.rs`: `LlmSession` struct holding `accumulated_prompt: String` and `slot_id: u8`; appends user/assistant turns in ChatML format (`<|im_start|>role\n...<|im_end|>\n`)
 - Streams SSE tokens via `reqwest` with `stream` feature; yields `String` tokens through a tokio channel
 
-**`src/tts/`** — Text-to-Speech (to be implemented)
-- `piper.rs`: piper-rs wrapper; loads ONNX voice model at startup; synthesizes `&str` → `Vec<i16>` PCM at model sample rate (22050 Hz for medium models)
-- `sentence_splitter.rs`: buffers incoming token stream; emits complete sentences on punctuation boundaries (`. ! ? ; :` followed by space or end)
+**`src/tts/`** — Text-to-Speech
+- `say.rs`: macOS `say` subprocess wrapper; outputs raw i16 PCM at 22050 Hz via `--data-format=LEI16@22050 -o /dev/stdout`; voice configured via `SAY_VOICE` env var (default `"Marisol (Enhanced)"`)
+- `piper.rs`: Piper subprocess wrapper (kept for reference; not active)
+- `sentence.rs`: buffers incoming token stream; emits complete sentences on punctuation boundaries (`. ! ? ; :` followed by space or end)
+- **Planned**: `kokoro.rs` — Kokoro TTS via onnxruntime (higher quality, offline ONNX model)
 
 **`src/session/`** — Conversation state (simplified)
 - `context.rs`: `ConversationContext` with message history (User/Assistant/System roles)
@@ -85,9 +87,9 @@ Microphone
 - `LLM_SLOT_ID` — llama.cpp KV-cache slot (default 0)
 - `LLM_MAX_TOKENS` — max tokens per response (default 400)
 - `LLM_SYSTEM_PROMPT` — system prompt text
-- `WHISPER_MODEL` — path to whisper GGML model file
-- `PIPER_MODEL_ES` — path to Spanish Piper ONNX model
-- `PIPER_MODEL_EN` — path to English Piper ONNX model
+- `WHISPER_MODEL` — path to whisper GGML model file (default `models/ggml-large-v3-turbo.bin`)
+- `SAY_VOICE` — macOS voice name (default `"Marisol (Enhanced)"`); list voices with `say -v ?`
+- `AUDIO_OUTPUT_DEVICE` — substring match of output device name; leave unset to use system default
 
 **`src/db/`** — SQLite persistence (keep and extend)
 - Chat history **must** survive process restarts — SQLite is the source of truth
@@ -112,7 +114,8 @@ The following were part of the S2S approach and will be replaced:
 ### Testing Approach
 - Generate synthetic audio (sine waves / silence) for VAD and buffer tests
 - Mock LLM/TTS via trait objects for pipeline integration tests
-- Whisper and Piper tests require model files; skip in CI if not present (`#[ignore]`)
+- Whisper tests require model file; skip in CI if not present (`#[ignore]`)
+- `say` TTS tests require macOS with voices installed
 
 ### Reference project
 `/Users/danielvela/projects/ai/butler` — the working Python equivalent.

@@ -12,4 +12,4 @@ pub use config::Config;
 pub use db::Database;
 pub use llm::{LlamaClient, LlmSession};
 pub use stt::WhisperStt;
-pub use tts::{PiperTts, SentenceSplitter};
+pub use tts::{SayTts, SentenceSplitter};

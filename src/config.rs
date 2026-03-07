@@ -31,10 +31,8 @@ pub struct Config {
     pub llm_temperature: f32,
 
     // ── TTS ──────────────────────────────────────────────────────────────────
-    /// Path to Piper ONNX config JSON for Spanish
-    pub piper_model_es: String,
-    /// Path to Piper ONNX config JSON for English
-    pub piper_model_en: String,
+    /// macOS `say` voice name (SAY_VOICE). List with: say -v ?
+    pub say_voice: String,
 
     // ── Persistence ───────────────────────────────────────────────────────────
     pub db_path: String,
@@ -92,10 +90,8 @@ impl Config {
                 .context("Invalid LLM_TEMPERATURE")?,
 
             // TTS
-            piper_model_es: env::var("PIPER_MODEL_ES")
-                .unwrap_or_else(|_| "models/es_ES-sharvard-medium.onnx.json".to_string()),
-            piper_model_en: env::var("PIPER_MODEL_EN")
-                .unwrap_or_else(|_| "models/en_US-lessac-medium.onnx.json".to_string()),
+            say_voice: env::var("SAY_VOICE")
+                .unwrap_or_else(|_| "Marisol (Enhanced)".to_string()),
 
             // DB
             db_path: env::var("DB_PATH")
@@ -107,12 +103,4 @@ impl Config {
         (self.sample_rate as usize * self.chunk_ms as usize) / 1000
     }
 
-    /// Returns the Piper model config path for the configured language.
-    pub fn piper_model_path(&self) -> &str {
-        if self.language == "en" {
-            &self.piper_model_en
-        } else {
-            &self.piper_model_es
-        }
-    }
 }
