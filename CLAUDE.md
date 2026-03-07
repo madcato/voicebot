@@ -89,12 +89,17 @@ Microphone
 - `PIPER_MODEL_ES` — path to Spanish Piper ONNX model
 - `PIPER_MODEL_EN` — path to English Piper ONNX model
 
+**`src/db/`** — SQLite persistence (keep and extend)
+- Chat history **must** survive process restarts — SQLite is the source of truth
+- On startup: load the last session's accumulated prompt from DB to restore LLM KV-cache context
+- On each turn: persist user transcript and assistant response to DB
+- Tables: `sessions`, `messages` (role, content, timestamp)
+
 ### Legacy modules (to be removed or gutted)
 
 The following were part of the S2S approach and will be replaced:
 - `src/s2s/` — S2S adapter + LFM model (replaced by `src/stt/` + `src/llm/`)
 - `src/tools/`, `src/mcp/`, `src/agents/` — not needed for MVP
-- `src/db/` — SQLite persistence (conversation state is now in-memory)
 - `src/websocket_client.rs` — no longer needed
 - `provider/` — Python LFM2.5-Audio HTTP server (no longer used)
 
