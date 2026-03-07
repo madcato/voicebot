@@ -79,7 +79,7 @@ impl AudioOutput {
 
     /// Play mono f32 samples (at `source_rate`) through the default output
     /// device. Resamples and expands channels as needed. Blocks the calling
-    /// thread until every sample has been consumed by CPAL.
+    /// thread until the speaker has finished playing every sample.
     pub fn play_blocking(&self, samples: &[f32], source_rate: u32) -> Result<()> {
         let prepared =
             Self::prepare(samples, source_rate, self.sample_rate(), self.channels())?;
@@ -89,6 +89,14 @@ impl AudioOutput {
         }
 
         let total = prepared.len();
+
+        // Drain tail: silence frames served after all audio content has been
+        // written into CPAL's buffer. This keeps the stream alive long enough
+        // for CoreAudio/ALSA to flush its internal buffers to the DAC.
+        // 400 ms is conservative but harmless — it falls entirely in silence.
+        let drain_samples = (self.sample_rate() as usize * self.channels() as usize) * 400 / 1000;
+        let stop_pos = total + drain_samples;
+
         let buf = Arc::new(prepared);
         let pos = Arc::new(AtomicUsize::new(0));
         let done = Arc::new((Mutex::new(false), Condvar::new()));
@@ -103,13 +111,18 @@ impl AudioOutput {
                 &self.config,
                 move |data: &mut [f32], _| {
                     let p = pos_cb.load(Ordering::Relaxed);
-                    let n = data.len().min(total.saturating_sub(p));
-                    data[..n].copy_from_slice(&buf_cb[p..p + n]);
-                    data[n..].fill(0.0);
-                    let new_pos = p + n;
+
+                    // Write audio samples up to `total`, then silence up to `stop_pos`.
+                    let audio_n = data.len().min(total.saturating_sub(p));
+                    if audio_n > 0 {
+                        data[..audio_n].copy_from_slice(&buf_cb[p..p + audio_n]);
+                    }
+                    data[audio_n..].fill(0.0);
+
+                    let new_pos = (p + data.len()).min(stop_pos);
                     pos_cb.store(new_pos, Ordering::Relaxed);
 
-                    if new_pos >= total {
+                    if new_pos >= stop_pos {
                         let (lock, cvar) = &*done_cb;
                         *lock.lock().unwrap() = true;
                         cvar.notify_one();
@@ -122,7 +135,6 @@ impl AudioOutput {
 
         stream.play().context("Failed to start output stream")?;
 
-        // Block until the stream callback signals completion.
         let (lock, cvar) = &*done;
         let mut finished = lock.lock().unwrap();
         while !*finished {

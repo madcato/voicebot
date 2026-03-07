@@ -8,8 +8,10 @@ use crate::s2s::models::ModelConfig;
 
 /// Default API endpoint — local provider server (see provider/server.py)
 const DEFAULT_API_URL: &str = "http://127.0.0.1:8000/v1/chat/completions";
-const DEFAULT_SYSTEM_PROMPT: &str =
-    "You are a helpful voice assistant. Respond naturally and concisely.";
+const DEFAULT_SYSTEM_PROMPT: &str = "You are a helpful voice assistant. \
+    Listen carefully to what the user says and respond naturally in spoken language. \
+    Keep your answers concise and conversational. \
+    Do not use markdown, bullet points, or any formatting — speak as you would in a real conversation.";
 
 /// LFM2.5-Audio model — calls the Liquid AI API (OpenAI-compatible audio chat completions)
 pub struct LFMModel {
@@ -146,7 +148,7 @@ impl LFMModel {
         audio: &[f32],
         sample_rate: u32,
         context: &[String],
-    ) -> Result<(Vec<f32>, Option<String>, Option<String>)> {
+    ) -> Result<(Vec<f32>, u32, Option<String>, Option<String>)> {
         // Encode input audio
         let wav_bytes = Self::encode_wav(audio, sample_rate);
         let audio_b64 = base64::engine::general_purpose::STANDARD.encode(&wav_bytes);
@@ -236,21 +238,21 @@ impl LFMModel {
             out_sr
         );
 
-        Ok((output_audio, input_text, output_text))
+        Ok((output_audio, out_sr, input_text, output_text))
     }
 }
 
 #[async_trait]
 impl S2SModel for LFMModel {
     async fn process(&mut self, request: S2SRequest) -> Result<S2SResponse> {
-        let (audio, input_text, output_text) = self
+        let (audio, out_sr, input_text, output_text) = self
             .call_api(&request.audio, request.sample_rate, &request.context)
             .await
             .context("LFM2.5-Audio inference failed")?;
 
         Ok(S2SResponse {
             audio,
-            sample_rate: self.config.sample_rate,
+            sample_rate: out_sr,
             input_text,
             output_text,
             tool_calls: None,

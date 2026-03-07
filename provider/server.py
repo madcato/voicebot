@@ -43,7 +43,9 @@ from mlx_audio.sts.models.lfm_audio import (
 from mlx_audio.sts.models.lfm_audio.model import AUDIO_EOS_TOKEN
 from pydantic import BaseModel
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+_log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
+logging.basicConfig(level=_log_level, format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger(__name__).setLevel(_log_level)
 logger = logging.getLogger(__name__)
 
 MODEL_ID = os.environ.get("MODEL_ID", "mlx-community/LFM2.5-Audio-1.5B-4bit")
@@ -108,12 +110,21 @@ class ChatCompletionRequest(BaseModel):
 
 # ── Audio helpers ──────────────────────────────────────────────────────────────
 
+_debug_audio_dir = os.environ.get("DEBUG_AUDIO_DIR", "")
+
 def _read_audio_part(part: InputAudio) -> tuple[mx.array, int]:
     """Decode a base64 audio part → (mx.array float32 mono, sample_rate)."""
     raw = base64.b64decode(part.data)
     audio_np, sr = sf.read(io.BytesIO(raw), dtype="float32", always_2d=False)
     if audio_np.ndim > 1:
         audio_np = audio_np.mean(axis=1)  # mix down to mono
+
+    if _debug_audio_dir:
+        os.makedirs(_debug_audio_dir, exist_ok=True)
+        path = os.path.join(_debug_audio_dir, f"input_{uuid.uuid4().hex[:8]}.wav")
+        sf.write(path, audio_np, sr, subtype="PCM_16")
+        logger.info("Saved input audio → %s  (sr=%d Hz, %.2f s)", path, sr, len(audio_np) / sr)
+
     return mx.array(audio_np), sr
 
 
@@ -162,6 +173,16 @@ def _infer(
 
         chat.end_turn()
 
+    # Log user input text for debugging
+    for msg in messages:
+        if msg.role == "user":
+            if isinstance(msg.content, str):
+                logger.info("User input: %r", msg.content)
+            else:
+                for part in msg.content:
+                    if part.type == "text" and part.text:
+                        logger.info("User input: %r", part.text)
+
     # Open the assistant turn before generation
     chat.new_turn("assistant")
 
@@ -181,6 +202,7 @@ def _infer(
 
         elif modality == LFMModality.AUDIO_OUT:
             if token[0].item() == AUDIO_EOS_TOKEN:
+                logger.info("Audio EOS hit after %d tokens", len(audio_tokens))
                 break
             audio_tokens.append(token)
 
@@ -201,6 +223,13 @@ def _infer(
         len(waveform) / model.sample_rate,
         output_text,
     )
+
+    if _debug_audio_dir:
+        os.makedirs(_debug_audio_dir, exist_ok=True)
+        path = os.path.join(_debug_audio_dir, f"output_{uuid.uuid4().hex[:8]}.wav")
+        sf.write(path, waveform, model.sample_rate, subtype="PCM_16")
+        logger.info("Saved output audio → %s  (sr=%d Hz, %.2f s)", path, model.sample_rate, len(waveform) / model.sample_rate)
+
     return waveform, model.sample_rate, output_text
 
 

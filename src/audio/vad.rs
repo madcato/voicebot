@@ -8,8 +8,8 @@ const VAD_FRAME_SIZE: usize = 512;
 
 /// Consecutive 32ms frames of speech required before signalling SpeechStart (~250ms).
 const SPEECH_FRAMES_NEEDED: u32 = 8;
-/// Consecutive 32ms frames of silence required before signalling SpeechEnd (~500ms).
-const SILENCE_FRAMES_NEEDED: u32 = 16;
+/// Consecutive 32ms frames of silence required before signalling SpeechEnd (~1.5s).
+const SILENCE_FRAMES_NEEDED: u32 = 48;
 /// Probability threshold above which a frame is considered speech.
 const SPEECH_THRESHOLD: f32 = 0.5;
 

@@ -18,6 +18,8 @@ use config::Config;
 
 const AUDIO_CHANNEL_CAPACITY: usize = 100;
 const MAX_SPEECH_BUFFER_SECS: u32 = 30;
+/// Minimum captured speech duration to send to the model (avoids reacting to short noise bursts).
+const MIN_SPEECH_DURATION_MS: u32 = 800;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -105,6 +107,11 @@ async fn main() -> Result<()> {
                         let duration_ms = speech_buffer.duration_ms();
                         speech_buffer.clear();
 
+                        if duration_ms < MIN_SPEECH_DURATION_MS {
+                            debug!("Speech too short ({}ms), skipping", duration_ms);
+                            continue;
+                        }
+
                         info!("Speech captured: {}ms — sending to S2S", duration_ms);
 
                         let request = S2SRequest {
@@ -139,6 +146,20 @@ async fn main() -> Result<()> {
                             }
                             Err(e) => error!("S2S processing error: {}", e),
                         }
+
+                        // Drain audio accumulated during S2S + playback and reset
+                        // VAD state so we don't react to speech captured while the
+                        // bot was processing or speaking.
+                        let drained = {
+                            let mut n = 0usize;
+                            while rx.try_recv().is_ok() { n += 1; }
+                            n
+                        };
+                        if drained > 0 {
+                            debug!("Drained {} stale audio chunks after response", drained);
+                        }
+                        vad.reset();
+                        speech_buffer.clear();
                     }
                     VadResult::Silence => {
                         debug!("SILENCE")
