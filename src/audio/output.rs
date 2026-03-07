@@ -3,7 +3,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, StreamConfig};
 use rubato::{FftFixedIn, Resampler};
 use std::sync::{Arc, Condvar, Mutex};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tracing::{info, debug};
 
 pub struct AudioOutput {
@@ -91,8 +91,9 @@ impl AudioOutput {
 
     /// Play mono f32 samples (at `source_rate`) through the default output
     /// device. Resamples and expands channels as needed. Blocks the calling
-    /// thread until the speaker has finished playing every sample.
-    pub fn play_blocking(&self, samples: &[f32], source_rate: u32) -> Result<()> {
+    /// thread until the speaker has finished playing every sample, or until
+    /// `cancel` is set to `true` (barge-in / interruption).
+    pub fn play_blocking(&self, samples: &[f32], source_rate: u32, cancel: &Arc<AtomicBool>) -> Result<()> {
         let prepared =
             Self::prepare(samples, source_rate, self.sample_rate(), self.channels())?;
 
@@ -121,12 +122,22 @@ impl AudioOutput {
         let buf_cb = Arc::clone(&buf);
         let pos_cb = Arc::clone(&pos);
         let done_cb = Arc::clone(&done);
+        let cancel_cb = Arc::clone(cancel);
 
         let stream = self
             .device
             .build_output_stream(
                 &self.config,
                 move |data: &mut [f32], _| {
+                    // Barge-in: stop immediately when cancelled
+                    if cancel_cb.load(Ordering::Relaxed) {
+                        data.fill(0.0);
+                        let (lock, cvar) = &*done_cb;
+                        *lock.lock().unwrap() = true;
+                        cvar.notify_one();
+                        return;
+                    }
+
                     let p = pos_cb.load(Ordering::Relaxed);
 
                     // Write audio samples up to `total`, then silence up to `stop_pos`.

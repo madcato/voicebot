@@ -4,6 +4,7 @@ use tokio::sync::mpsc;
 
 use super::LlmSession;
 
+#[derive(Clone)]
 pub struct LlamaClient {
     client: reqwest::Client,
     completion_url: String,

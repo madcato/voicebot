@@ -8,9 +8,11 @@ mod tts;
 use anyhow::Result;
 use async_channel::bounded;
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
 
 use crate::audio::audio_capture::{AudioCapture, AudioChunk};
 use crate::audio::buffer::AudioBuffer;
@@ -25,8 +27,7 @@ use crate::tts::{SayTts, SentenceSplitter};
 const AUDIO_CHANNEL_CAPACITY: usize = 200;
 const MAX_SPEECH_BUFFER_SECS: u32 = 30;
 const MIN_SPEECH_DURATION_MS: u32 = 800;
-/// Pre-roll: chunks of audio kept before speech starts and prepended on SpeechStart.
-/// Covers the VAD onset delay (~256ms) plus margin. At 512 samples/chunk @16kHz ≈ 32ms/chunk → 15 chunks ≈ 480ms.
+/// Pre-roll chunks kept before speech onset to recover VAD onset delay (~250ms).
 const PRE_ROLL_CHUNKS: usize = 15;
 
 #[tokio::main]
@@ -58,12 +59,12 @@ async fn main() -> Result<()> {
     let history = db.get_session_messages(session_id).await?;
     info!("Loaded {} messages from history", history.len());
 
-    // ── LLM session (restore accumulated prompt from history) ─────────────────
-    let mut llm_session = LlmSession::from_history(
+    // ── LLM session ───────────────────────────────────────────────────────────
+    let llm_session = Arc::new(Mutex::new(LlmSession::from_history(
         &config.llm_system_prompt,
         config.llm_slot_id,
         &history,
-    );
+    )));
 
     // ── LLM client ────────────────────────────────────────────────────────────
     let llm_client = LlamaClient::new(
@@ -73,7 +74,7 @@ async fn main() -> Result<()> {
     );
     info!("LLM endpoint: {}", config.llm_url);
 
-    // ── STT (whisper) — load in blocking thread, heavy init ──────────────────
+    // ── STT (whisper) ─────────────────────────────────────────────────────────
     let whisper_model = config.whisper_model.clone();
     let whisper_language = config.language.clone();
     let stt = tokio::task::spawn_blocking(move || {
@@ -109,6 +110,11 @@ async fn main() -> Result<()> {
     let mut speech_buffer = AudioBuffer::new(source_sample_rate, MAX_SPEECH_BUFFER_SECS);
     let mut pre_roll: VecDeque<Vec<f32>> = VecDeque::with_capacity(PRE_ROLL_CHUNKS + 1);
 
+    // ── Barge-in state ────────────────────────────────────────────────────────
+    // Shared cancellation flag: set to true to stop the active pipeline immediately.
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut pipeline_handle: Option<tokio::task::JoinHandle<()>> = None;
+
     info!("Ready. Speak to interact...");
 
     tokio::select! {
@@ -131,7 +137,15 @@ async fn main() -> Result<()> {
 
                 match vad.process(&mono) {
                     VadResult::SpeechStart => {
-                        // Prepend buffered pre-roll audio so the onset is not clipped
+                        // ── Barge-in ─────────────────────────────────────────
+                        // User speaks while pipeline is active: cancel it immediately.
+                        if let Some(h) = pipeline_handle.take() {
+                            info!("Barge-in detected — cancelling active pipeline");
+                            cancel.store(true, Ordering::SeqCst);
+                            h.abort();
+                        }
+
+                        // Prepend pre-roll so the utterance onset is not clipped
                         for pre in pre_roll.drain(..) {
                             speech_buffer.push(&pre);
                         }
@@ -145,125 +159,48 @@ async fn main() -> Result<()> {
                         let audio = speech_buffer.get_samples();
                         let duration_ms = speech_buffer.duration_ms();
                         speech_buffer.clear();
+                        pre_roll.clear();
 
                         if duration_ms < MIN_SPEECH_DURATION_MS {
                             debug!("Too short ({}ms), skipping", duration_ms);
                             continue;
                         }
 
-                        info!("Speech: {}ms — transcribing...", duration_ms);
+                        info!("Speech: {}ms — starting pipeline", duration_ms);
 
-                        // ── STT ──────────────────────────────────────────────
-                        let stt_ref = Arc::clone(&stt);
-                        let transcript = match tokio::task::spawn_blocking(move || {
-                            stt_ref.transcribe(&audio)
-                        })
-                        .await
-                        {
-                            Ok(Ok(t)) => t,
-                            Ok(Err(e)) => { error!("STT error: {}", e); continue; }
-                            Err(e) => { error!("STT task panicked: {}", e); continue; }
-                        };
-
-                        if transcript.is_empty() {
-                            debug!("Empty transcript, skipping");
-                            continue;
+                        // Cancel any still-running pipeline before starting the new one
+                        if let Some(h) = pipeline_handle.take() {
+                            cancel.store(true, Ordering::SeqCst);
+                            h.abort();
                         }
 
-                        info!("User: {}", transcript);
+                        // Arm a fresh cancellation token for the new pipeline
+                        cancel.store(false, Ordering::SeqCst);
 
-                        // Persist user turn
-                        if let Err(e) = db.save_message(session_id, "User", &transcript).await {
-                            warn!("Failed to save user message: {}", e);
-                        }
+                        // Clone everything the pipeline task needs
+                        let cancel_c       = Arc::clone(&cancel);
+                        let stt_c          = Arc::clone(&stt);
+                        let tts_c          = Arc::clone(&tts);
+                        let audio_out_c    = Arc::clone(&audio_output);
+                        let llm_session_c  = Arc::clone(&llm_session);
+                        let llm_client_c   = llm_client.clone();
+                        let db_c           = db.clone();
 
-                        // Update LLM session with new user turn
-                        llm_session.add_user_turn(&transcript);
-
-                        // ── LLM → TTS streaming ───────────────────────────────
-                        let mut token_rx = match llm_client.stream(&llm_session).await {
-                            Ok(r) => r,
-                            Err(e) => { error!("LLM stream error: {}", e); continue; }
-                        };
-
-                        let mut sentence_buf = SentenceSplitter::new();
-                        let mut full_response = String::new();
-
-                        loop {
-                            let token = token_rx.recv().await;
-                            let is_done = token.is_none();
-                            let token = token.unwrap_or_default();
-
-                            full_response.push_str(&token);
-
-                            let sentences_to_play: Vec<String> = if is_done {
-                                // Push last token then flush
-                                let mut v = Vec::new();
-                                if let Some(s) = sentence_buf.push(&token) {
-                                    v.push(s);
-                                }
-                                if let Some(s) = sentence_buf.flush() {
-                                    v.push(s);
-                                }
-                                v
-                            } else if let Some(s) = sentence_buf.push(&token) {
-                                vec![s]
-                            } else {
-                                vec![]
-                            };
-
-                            for sentence in sentences_to_play {
-                                let tts_ref = Arc::clone(&tts);
-                                let audio_out = Arc::clone(&audio_output);
-                                let sentence_clone = sentence.clone();
-
-                                info!("TTS synthesizing: {:?}", sentence_clone);
-
-                                // Synthesize sentence — piper returns f32 samples directly
-                                let samples_f32 = match tokio::task::spawn_blocking(move || {
-                                    tts_ref.synthesize(&sentence_clone)
-                                })
-                                .await
-                                {
-                                    Ok(Ok(s)) => s,
-                                    Ok(Err(e)) => { error!("TTS error: {}", e); continue; }
-                                    Err(e) => { error!("TTS task panicked: {}", e); continue; }
-                                };
-
-                                info!("TTS samples: {} ({}ms @{}Hz)", samples_f32.len(), samples_f32.len() as u32 * 1000 / tts_sample_rate, tts_sample_rate);
-
-                                if let Err(e) = tokio::task::spawn_blocking(move || {
-                                    audio_out.play_blocking(&samples_f32, tts_sample_rate)
-                                })
-                                .await
-                                .expect("playback task panicked")
-                                {
-                                    error!("Playback error: {}", e);
-                                }
-                            }
-
-                            if is_done { break; }
-                        }
-
-                        info!("Assistant: {}", full_response);
-
-                        // Persist assistant turn
-                        if let Err(e) = db.save_message(session_id, "Assistant", &full_response).await {
-                            warn!("Failed to save assistant message: {}", e);
-                        }
-
-                        // Update LLM session with completed assistant turn
-                        llm_session.add_assistant_turn(&full_response);
-
-                        // Drain stale audio accumulated during processing and reset VAD
-                        let mut drained = 0usize;
-                        while rx.try_recv().is_ok() { drained += 1; }
-                        if drained > 0 {
-                            debug!("Drained {} stale audio chunks", drained);
-                        }
-                        vad.reset();
-                        speech_buffer.clear();
-                        pre_roll.clear();
+                        pipeline_handle = Some(tokio::spawn(async move {
+                            run_pipeline(
+                                audio,
+                                cancel_c,
+                                stt_c,
+                                tts_c,
+                                audio_out_c,
+                                llm_session_c,
+                                llm_client_c,
+                                db_c,
+                                session_id,
+                                tts_sample_rate,
+                            )
+                            .await;
+                        }));
                     }
                     VadResult::Silence => {
                         // Keep a rolling window of recent audio for pre-roll
@@ -277,8 +214,150 @@ async fn main() -> Result<()> {
         } => {}
         _ = tokio::signal::ctrl_c() => {
             info!("Shutting down...");
+            // Cancel any active pipeline gracefully
+            cancel.store(true, Ordering::SeqCst);
+            if let Some(h) = pipeline_handle.take() {
+                h.abort();
+            }
         }
     }
 
     Ok(())
+}
+
+/// Full STT → LLM → TTS pipeline for a single utterance.
+///
+/// Runs as an independent tokio task so the VAD loop stays responsive.
+/// Checks `cancel` at every stage; if set, rolls back the LLM session
+/// state and returns immediately so the next utterance starts clean.
+async fn run_pipeline(
+    audio: Vec<f32>,
+    cancel: Arc<AtomicBool>,
+    stt: Arc<WhisperStt>,
+    tts: Arc<SayTts>,
+    audio_output: Arc<AudioOutput>,
+    llm_session: Arc<Mutex<LlmSession>>,
+    llm_client: LlamaClient,
+    db: Database,
+    session_id: Uuid,
+    tts_sample_rate: u32,
+) {
+    macro_rules! check_cancel {
+        () => {
+            if cancel.load(Ordering::SeqCst) {
+                debug!("Pipeline cancelled");
+                return;
+            }
+        };
+    }
+
+    // ── STT ───────────────────────────────────────────────────────────────────
+    let transcript = match tokio::task::spawn_blocking(move || stt.transcribe(&audio)).await {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => { error!("STT error: {}", e); return; }
+        Err(e)     => { error!("STT task panicked: {}", e); return; }
+    };
+
+    check_cancel!();
+
+    if transcript.is_empty() {
+        debug!("Empty transcript, skipping");
+        return;
+    }
+
+    info!("User: {}", transcript);
+
+    // Snapshot accumulated_prompt so we can roll back if cancelled mid-response
+    let prompt_snapshot = llm_session.lock().unwrap().accumulated_prompt.clone();
+
+    // Add user turn; get a clone for the LLM call (avoids holding the lock during streaming)
+    let session_for_llm = {
+        let mut s = llm_session.lock().unwrap();
+        s.add_user_turn(&transcript);
+        s.clone()
+    };
+
+    // Persist user message
+    if let Err(e) = db.save_message(session_id, "User", &transcript).await {
+        warn!("Failed to save user message: {}", e);
+    }
+
+    check_cancel!();
+
+    // ── LLM streaming ─────────────────────────────────────────────────────────
+    let mut token_rx = match llm_client.stream(&session_for_llm).await {
+        Ok(r)  => r,
+        Err(e) => { error!("LLM stream error: {}", e); return; }
+    };
+
+    let mut sentence_buf = SentenceSplitter::new();
+    let mut full_response = String::new();
+
+    'token_loop: loop {
+        check_cancel!();
+
+        let token = token_rx.recv().await;
+        let is_done = token.is_none();
+        let token = token.unwrap_or_default();
+
+        full_response.push_str(&token);
+
+        let sentences_to_play: Vec<String> = if is_done {
+            let mut v = Vec::new();
+            if let Some(s) = sentence_buf.push(&token) { v.push(s); }
+            if let Some(s) = sentence_buf.flush()      { v.push(s); }
+            v
+        } else if let Some(s) = sentence_buf.push(&token) {
+            vec![s]
+        } else {
+            vec![]
+        };
+
+        // ── TTS + playback, sentence by sentence ──────────────────────────────
+        for sentence in sentences_to_play {
+            check_cancel!();
+
+            info!("TTS: {:?}", sentence);
+
+            let tts_c = Arc::clone(&tts);
+            let sentence_c = sentence.clone();
+            let samples = match tokio::task::spawn_blocking(move || tts_c.synthesize(&sentence_c)).await {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => { error!("TTS error: {}", e); continue; }
+                Err(e)     => { error!("TTS task panicked: {}", e); continue; }
+            };
+
+            check_cancel!();
+
+            let audio_out_c = Arc::clone(&audio_output);
+            let cancel_c    = Arc::clone(&cancel);
+            if let Err(e) = tokio::task::spawn_blocking(move || {
+                audio_out_c.play_blocking(&samples, tts_sample_rate, &cancel_c)
+            })
+            .await
+            .expect("playback task panicked")
+            {
+                error!("Playback error: {}", e);
+            }
+        }
+
+        if is_done { break 'token_loop; }
+    }
+
+    // ── Finalise or roll back ─────────────────────────────────────────────────
+    if cancel.load(Ordering::SeqCst) {
+        // Interrupted mid-response: undo the user turn so the next request
+        // starts from a consistent session state.
+        llm_session.lock().unwrap().accumulated_prompt = prompt_snapshot;
+        info!("Pipeline cancelled — session rolled back");
+        return;
+    }
+
+    info!("Assistant: {}", full_response);
+
+    if let Err(e) = db.save_message(session_id, "Assistant", &full_response).await {
+        warn!("Failed to save assistant message: {}", e);
+    }
+
+    llm_session.lock().unwrap().add_assistant_turn(&full_response);
 }

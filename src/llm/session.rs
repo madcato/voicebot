@@ -3,6 +3,7 @@
 /// Mirrors the stateful session pattern from butler/llm/zosia/stateful-llm-server.py:
 /// the full prompt is accumulated turn by turn. llama.cpp reuses its KV-cache for the
 /// common prefix across calls, so only the new user turn needs prefill on each request.
+#[derive(Clone)]
 pub struct LlmSession {
     pub accumulated_prompt: String,
     pub slot_id: u8,
