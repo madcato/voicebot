@@ -301,6 +301,11 @@ async fn main() -> Result<()> {
 ///
 /// Returns `(full_response, tool_call)`. If the LLM emitted a tool call,
 /// `tool_call` is `Some((name, args))` and the call text was NOT sent to TTS.
+///
+/// Synthesis and playback are overlapped: as soon as sentence N's text is
+/// ready its synthesis starts in a blocking task, while sentence N-1 is still
+/// playing. By the time N-1 finishes (typically 1–3 s), N is already
+/// synthesised, so the gap between sentences is near zero.
 async fn stream_and_tts(
     mut token_rx: mpsc::Receiver<String>,
     cancel: &Arc<AtomicBool>,
@@ -312,8 +317,26 @@ async fn stream_and_tts(
     let mut sentence_buf = SentenceSplitter::new();
     let mut full_response = String::new();
 
+    // Playback task for the sentence that is currently playing.
+    // We hold it here so the next sentence's synthesis can run in parallel.
+    let mut play_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
+
+    // Drain a finished play_handle, logging any error.
+    macro_rules! await_play {
+        ($h:expr) => {
+            if let Some(h) = $h.take() {
+                match h.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => error!("Playback error: {}", e),
+                    Err(e) => error!("Playback task panicked: {}", e),
+                }
+            }
+        };
+    }
+
     loop {
         if cancel.load(Ordering::SeqCst) {
+            if let Some(h) = play_handle { h.abort(); }
             return (full_response, None);
         }
 
@@ -328,7 +351,8 @@ async fn stream_and_tts(
         // emits it mid-stream — it only appears at flush time.
         let sentences_to_play: Vec<String> = if is_done {
             if let Some((name, args)) = tools.parse_tool_call(&full_response) {
-                // Tool call detected — do NOT flush to TTS, return immediately.
+                // Tool call detected — wait for any pending playback then return.
+                await_play!(play_handle);
                 return (full_response, Some((name, args)));
             }
             let mut v = Vec::new();
@@ -343,39 +367,52 @@ async fn stream_and_tts(
 
         for sentence in sentences_to_play {
             if cancel.load(Ordering::SeqCst) {
+                if let Some(h) = play_handle { h.abort(); }
                 return (full_response, None);
             }
 
             info!("TTS: {:?}", sentence);
 
+            // ── Start synthesis immediately (runs while previous sentence plays) ──
             let tts_c = Arc::clone(tts);
             let sentence_c = sentence.clone();
-            let samples = match tokio::task::spawn_blocking(move || tts_c.synthesize(&sentence_c)).await {
+            let synth_handle =
+                tokio::task::spawn_blocking(move || tts_c.synthesize(&sentence_c));
+
+            // ── Wait for the previous sentence to finish playing ──────────────────
+            await_play!(play_handle);
+
+            if cancel.load(Ordering::SeqCst) {
+                synth_handle.abort();
+                return (full_response, None);
+            }
+
+            // ── Collect synthesis result (usually already done) ───────────────────
+            let samples = match synth_handle.await {
                 Ok(Ok(s)) => s,
                 Ok(Err(e)) => { error!("TTS error: {}", e); continue; }
-                Err(e)     => { error!("TTS task panicked: {}", e); continue; }
+                Err(e) => { error!("TTS task panicked: {}", e); continue; }
             };
 
             if cancel.load(Ordering::SeqCst) {
                 return (full_response, None);
             }
 
-            let out_c    = Arc::clone(audio_output);
+            // ── Start playback without awaiting — next sentence can synthesise now ─
+            let out_c = Arc::clone(audio_output);
             let cancel_c = Arc::clone(cancel);
-            if let Err(e) = tokio::task::spawn_blocking(move || {
+            play_handle = Some(tokio::task::spawn_blocking(move || {
                 out_c.play_blocking(&samples, tts_sample_rate, &cancel_c)
-            })
-            .await
-            .expect("playback task panicked")
-            {
-                error!("Playback error: {}", e);
-            }
+            }));
         }
 
         if is_done {
             break;
         }
     }
+
+    // Wait for the last sentence to finish playing before returning.
+    await_play!(play_handle);
 
     (full_response, None)
 }

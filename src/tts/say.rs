@@ -70,7 +70,14 @@ impl SayTts {
             .context("Failed to read say output file")?;
         let _ = std::fs::remove_file(&tmp_path);
 
-        wav_to_f32(&bytes)
+        let samples = wav_to_f32(&bytes)?;
+
+        // Prepend a short silence so CoreAudio's stream initialisation latency
+        // does not clip the first word of each sentence.
+        let silence_len = (self.sample_rate as usize * 30) / 1000; // 30 ms
+        let mut with_silence = vec![0.0f32; silence_len];
+        with_silence.extend_from_slice(&samples);
+        Ok(with_silence)
     }
 
     pub fn sample_rate(&self) -> u32 {
