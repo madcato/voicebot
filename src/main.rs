@@ -171,6 +171,33 @@ async fn main() -> Result<()> {
 
     info!("Ready. Speak to interact...");
 
+    // ── Startup greeting ──────────────────────────────────────────────────────
+    // The voicebot greets the user once at startup. It uses the proactive
+    // pipeline so it doesn't modify the conversation history.
+    {
+        let now = chrono::Local::now();
+        let time_str = now.format("%H:%M").to_string();
+        let notification = format!(
+            "[Sistema: el voicebot acaba de arrancar. Son las {time_str}.\n\
+             Saluda al usuario de forma natural y muy concisa.\n\
+             Si conoces su nombre (aparece en el perfil de usuario), úsalo.\n\
+             Si no lo conoces, preséntate y pregúntale su nombre.]"
+        );
+        let cancel_c      = Arc::clone(&cancel);
+        let tts_c         = Arc::clone(&tts);
+        let audio_out_c   = Arc::clone(&audio_output);
+        let llm_session_c = Arc::clone(&llm_session);
+        let llm_client_c  = llm_client.clone();
+        let tools_c       = Arc::clone(&tools);
+        tokio::spawn(async move {
+            run_proactive_pipeline(
+                notification, cancel_c, tts_c, audio_out_c,
+                llm_session_c, llm_client_c, tts_sample_rate, tools_c,
+            )
+            .await;
+        });
+    }
+
     let mut proactive_rx = proactive_rx;
     tokio::select! {
         _ = async {
@@ -182,6 +209,12 @@ async fn main() -> Result<()> {
                     },
                     Some(event) = proactive_rx.recv() => {
                         let ProactiveEvent::AgentResult { task, result } = event;
+                        let notification = format!(
+                            "[Sistema: una tarea en segundo plano ha terminado.]\n\
+                             Tarea: {task}\n\
+                             Resultado: {result}\n\
+                             Informa al usuario de forma natural y concisa."
+                        );
                         let cancel_c      = Arc::clone(&cancel);
                         let tts_c         = Arc::clone(&tts);
                         let audio_out_c   = Arc::clone(&audio_output);
@@ -190,7 +223,7 @@ async fn main() -> Result<()> {
                         let tools_c       = Arc::clone(&tools);
                         tokio::spawn(async move {
                             run_proactive_pipeline(
-                                task, result, cancel_c, tts_c, audio_out_c,
+                                notification, cancel_c, tts_c, audio_out_c,
                                 llm_session_c, llm_client_c, tts_sample_rate, tools_c,
                             )
                             .await;
@@ -645,15 +678,14 @@ async fn maybe_summarize(
     );
 }
 
-/// Speak a proactive agent result without a preceding user utterance.
+/// Speak a proactive notification without a preceding user utterance.
 ///
 /// Builds a temporary message list (current session context + a synthetic
 /// notification message), calls the LLM to produce a natural-language
 /// announcement, and streams the result straight to TTS.
 /// The response is NOT committed to the session or database.
 async fn run_proactive_pipeline(
-    task: String,
-    result: String,
+    notification: String,
     cancel: Arc<AtomicBool>,
     tts: Arc<SayTts>,
     audio_output: Arc<AudioOutput>,
@@ -666,20 +698,15 @@ async fn run_proactive_pipeline(
         return;
     }
 
-    info!("Proactive: agent finished task — announcing result");
+    info!("Proactive pipeline: {}", &notification[..notification.len().min(80)]);
 
-    // Build a temporary message list that asks the LLM to announce the result.
+    // Build a temporary message list that asks the LLM to respond.
     let messages: Vec<Message> = {
         let s = llm_session.lock().unwrap();
         let mut msgs = s.all_messages();
         msgs.push(Message {
             role: "user".to_string(),
-            content: format!(
-                "[Sistema: una tarea en segundo plano ha terminado.]\n\
-                 Tarea: {task}\n\
-                 Resultado: {result}\n\
-                 Informa al usuario de forma natural y concisa."
-            ),
+            content: notification,
         });
         msgs
     };
