@@ -124,6 +124,7 @@ async fn main() -> Result<()> {
         &config.llm_model,
         config.llm_max_tokens,
         config.llm_temperature,
+        config.llm_slot_id,
     );
     info!("LLM endpoint: {}", config.llm_url);
 

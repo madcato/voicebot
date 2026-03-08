@@ -125,7 +125,9 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
 | `VOICEBOT_LANGUAGE` | `es` | Language for STT and TTS voice selection |
 | `SAY_VOICE` | `Marisol (Enhanced)` | macOS voice name |
 | `WHISPER_MODEL` | — | Path to `.bin` Whisper model |
-| `LLM_URL` | `http://localhost:8080` | llama.cpp base URL |
+| `LLM_URL` | `http://localhost:8080` | llama.cpp server base URL (`llama-server --port 8080`) |
+| `LLM_MODEL` | `local-model` | Model name sent in API requests (llama.cpp ignores this field) |
+| `LLM_SLOT_ID` | `0` | llama.cpp KV-cache slot for this session (single-user = 0) |
 | `LLM_SYSTEM_PROMPT` | — | System prompt for the LLM |
 | `LLM_MAX_TOKENS` | `400` | Max generation tokens per response |
 | `LLM_TEMPERATURE` | `0.7` | LLM sampling temperature |
@@ -860,63 +862,115 @@ None of these are implemented in any consumer voice assistant today at productio
 
 ---
 
-#### Recommended architecture
+#### Recommended architecture — environment-triggered mode switch
 
-Combine layers based on the session mode:
+The key insight is to stop trying to infer "is the user talking to me?" (hard, unsolvable) and instead answer a simpler proxy question: **"is there another person in this environment?"** (solvable with speaker ID). The presence of a non-main-user voice is a reliable social-context signal that warrants more conservative behaviour.
+
+**State machine:**
 
 ```
-VAD fires
-    │
-    ▼
-[Speaker ID] ── similarity < threshold ──► discard (not the user)
-    │
-    ▼ (confirmed: user's voice)
-[State machine] ── Active mode ──────────► transcribe + respond directly
-    │
-    ▼ Ambient mode
-[Linguistic heuristics] ── strong signal ► transcribe + respond
-    │
-    ▼ ambiguous
-[LLM classifier (0.5B)] ── NO ──────────► discard
-    │
-    ▼ YES
-[Main pipeline] (STT already done in parallel)
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ACTIVE MODE  (default when alone)                                       │
+│  • Main user voice → respond normally                                    │
+│  • Non-main-user voice detected (N consecutive clips) → → AMBIENT       │
+└─────────────────────────────────────────────────────────────────────────┘
+              ↓ N non-main-user clips                 ↑ AMBIENT_CLEAR_SECS
+                                                        of clean environment
+┌─────────────────────────────────────────────────────────────────────────┐
+│  AMBIENT MODE  (guest / TV / radio present)                              │
+│  • Any voice → transcribe → check for wake word ("Jarvis, …")           │
+│      Wake word found → respond to that turn, stay in AMBIENT            │
+│      No wake word → discard, even if speaker is the main user           │
+│  • Silence for AMBIENT_CLEAR_SECS (e.g. 5 min) → → ACTIVE              │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-Total added latency on the cold-start path: ~100ms for speaker ID + ~150ms for LLM classifier = ~250ms, which is acceptable before Whisper and LLM begin.
+**Why this works for each problem scenario:**
+
+| Scenario | Handled by |
+|----------|-----------|
+| TV / radio | Non-main-user voices → ambient. Wake word required. Bot stays silent. |
+| Guest in the room | Guest voice → ambient. User talking to guest → no wake word → silent. |
+| User on phone | Phone's audio channel (remote voice) → ambient. User speaking to phone → silent unless they say the wake word. |
+| User alone, talking to bot | No non-main-user voice → stays active. Normal conversation. |
+| User alone after guest leaves | AMBIENT_CLEAR_SECS of silence/main-user-only → back to active. |
+| User quoting a command | Still in active mode → false positive possible. Linguistic heuristics help. |
+
+**The critical design decisions:**
+
+1. **N consecutive non-main-user detections to trigger ambient** (not just one). A single bad speaker ID frame (user with a cold, room echo) should not drop the bot into ambient. Use N=3 as default.
+
+2. **Wake word in ambient mode does not require a speaker ID match** — a guest can also address the bot with "Jarvis, what time is it?" This is natural and intentional. The wake word is the explicit signal, regardless of who says it.
+
+3. **Wake word detection is transcript-based** — no separate wake word model needed. Whisper already runs on every VAD segment. Check if the transcript starts with (or contains near the start) the bot's name or configured keyword. This adds zero latency to the existing pipeline.
+
+4. **Return to active is time-based** — after `AMBIENT_CLEAR_SECS` of hearing only the main user's voice or silence, the state machine resets to active. This handles guests leaving naturally without requiring an explicit "goodbye" command.
+
+5. **Active mode still benefits from linguistic heuristics** — when alone and in active mode, Layer 3 address heuristics can suppress obvious non-bot-directed speech (user thinking aloud, muttering to themselves). This is an optional refinement.
+
+**Full pipeline with mode switching:**
+
+```
+VAD fires → speaker ID embedding extracted
+    │
+    ├── Main user (similarity ≥ threshold)
+    │       │
+    │       ├── ACTIVE mode  → transcribe → LLM → TTS
+    │       │                   (+ optional linguistic check)
+    │       │
+    │       └── AMBIENT mode → transcribe → wake word check
+    │                               │
+    │                           wake word found → LLM → TTS
+    │                           no wake word    → discard
+    │
+    └── Non-main-user (similarity < threshold)
+            │
+            ├── Increment non-user counter
+            │       counter ≥ N → switch to AMBIENT
+            │
+            └── AMBIENT mode → transcribe → wake word check
+                                    │
+                                wake word found → LLM → TTS
+                                no wake word    → discard
+```
+
+**Latency impact:** speaker ID adds ~50ms per VAD segment. Wake word check on the transcript is a string search, < 1ms. Total overhead on the hot path (main user, active mode) is ~50ms, acceptable before the Whisper and LLM steps.
 
 ---
 
-#### What current technology cannot fully solve
+#### What this approach cannot fully solve
 
 | Scenario | Status | Notes |
 |----------|--------|-------|
-| TV / radio rejection | ✅ Solvable | Speaker ID filters non-user voices reliably |
-| Another person in the room | ✅ Solvable | Speaker ID handles it |
-| User speaking to someone else in the same room | ⚠️ Partial | Linguistic + LLM classifier helps; not perfect |
-| User on the phone (their voice, wrong context) | ⚠️ Hard | Phone audio channel detection is not standard; linguistic heuristics help |
-| User quoting a command without meaning it | ❌ Unsolved | "I told him to remind me about the meeting" → false positive |
-| Real-time streaming diarization (< 100ms) | ❌ Research | Not production-ready at required latency |
-| Ambient conversation with zero wake word | ❌ Research | The hard problem; LLM classifiers reduce but do not eliminate false positives |
+| TV / radio rejection | ✅ Solved | Non-main-user voices → ambient; wake word required |
+| Guest in the room | ✅ Solved | Guest voice triggers ambient; user must use wake word |
+| User on phone | ✅ Largely solved | Remote voice triggers ambient; conversational speech suppressed |
+| User speaking to guest (active mode, before guest speaks) | ⚠️ Small window | Bot may respond to first utterance before the mode switch fires. N=3 threshold limits this. |
+| User quoting commands while alone | ⚠️ Partial | Linguistic heuristics help; not perfect |
+| Re-entry latency | ⚠️ By design | User must wait AMBIENT_CLEAR_SECS after guest leaves before active mode resumes. Configurable. |
+| Real-time speaker ID on very short clips (< 0.5s) | ⚠️ Unreliable | Need ≥ 1s of speech for accurate embedding. Short interjections may misclassify. |
+| Real-time streaming diarization | ❌ Research | Not needed with this approach — per-segment speaker verification is sufficient |
 
-The honest assessment: **speaker ID solves 80% of the problem**. The remaining 20% (user talking to someone else) requires either a wake word or tolerating occasional false activations. For a personal single-user home environment with occasional other people, speaker ID + conversation state machine is probably good enough. For a noisy office, add the LLM classifier.
+**Overall assessment:** this approach makes the conversation awareness problem **practically solvable** for a personal home or office assistant. The two unsolved cases from before — user talking to someone else, and TV/radio — are both addressed. The remaining gaps (the small window before mode switches, and quoting edge cases) are minor in practice and acceptable for a personal assistant.
 
 ---
 
 #### Implementation steps
 
-1. **Speaker enrollment at startup** — detect if enrollment exists; if not, record 10s and extract embedding
-2. **Add `SpeakerVerifier` to VAD loop** — after each `SpeechEnd`, extract embedding and gate the pipeline
-3. **Add `ConversationState` to main loop** — auto-expire after configurable idle timeout (`CONVERSATION_ACTIVE_SECS`, default 15)
-4. **Linguistic address heuristics** — simple pass over transcript before sending to main LLM
-5. **Optional: LLM classifier** — small dedicated model; run in parallel with speaker ID
+1. **Speaker enrollment at startup** — detect if `SPEAKER_ENROLLMENT_PATH` exists; if not, record 10s of the user's voice and extract + save the embedding
+2. **`SpeakerVerifier` struct** — wraps a sherpa-onnx speaker recognition model; `verify(audio: &[f32]) -> f32` returns cosine similarity
+3. **`ConversationState` enum** — `Active` / `Ambient { non_user_streak: u8, last_non_user: Instant }`
+4. **Mode switch logic in VAD loop** — after each `SpeechEnd`: run speaker ID; update state; gate main pipeline accordingly
+5. **Wake word check** — in `Ambient` state: transcribe → check if transcript contains bot name at start (`transcript.to_lowercase().contains("jarvis")`)
+6. **Auto-return to active** — background timer or checked on each event: if last non-main-user voice was > `AMBIENT_CLEAR_SECS` ago → switch to Active
 
 **Config vars to add:**
 ```
-SPEAKER_ENROLLMENT_PATH   path to stored speaker embedding (default: data/speaker.emb)
+SPEAKER_ENROLLMENT_PATH   path to stored embedding (default: data/speaker.emb)
 SPEAKER_SIMILARITY_MIN    cosine similarity threshold (default: 0.75)
-CONVERSATION_ACTIVE_SECS  seconds after bot speaks to stay in active mode (default: 15)
-ADDRESS_CLASSIFIER_MODEL  optional 0.5B model path for address detection
+SPEAKER_AMBIENT_TRIGGER   consecutive non-user clips to enter ambient (default: 3)
+AMBIENT_CLEAR_SECS        seconds of clean environment to return to active (default: 300)
+WAKE_WORD                 keyword to respond in ambient mode (default: "jarvis")
 ```
 
 ---
