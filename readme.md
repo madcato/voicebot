@@ -718,7 +718,7 @@ The 7B is the voice; Claude (or any capable remote model) is the brain for hard 
 
 | Pillar | Status | Quick description |
 |--------|--------|-------------------|
-| A — Character system prompt | Planned | Write personality document; costs zero code |
+| A — Character system prompt | ✅ Done | `LLM_SYSTEM_PROMPT` env var + Jarvis prompt in `.env` |
 | B — Eyes (situational awareness) | Planned | Screenshot + vision model; system state injection |
 | C — Arms (computer agency) | Planned | `run_shell` + file/app/clipboard/web tools |
 | D — Voice of its own (proactive) | Planned | Inference daemon + event sources + `proactive_tx` |
