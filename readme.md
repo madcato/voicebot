@@ -123,6 +123,7 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
 | Env var | Default | Description |
 |---------|---------|-------------|
 | `VOICEBOT_LANGUAGE` | `es` | Language for STT and TTS voice selection |
+| `VAD_SILENCE_MS` | `800` | Silence duration (ms) before SpeechEnd fires. Lower = faster response; higher = safer for mid-sentence pauses. Range: 500–1500 |
 | `SAY_VOICE` | `Marisol (Enhanced)` | macOS voice name |
 | `WHISPER_MODEL` | — | Path to `.bin` Whisper model |
 | `LLM_URL` | `http://localhost:8080` | llama.cpp server base URL (`llama-server --port 8080`) |

@@ -160,7 +160,8 @@ async fn main() -> Result<()> {
     let (tx, rx) = bounded(AUDIO_CHANNEL_CAPACITY);
     let _stream = audio_capture.start_capture(tx, samples_per_chunk)?;
 
-    let mut vad = VoiceActivityDetector::new(source_sample_rate)?;
+    let mut vad = VoiceActivityDetector::new(source_sample_rate, config.vad_silence_ms)?;
+    info!("VAD silence threshold: {}ms", config.vad_silence_ms);
     let mut speech_buffer = AudioBuffer::new(source_sample_rate, MAX_SPEECH_BUFFER_SECS);
     let mut pre_roll: VecDeque<Vec<f32>> = VecDeque::with_capacity(PRE_ROLL_CHUNKS + 1);
 
@@ -466,8 +467,15 @@ async fn run_pipeline(
         s.clone()
     };
 
-    if let Err(e) = db.save_message(session_id, "User", &transcript).await {
-        warn!("Failed to save user message: {}", e);
+    // Save user message in background — don't block LLM start on a DB write.
+    {
+        let db_c = db.clone();
+        let transcript_c = transcript.clone();
+        tokio::spawn(async move {
+            if let Err(e) = db_c.save_message(session_id, "User", &transcript_c).await {
+                warn!("Failed to save user message: {}", e);
+            }
+        });
     }
 
     check_cancel!();

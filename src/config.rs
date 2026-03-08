@@ -12,6 +12,11 @@ pub struct Config {
     pub audio_output_device: Option<String>,
     pub list_devices: bool,
 
+    // ── VAD ───────────────────────────────────────────────────────────────────
+    /// Milliseconds of continuous silence before SpeechEnd fires.
+    /// Lower = faster response; higher = fewer false cuts mid-sentence.
+    pub vad_silence_ms: u32,
+
     // ── Language ─────────────────────────────────────────────────────────────
     /// "es" (default) or "en"
     pub language: String,
@@ -76,6 +81,12 @@ impl Config {
             list_devices: env::var("LIST_AUDIO_DEVICES")
                 .map(|v| v == "1" || v.to_lowercase() == "true")
                 .unwrap_or(false),
+
+            // VAD
+            vad_silence_ms: env::var("VAD_SILENCE_MS")
+                .unwrap_or_else(|_| "800".to_string())
+                .parse()
+                .context("Invalid VAD_SILENCE_MS")?,
 
             // Language
             language: env::var("VOICEBOT_LANGUAGE").unwrap_or_else(|_| "es".to_string()),
