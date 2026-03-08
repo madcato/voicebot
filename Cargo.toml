@@ -53,3 +53,5 @@ regex = "1"
 [dev-dependencies]
 # Mock HTTP server for LLM client integration tests
 wiremock = "0.6"
+# Safe env-var overrides in parallel tests
+temp-env = "0.3"

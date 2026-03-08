@@ -123,5 +123,157 @@ impl Config {
     pub fn samples_per_chunk(&self) -> usize {
         (self.sample_rate as usize * self.chunk_ms as usize) / 1000
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::LlmSession;
+
+    // ── Config loading from env ───────────────────────────────────────────────
+
+    #[test]
+    fn system_prompt_loaded_from_env_var() {
+        let prompt = "Eres Jarvis, el asistente personal de Daniel.";
+        temp_env::with_var("LLM_SYSTEM_PROMPT", Some(prompt), || {
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.llm_system_prompt, prompt);
+        });
+    }
+
+    #[test]
+    fn system_prompt_uses_default_when_env_var_absent() {
+        temp_env::with_var("LLM_SYSTEM_PROMPT", None::<&str>, || {
+            let config = Config::from_env().unwrap();
+            assert!(!config.llm_system_prompt.is_empty(), "default must not be empty");
+            // The default is the built-in Spanish assistant prompt.
+            assert!(
+                config.llm_system_prompt.contains("asistente"),
+                "default should be the Spanish assistant prompt, got: {:?}",
+                config.llm_system_prompt
+            );
+        });
+    }
+
+    #[test]
+    fn system_prompt_can_be_multiline() {
+        let prompt = "Eres Jarvis.\nHablas español.\nEres conciso.";
+        temp_env::with_var("LLM_SYSTEM_PROMPT", Some(prompt), || {
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.llm_system_prompt, prompt);
+        });
+    }
+
+    // ── Session construction from config ──────────────────────────────────────
+
+    #[test]
+    fn system_prompt_from_config_becomes_first_message() {
+        let prompt = "Eres Jarvis, el asistente personal de Daniel.";
+        temp_env::with_var("LLM_SYSTEM_PROMPT", Some(prompt), || {
+            let config = Config::from_env().unwrap();
+            let session = LlmSession::new(&config.llm_system_prompt, config.llm_slot_id);
+            let msgs = session.all_messages();
+
+            assert_eq!(msgs[0].role, "system");
+            assert_eq!(msgs[0].content, prompt);
+        });
+    }
+
+    #[test]
+    fn system_message_is_always_first_regardless_of_turns() {
+        let prompt = "Eres Jarvis.";
+        temp_env::with_var("LLM_SYSTEM_PROMPT", Some(prompt), || {
+            let config = Config::from_env().unwrap();
+            let mut session = LlmSession::new(&config.llm_system_prompt, config.llm_slot_id);
+            session.add_user_turn("Hola");
+            session.add_assistant_turn("Hola, Daniel.");
+            session.add_user_turn("¿Qué hora es?");
+
+            let msgs = session.all_messages();
+            assert_eq!(msgs[0].role, "system", "system must always be first");
+            assert_eq!(msgs[0].content, prompt);
+            assert_eq!(msgs.len(), 1 + 3); // system + 3 conversation messages
+        });
+    }
+
+    // ── Full chain: .env → Config → LlmSession → API payload ─────────────────
+
+    #[test]
+    fn full_chain_env_to_context() {
+        // This test mirrors exactly what main.rs does when building the session.
+        let prompt = "Eres Jarvis, el asistente personal de Daniel. Llevas años trabajando con él.";
+
+        temp_env::with_var("LLM_SYSTEM_PROMPT", Some(prompt), || {
+            // Step 1: load config (mirrors dotenvy::dotenv() + Config::from_env() in main)
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.llm_system_prompt, prompt);
+
+            // Step 2: build the composite system prompt (mirrors main.rs lines 89-94)
+            // No profile facts or tools in this test — they are tested separately.
+            let system_prompt = config.llm_system_prompt.clone();
+
+            // Step 3: create session (mirrors main.rs line 95-100)
+            let mut session =
+                LlmSession::new(&system_prompt, config.llm_slot_id);
+            session.add_user_turn("¿Qué hora es?");
+
+            // Step 4: verify the payload that would be sent to the LLM
+            let msgs = session.all_messages();
+            assert_eq!(msgs[0].role, "system");
+            assert_eq!(
+                msgs[0].content, prompt,
+                "the system prompt from .env must appear verbatim in the API payload"
+            );
+            assert_eq!(msgs[1].role, "user");
+            assert_eq!(msgs[1].content, "¿Qué hora es?");
+        });
+    }
+
+    #[test]
+    fn system_prompt_preserved_after_multiple_turns() {
+        let prompt = "Eres Jarvis.";
+        temp_env::with_var("LLM_SYSTEM_PROMPT", Some(prompt), || {
+            let config = Config::from_env().unwrap();
+            let mut session = LlmSession::new(&config.llm_system_prompt, config.llm_slot_id);
+
+            for i in 0..5 {
+                session.add_user_turn(&format!("Mensaje {i}"));
+                session.add_assistant_turn(&format!("Respuesta {i}"));
+            }
+
+            // System message must remain unchanged through all turns.
+            let msgs = session.all_messages();
+            assert_eq!(msgs[0].role, "system");
+            assert_eq!(msgs[0].content, prompt);
+            assert_eq!(msgs.len(), 1 + 10); // system + 10 conversation messages
+        });
+    }
+
+    #[test]
+    fn system_prompt_preserved_after_summarization() {
+        let prompt = "Eres Jarvis, el asistente de Daniel.";
+        temp_env::with_var("LLM_SYSTEM_PROMPT", Some(prompt), || {
+            let config = Config::from_env().unwrap();
+            let mut session = LlmSession::new(&config.llm_system_prompt, config.llm_slot_id);
+
+            for i in 0..5 {
+                session.add_user_turn(&format!("Pregunta {i}"));
+                session.add_assistant_turn(&format!("Respuesta {i}"));
+            }
+
+            // Summarize — the original system prompt must survive compaction.
+            session.apply_summary("Resumen de la conversación anterior.", 4);
+
+            let msgs = session.all_messages();
+            assert_eq!(msgs[0].role, "system");
+            // Original prompt is still there, summary appended below it.
+            assert!(
+                msgs[0].content.starts_with(prompt),
+                "original prompt must be preserved: {:?}",
+                msgs[0].content
+            );
+            assert!(msgs[0].content.contains("[CONVERSATION SUMMARY]"));
+            assert!(msgs[0].content.contains("Resumen de la conversación anterior."));
+        });
+    }
 }
