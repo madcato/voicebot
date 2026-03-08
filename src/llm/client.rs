@@ -300,6 +300,54 @@ mod tests {
 
     // ── end-to-end summarization (client + session) ───────────────────────────
 
+    // ── tool call detection via stream ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stream_delivers_tool_call_tokens() {
+        // The LLM emits a tool call split across multiple SSE chunks, as happens
+        // in practice when tokens arrive one-by-one.
+        let server = MockServer::start().await;
+        let sse_body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"<tool_call>\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"current_time\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"</tool_call>\"}}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(sse_body)
+                    .append_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = LlamaClient::new(&server.uri(), "test-model", 400, 0.7);
+        let mut rx = client.stream(&make_messages()).await.unwrap();
+
+        let mut full = String::new();
+        while let Some(token) = rx.recv().await {
+            full.push_str(&token);
+        }
+
+        // The full response contains the complete tool call XML
+        assert_eq!(full, "<tool_call>current_time</tool_call>");
+
+        // ToolRegistry can detect and route it
+        let mut registry = super::super::session::LlmSession::new("", 0); // just to use the module
+        let _ = registry; // unused, registry test is below
+
+        use crate::tools::{CurrentTimeTool, ToolRegistry};
+        let mut reg = ToolRegistry::new();
+        reg.register(CurrentTimeTool);
+        let name = reg.parse_tool_call(&full).expect("should detect current_time tool call");
+        assert_eq!(name, "current_time");
+        let result = reg.execute(&name);
+        assert!(!result.is_empty());
+        assert!(result.contains(':'), "expected time in result: {result:?}");
+    }
+
     #[tokio::test]
     async fn summarization_cycle_with_mock_llm() {
         let server = MockServer::start().await;
