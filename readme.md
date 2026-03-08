@@ -723,6 +723,204 @@ The 7B is the voice; Claude (or any capable remote model) is the brain for hard 
 
 ---
 
+### 8. Conversation Awareness
+
+**Goal:** The voicebot must ignore audio that is not directed at it — other people talking in the room, TV, radio, phone calls — and respond only when the user is genuinely speaking to it.
+
+This is one of the hardest unsolved problems in always-on voice assistants. It has two independent sub-problems:
+
+1. **Who is speaking?** (speaker identification)
+2. **Are they speaking to me?** (intent / address detection)
+
+Both must be solved for the voicebot to work reliably in a real home or office environment.
+
+---
+
+#### Sub-problem 1: Who is speaking?
+
+**The problem:** Silero VAD fires on any voice — user, partner, TV, podcast, colleague on a call. Everything gets transcribed and potentially sent to the LLM.
+
+**Solution: Speaker verification (not diarization)**
+
+Speaker *diarization* labels every speaker in a long recording. Speaker *verification* answers a simpler question: "Is this clip the enrolled user?" Verification is realtime-friendly — it runs on a 1–3 second clip in under 50ms.
+
+**How it works:**
+1. **Enrollment:** Record 5–10 seconds of the user's voice at first startup → extract a speaker embedding vector → store it
+2. **Runtime:** After each VAD segment, extract an embedding → compute cosine similarity with the enrolled vector → if similarity < threshold (e.g. 0.70), discard the audio without transcribing it
+
+**Embedding models available locally:**
+- **3D-Speaker** (Alibaba) — good accuracy, ONNX model ~30MB
+- **WeSpeaker** (Tongji) — fast and compact, multiple ONNX variants
+- **ECAPA-TDNN** (SpeechBrain) — state of the art; exportable to ONNX
+- **Silero Speaker ID** — same team as the VAD library; tiny and fast
+
+**Rust integration:** [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) provides Rust bindings and ships prebuilt speaker recognition models. It is the most practical path for this project since Whisper and VAD are already the bottlenecks.
+
+**Threshold tuning:**
+- Too tight (0.85+): false negatives when user has a cold, is tired, or speaks quietly
+- Too loose (0.50–): other people's voices pass through
+- Practical starting point: 0.72–0.78; expose as `SPEAKER_SIMILARITY_THRESHOLD` env var
+
+**What it cannot do:**
+- A voice identical to the user (twin) will pass — not a realistic concern
+- If the user's voice changes dramatically (illness, aging), re-enrollment is needed
+- Does not distinguish "user speaking to bot" from "user speaking to someone else" — that is sub-problem 2
+
+**Limits of current technology:**
+- Real-time streaming diarization (multiple simultaneous speakers, labeled live) works in research but is not production-ready at < 100ms latency
+- Speaker ID on very short clips (< 0.5s) is unreliable — need at least 1–2s of clean speech
+
+---
+
+#### Sub-problem 2: Is the user speaking to me?
+
+Even after confirming it is the user's voice, they may be talking to another person in the room, on the phone, or just thinking aloud.
+
+**This is the harder problem.** No perfect solution exists today. The approaches below can be combined into layers, with each layer filtering out false positives before the next.
+
+---
+
+**Layer 1 — Wake word (most reliable, least natural)**
+
+The user explicitly activates the bot by saying a keyword ("Jarvis", "Butler", "Hey").
+
+- Latency: < 10ms (dedicated tiny model, always listening)
+- False positive rate: near zero
+- UX cost: unnatural; users must consciously change their speech behaviour
+- Libraries: [Porcupine](https://github.com/Picovoice/porcupine) (proprietary), [openWakeWord](https://github.com/dscripka/openWakeWord) (open, Python), [rustpotter](https://github.com/GiviMAD/rustpotter) (Rust, open)
+
+Wake word solves the problem completely but kills the "ambient companion" feel. Jarvis does not wait for a magic word.
+
+---
+
+**Layer 2 — Conversation state machine (zero cost)**
+
+Track whether the voicebot is in an "active conversation":
+- After the bot speaks, it is in **active mode** for N seconds (default: 15s)
+- In active mode, respond to anything from the user's voice (speaker ID already confirmed)
+- After N seconds of user silence, drop back to **ambient mode**
+- In ambient mode, require a higher confidence signal (layers 3 or 4)
+
+This alone handles the most common case: once a conversation starts, it flows naturally. The problem is only the first utterance of a cold session.
+
+```rust
+enum ConversationState {
+    Ambient,            // bot has not spoken recently; require strong address signal
+    Active { until: Instant }, // within N seconds of last bot turn; respond freely
+}
+```
+
+---
+
+**Layer 3 — Linguistic address detection (fast heuristic)**
+
+Analyze the transcript for markers that indicate the user is speaking to the bot:
+
+| Signal | Examples | Weight |
+|--------|----------|--------|
+| Bot name | "Jarvis, …" / "Butler, …" | Strong |
+| Second-person imperative | "search X", "tell me", "remind me", "check…" | Strong |
+| Direct question | "what time is it?", "can you…", "do you know…" | Medium |
+| First-person with bot context | "I need you to…", "can you help me…" | Medium |
+| Pure declarative to someone | "I think we should…", "look at this" | Weak/None |
+
+A simple regex/keyword pass takes < 1ms. A small transformer classifier trained on labelled examples takes ~5ms.
+
+False positive sources: user quoting commands while talking to a colleague ("I told him to search for X"), TV dialogue with similar patterns.
+
+---
+
+**Layer 4 — LLM address classification (accurate but adds latency)**
+
+After transcription, call a small fast model with:
+
+```
+System: "Decide if the following utterance is directed at you (a voice AI assistant named Jarvis) or at someone else. Answer only YES or NO."
+User: "{transcript}"
+```
+
+A 0.5B–1B model answers in < 100ms and is surprisingly accurate at this binary task. It can leverage full linguistic context — tone, topic, conversational markers — that a keyword heuristic misses.
+
+The main cost is latency: ~100–300ms before the main LLM call begins. This can be mitigated by running both in parallel and aborting the main call if classification returns NO.
+
+---
+
+**Layer 5 — Audio context signals (future)**
+
+Signals available from raw audio that provide context without transcription:
+
+| Signal | What it tells you | How to detect |
+|--------|-------------------|---------------|
+| Multiple simultaneous speakers | User is in a conversation with someone | Overlap detection (spectral) |
+| Audio from speakers (TV/radio) | Broadcast, not conversation | Acoustic fingerprinting or VAD on playback channel |
+| Phone call (earpiece audio) | User is on the phone | DTMF tones, network audio fingerprint |
+| Silence before utterance | User is probably addressing bot directly | VAD gap analysis |
+
+None of these are implemented in any consumer voice assistant today at production quality. They are research-grade.
+
+---
+
+#### Recommended architecture
+
+Combine layers based on the session mode:
+
+```
+VAD fires
+    │
+    ▼
+[Speaker ID] ── similarity < threshold ──► discard (not the user)
+    │
+    ▼ (confirmed: user's voice)
+[State machine] ── Active mode ──────────► transcribe + respond directly
+    │
+    ▼ Ambient mode
+[Linguistic heuristics] ── strong signal ► transcribe + respond
+    │
+    ▼ ambiguous
+[LLM classifier (0.5B)] ── NO ──────────► discard
+    │
+    ▼ YES
+[Main pipeline] (STT already done in parallel)
+```
+
+Total added latency on the cold-start path: ~100ms for speaker ID + ~150ms for LLM classifier = ~250ms, which is acceptable before Whisper and LLM begin.
+
+---
+
+#### What current technology cannot fully solve
+
+| Scenario | Status | Notes |
+|----------|--------|-------|
+| TV / radio rejection | ✅ Solvable | Speaker ID filters non-user voices reliably |
+| Another person in the room | ✅ Solvable | Speaker ID handles it |
+| User speaking to someone else in the same room | ⚠️ Partial | Linguistic + LLM classifier helps; not perfect |
+| User on the phone (their voice, wrong context) | ⚠️ Hard | Phone audio channel detection is not standard; linguistic heuristics help |
+| User quoting a command without meaning it | ❌ Unsolved | "I told him to remind me about the meeting" → false positive |
+| Real-time streaming diarization (< 100ms) | ❌ Research | Not production-ready at required latency |
+| Ambient conversation with zero wake word | ❌ Research | The hard problem; LLM classifiers reduce but do not eliminate false positives |
+
+The honest assessment: **speaker ID solves 80% of the problem**. The remaining 20% (user talking to someone else) requires either a wake word or tolerating occasional false activations. For a personal single-user home environment with occasional other people, speaker ID + conversation state machine is probably good enough. For a noisy office, add the LLM classifier.
+
+---
+
+#### Implementation steps
+
+1. **Speaker enrollment at startup** — detect if enrollment exists; if not, record 10s and extract embedding
+2. **Add `SpeakerVerifier` to VAD loop** — after each `SpeechEnd`, extract embedding and gate the pipeline
+3. **Add `ConversationState` to main loop** — auto-expire after configurable idle timeout (`CONVERSATION_ACTIVE_SECS`, default 15)
+4. **Linguistic address heuristics** — simple pass over transcript before sending to main LLM
+5. **Optional: LLM classifier** — small dedicated model; run in parallel with speaker ID
+
+**Config vars to add:**
+```
+SPEAKER_ENROLLMENT_PATH   path to stored speaker embedding (default: data/speaker.emb)
+SPEAKER_SIMILARITY_MIN    cosine similarity threshold (default: 0.75)
+CONVERSATION_ACTIVE_SECS  seconds after bot speaks to stay in active mode (default: 15)
+ADDRESS_CLASSIFIER_MODEL  optional 0.5B model path for address detection
+```
+
+---
+
 ## Implementation Status
 
 ### Conversational core
@@ -738,6 +936,7 @@ The 7B is the voice; Claude (or any capable remote model) is the brain for hard 
 | MCP integration | Planned | `src/mcp/`; JSON-RPC over stdio/HTTP |
 | Agent delegation | ✅ Done | `run_agent` (sync) + `run_agent_async` (proactive); OpenAI-compatible |
 | Voicebot as agent intermediary | Planned | Voice proxy over existing text agents |
+| Conversation awareness | Planned | Speaker ID (sherpa-onnx) + state machine + linguistic/LLM classifier |
 
 ### Butler pillars
 
