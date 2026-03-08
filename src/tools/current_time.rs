@@ -1,9 +1,11 @@
+use async_trait::async_trait;
 use chrono::Local;
 
 use super::Tool;
 
 pub struct CurrentTimeTool;
 
+#[async_trait]
 impl Tool for CurrentTimeTool {
     fn name(&self) -> &str {
         "current_time"
@@ -13,7 +15,7 @@ impl Tool for CurrentTimeTool {
         "Returns the current local date and time."
     }
 
-    fn run(&self) -> String {
+    async fn run(&self, _args: &str) -> String {
         Local::now().format("%H:%M:%S, %A %d %B %Y").to_string()
     }
 }
@@ -32,17 +34,17 @@ mod tests {
         assert!(!CurrentTimeTool.description().is_empty());
     }
 
-    #[test]
-    fn run_returns_non_empty_string() {
-        let result = CurrentTimeTool.run();
+    #[tokio::test]
+    async fn run_returns_non_empty_string() {
+        let result = CurrentTimeTool.run("").await;
         assert!(!result.is_empty());
     }
 
-    #[test]
-    fn run_output_matches_format() {
+    #[tokio::test]
+    async fn run_output_matches_format() {
         // Expected: "HH:MM:SS, Weekday DD Month YYYY"
         // Example:  "14:05:32, Saturday 08 March 2025"
-        let result = CurrentTimeTool.run();
+        let result = CurrentTimeTool.run("").await;
         let parts: Vec<&str> = result.splitn(2, ", ").collect();
         assert_eq!(parts.len(), 2, "output must contain ', ' separator: {result:?}");
 
@@ -67,14 +69,13 @@ mod tests {
         assert!(year >= 2024, "year seems wrong: {year}");
     }
 
-    #[test]
-    fn run_output_is_consistent_within_same_second() {
+    #[tokio::test]
+    async fn run_output_is_consistent_within_same_second() {
         // Two consecutive calls should return the same second (or differ by at most 1s).
         let before = Local::now();
-        let result = CurrentTimeTool.run();
+        let result = CurrentTimeTool.run("").await;
         let after = Local::now();
 
-        // The time embedded in result must fall between before and after (±1s tolerance).
         let result_time_str = result.splitn(2, ", ").next().unwrap();
         let b = before.format("%H:%M:%S").to_string();
         let a = after.format("%H:%M:%S").to_string();
@@ -82,5 +83,12 @@ mod tests {
             result_time_str >= b.as_str() || result_time_str <= a.as_str(),
             "time {result_time_str:?} should be within [{b}, {a}]"
         );
+    }
+
+    #[tokio::test]
+    async fn run_ignores_args() {
+        // current_time does not use args — any input should still return a valid time
+        let result = CurrentTimeTool.run("ignored args").await;
+        assert!(result.contains(':'), "should still return a time: {result:?}");
     }
 }
