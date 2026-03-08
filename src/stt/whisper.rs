@@ -49,6 +49,10 @@ impl WhisperStt {
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
         params.set_single_segment(false);
+        // Don't predict timestamp tokens between words — saves decoder steps.
+        params.set_no_timestamps(true);
+        // Skip the word-level timestamp alignment post-processing pass.
+        params.set_token_timestamps(false);
 
         state
             .full(params, audio)

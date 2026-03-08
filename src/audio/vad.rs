@@ -8,8 +8,6 @@ const VAD_FRAME_SIZE: usize = 512;
 
 /// Consecutive 32ms frames of speech required before signalling SpeechStart (~250ms).
 const SPEECH_FRAMES_NEEDED: u32 = 8;
-/// Consecutive 32ms frames of silence required before signalling SpeechEnd (~1.5s).
-const SILENCE_FRAMES_NEEDED: u32 = 48;
 /// Probability threshold above which a frame is considered speech.
 const SPEECH_THRESHOLD: f32 = 0.5;
 
@@ -21,14 +19,24 @@ pub struct VoiceActivityDetector {
     is_active: bool,
     speech_counter: u32,
     silence_counter: u32,
+    /// Consecutive 32ms frames of silence needed before signalling SpeechEnd.
+    silence_frames_needed: u32,
 }
 
 impl VoiceActivityDetector {
-    pub fn new(source_rate: u32) -> Result<Self> {
+    /// Create a new VAD. `silence_ms` controls how long silence must persist
+    /// before a `SpeechEnd` is fired. Lower values feel more responsive but
+    /// risk cutting off speakers who pause mid-sentence.
+    /// Typical range: 600–1500ms. Default recommended: 800ms.
+    pub fn new(source_rate: u32, silence_ms: u32) -> Result<Self> {
         let detector = SileroDetector::builder()
             .sample_rate(VAD_SAMPLE_RATE)
             .chunk_size(VAD_FRAME_SIZE)
             .build()?;
+
+        // Each Silero frame is VAD_FRAME_SIZE samples at 16kHz = 32ms.
+        let silence_frames_needed = ((silence_ms as f32 / 32.0).round() as u32).max(1);
+        tracing::debug!("VAD silence threshold: {}ms ({} frames)", silence_ms, silence_frames_needed);
 
         Ok(Self {
             detector,
@@ -37,6 +45,7 @@ impl VoiceActivityDetector {
             is_active: false,
             speech_counter: 0,
             silence_counter: 0,
+            silence_frames_needed,
         })
     }
 
@@ -70,7 +79,7 @@ impl VoiceActivityDetector {
                 self.silence_counter += 1;
                 self.speech_counter = 0;
 
-                if self.is_active && self.silence_counter >= SILENCE_FRAMES_NEEDED {
+                if self.is_active && self.silence_counter >= self.silence_frames_needed {
                     self.is_active = false;
                     result = Some(VadResult::SpeechEnd);
                 }
