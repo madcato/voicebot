@@ -1,3 +1,4 @@
+mod agents;
 mod audio;
 mod config;
 mod db;
@@ -17,16 +18,17 @@ use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+use crate::agents::ProactiveEvent;
 use crate::audio::audio_capture::{AudioCapture, AudioChunk};
 use crate::audio::buffer::AudioBuffer;
 use crate::audio::output::AudioOutput;
 use crate::audio::vad::{VadResult, VoiceActivityDetector};
 use crate::config::Config;
 use crate::db::Database;
-use crate::llm::{LlamaClient, LlmSession};
-use crate::stt::WhisperStt;
+use crate::llm::{LlamaClient, LlmSession, Message};
 use crate::profile::{build_profile_context, extract_facts, ProfileFact};
-use crate::tools::{CurrentTimeTool, ToolRegistry};
+use crate::stt::WhisperStt;
+use crate::tools::{CurrentTimeTool, RunAgentAsyncTool, RunAgentTool, ToolRegistry};
 use crate::tts::{SayTts, SentenceSplitter};
 
 const AUDIO_CHANNEL_CAPACITY: usize = 200;
@@ -58,9 +60,26 @@ async fn main() -> Result<()> {
 
     info!("Language: {}", config.language);
 
+    // ── Proactive event channel ───────────────────────────────────────────────
+    let (proactive_tx, proactive_rx) = mpsc::channel::<ProactiveEvent>(32);
+
     // ── Tools ─────────────────────────────────────────────────────────────────
     let mut tool_registry = ToolRegistry::new();
     tool_registry.register(CurrentTimeTool);
+    if let Some(ref agent_url) = config.agent_url {
+        info!("Agent delegation enabled: {}", agent_url);
+        tool_registry.register(RunAgentTool::new(
+            agent_url,
+            &config.agent_model,
+            config.agent_max_tokens,
+        ));
+        tool_registry.register(RunAgentAsyncTool::new(
+            agent_url,
+            &config.agent_model,
+            config.agent_max_tokens,
+            proactive_tx,
+        ));
+    }
     let tools = Arc::new(tool_registry);
 
     // ── Database ─────────────────────────────────────────────────────────────
@@ -150,12 +169,32 @@ async fn main() -> Result<()> {
 
     info!("Ready. Speak to interact...");
 
+    let mut proactive_rx = proactive_rx;
     tokio::select! {
         _ = async {
             loop {
-                let chunk: AudioChunk = match rx.recv().await {
-                    Ok(c) => c,
-                    Err(e) => { error!("Audio channel closed: {}", e); break; }
+                let chunk: AudioChunk = tokio::select! {
+                    result = rx.recv() => match result {
+                        Ok(c) => c,
+                        Err(e) => { error!("Audio channel closed: {}", e); break; }
+                    },
+                    Some(event) = proactive_rx.recv() => {
+                        let ProactiveEvent::AgentResult { task, result } = event;
+                        let cancel_c      = Arc::clone(&cancel);
+                        let tts_c         = Arc::clone(&tts);
+                        let audio_out_c   = Arc::clone(&audio_output);
+                        let llm_session_c = Arc::clone(&llm_session);
+                        let llm_client_c  = llm_client.clone();
+                        let tools_c       = Arc::clone(&tools);
+                        tokio::spawn(async move {
+                            run_proactive_pipeline(
+                                task, result, cancel_c, tts_c, audio_out_c,
+                                llm_session_c, llm_client_c, tts_sample_rate, tools_c,
+                            )
+                            .await;
+                        });
+                        continue;
+                    },
                 };
 
                 // Downmix to mono
@@ -259,8 +298,8 @@ async fn main() -> Result<()> {
 
 /// Stream LLM tokens into TTS, sentence by sentence.
 ///
-/// Returns `(full_response, tool_name)`. If the LLM emitted a tool call,
-/// `tool_name` is `Some(name)` and the tool call text was NOT sent to TTS.
+/// Returns `(full_response, tool_call)`. If the LLM emitted a tool call,
+/// `tool_call` is `Some((name, args))` and the call text was NOT sent to TTS.
 async fn stream_and_tts(
     mut token_rx: mpsc::Receiver<String>,
     cancel: &Arc<AtomicBool>,
@@ -268,7 +307,7 @@ async fn stream_and_tts(
     audio_output: &Arc<AudioOutput>,
     tts_sample_rate: u32,
     tools: &ToolRegistry,
-) -> (String, Option<String>) {
+) -> (String, Option<(String, String)>) {
     let mut sentence_buf = SentenceSplitter::new();
     let mut full_response = String::new();
 
@@ -287,9 +326,9 @@ async fn stream_and_tts(
         // Tool call XML has no punctuation, so the SentenceSplitter never
         // emits it mid-stream — it only appears at flush time.
         let sentences_to_play: Vec<String> = if is_done {
-            if let Some(name) = tools.parse_tool_call(&full_response) {
+            if let Some((name, args)) = tools.parse_tool_call(&full_response) {
                 // Tool call detected — do NOT flush to TTS, return immediately.
-                return (full_response, Some(name));
+                return (full_response, Some((name, args)));
             }
             let mut v = Vec::new();
             if let Some(s) = sentence_buf.push(&token) { v.push(s); }
@@ -407,14 +446,14 @@ async fn run_pipeline(
             Err(e) => { error!("LLM stream error: {}", e); break 'pipeline; }
         };
 
-        let (llm_text, tool_name) =
+        let (llm_text, tool_call) =
             stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, &tools).await;
 
         check_cancel!();
 
-        if let Some(name) = tool_name {
+        if let Some((name, args)) = tool_call {
             // ── Tool execution ────────────────────────────────────────────────
-            let result = tools.execute(&name);
+            let result = tools.execute(&name, &args).await;
             info!("Tool `{}` → {}", name, result);
 
             // Inject tool result and reopen assistant turn
@@ -558,4 +597,59 @@ async fn maybe_summarize(
         "Summarization complete — prompt compacted (keeping {} recent turns)",
         keep_turns
     );
+}
+
+/// Speak a proactive agent result without a preceding user utterance.
+///
+/// Builds a temporary message list (current session context + a synthetic
+/// notification message), calls the LLM to produce a natural-language
+/// announcement, and streams the result straight to TTS.
+/// The response is NOT committed to the session or database.
+async fn run_proactive_pipeline(
+    task: String,
+    result: String,
+    cancel: Arc<AtomicBool>,
+    tts: Arc<SayTts>,
+    audio_output: Arc<AudioOutput>,
+    llm_session: Arc<Mutex<LlmSession>>,
+    llm_client: LlamaClient,
+    tts_sample_rate: u32,
+    tools: Arc<ToolRegistry>,
+) {
+    if cancel.load(Ordering::SeqCst) {
+        return;
+    }
+
+    info!("Proactive: agent finished task — announcing result");
+
+    // Build a temporary message list that asks the LLM to announce the result.
+    let messages: Vec<Message> = {
+        let s = llm_session.lock().unwrap();
+        let mut msgs = s.all_messages();
+        msgs.push(Message {
+            role: "user".to_string(),
+            content: format!(
+                "[Sistema: una tarea en segundo plano ha terminado.]\n\
+                 Tarea: {task}\n\
+                 Resultado: {result}\n\
+                 Informa al usuario de forma natural y concisa."
+            ),
+        });
+        msgs
+    };
+
+    let token_rx = match llm_client.stream(&messages).await {
+        Ok(r) => r,
+        Err(e) => {
+            error!("Proactive LLM error: {}", e);
+            return;
+        }
+    };
+
+    let (response, _) =
+        stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, &tools).await;
+
+    if !response.is_empty() {
+        info!("Proactive: {}", response);
+    }
 }

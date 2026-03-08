@@ -37,7 +37,8 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
 - **Barge-in**: user speech cancels active LLM/TTS pipeline instantly via `Arc<AtomicBool>`
 - Persistent SQLite conversation history — restored on startup
 - LLM session rollback on barge-in interruption
-- **Tool use**: `<tool_call>` XML detection mid-stream; LLM loops back after tool result; `current_time` built-in
+- **Tool use**: `<tool_call>tool_name: args</tool_call>` XML detection mid-stream; LLM loops back after tool result; `current_time` built-in
+- **Agent delegation**: `run_agent` (sync) and `run_agent_async` (background + proactive announce) tools; any OpenAI-compatible endpoint; proactive channel in VAD loop
 - **Context summarization**: auto-triggers at 75% of context window; keeps last N turns verbatim; summary persisted in DB and restored on restart
 - **User profile**: background LLM extraction of user facts after every turn; stored in `user_profile` SQLite table; injected into system prompt on startup
 
@@ -108,7 +109,8 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
 | LLM session | `src/llm/session.rs` | Accumulated prompt, turn tracking, summarization |
 | TTS | `src/tts/say.rs` | macOS `say` subprocess, WAV parsing |
 | Sentence splitter | `src/tts/sentence.rs` | Buffers tokens, emits complete sentences |
-| Tools | `src/tools/` | `Tool` trait + `ToolRegistry`; `current_time` built-in |
+| Tools | `src/tools/` | `Tool` trait + `ToolRegistry`; `current_time`, `run_agent`, `run_agent_async` |
+| Agents | `src/agents/mod.rs` | `ProactiveEvent` enum; proactive speech channel |
 | Profile | `src/profile/mod.rs` | User fact extraction, JSON parsing, context builder |
 | Database | `src/db/database.rs` | SQLite: sessions, messages, summary, user_profile |
 | Config | `src/config.rs` | Environment-based configuration |
@@ -129,6 +131,9 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
 | `LLM_TEMPERATURE` | `0.7` | LLM sampling temperature |
 | `LLM_CONTEXT_TOKENS` | `4096` | Model context window size; triggers summarization at 75% |
 | `LLM_SUMMARY_KEEP_TURNS` | `6` | Recent (role, content) turns kept verbatim after summarization |
+| `AGENT_URL` | — | Remote agent base URL (OpenAI-compatible). Unset = agent tools disabled |
+| `AGENT_MODEL` | `local-model` | Model name sent to agent server |
+| `AGENT_MAX_TOKENS` | `2048` | Max tokens for agent responses |
 | `AUDIO_DEVICE` | system default | Input device name substring |
 | `AUDIO_OUTPUT_DEVICE` | system default | Output device name substring |
 | `DB_PATH` | `data/voicebot.db` | SQLite database file path |
@@ -226,40 +231,60 @@ env = { BRAVE_API_KEY = "..." }
 
 ---
 
-### 3. Agent Delegation
+### 3. Agent Delegation ✅ Implemented
 
 **Goal:** The LLM can delegate complex tasks (deep research, code generation, long-running automation) to specialized agents. Results are routed back through the LLM, which summarizes them into a voice response.
 
 **Two delegation modes:**
 
-**Synchronous (simple tasks, < 5s):**
+**Synchronous (`run_agent` — tasks < 10s):**
 ```
-LLM calls "run_agent" tool → agent executes → result → LLM → TTS
+LLM emits <tool_call>run_agent: task description</tool_call>
+         ↓
+    HTTP POST to agent (OpenAI-compatible)
+         ↓ blocks until response
+    result injected as tool message
+         ↓
+    LLM re-called → streams spoken response → TTS
 ```
-Identical to tool use. The agent is just a long-running tool.
 
-**Asynchronous (long tasks — research, coding, etc.):**
+**Asynchronous (`run_agent_async` — long tasks):**
 ```
 User: "Research X and tell me the summary"
-LLM → TTS: "Lo investigo, te aviso en unos minutos"
-              ↓
-         agent runs in background (tokio::spawn)
-              ↓ (minutes later)
-         agent completes → pushes to proactive_tx channel
-              ↓
-         LLM synthesizes result → TTS plays proactively
+LLM emits <tool_call>run_agent_async: task</tool_call>
+         ↓
+    tokio::spawn background HTTP call
+    tool returns immediately: "[Tarea delegada al agente. El resultado llegará en breve.]"
+         ↓
+    LLM speaks acknowledgment (< 1s)
+         ↓ (minutes later, in background)
+    agent completes → ProactiveEvent::AgentResult pushed to proactive_tx
+         ↓
+    VAD loop receives proactive event → spawns run_proactive_pipeline
+         ↓
+    LLM builds natural announcement → TTS plays proactively
 ```
 
-**Implementation steps:**
-1. `AgentManager` in `src/agents/`: registry of available agents with their capabilities and API contracts
-2. `run_agent` tool definition: `{ name, task_description, async: bool }`
-3. For async mode: `tokio::spawn` the agent task; on completion, push a `ProactiveEvent::AgentResult { agent, result }` to a channel that the main VAD loop listens to (see Feature 5)
-4. The LLM is given agent descriptions at startup so it knows when to delegate
+**Implementation:**
 
-**Agent protocol options:**
-- HTTP API (OpenAI-compatible agents, OpenClaw, etc.)
-- Claude SDK / Anthropic API (for sub-agents using Claude)
-- Local subprocess with structured I/O
+- **`src/agents/mod.rs`** — `ProactiveEvent::AgentResult { task, result }` enum
+- **`src/tools/run_agent.rs`** — `RunAgentTool` (sync) and `RunAgentAsyncTool` (async + proactive channel)
+- **Tool call format:** `<tool_call>run_agent: task description</tool_call>` — args after the colon
+- **`ToolRegistry`** updated: `parse_tool_call` now returns `Option<(name, args)>`; `execute` is async
+- **VAD loop** extended with inner `tokio::select!` watching both audio and `proactive_rx`
+- **`run_proactive_pipeline`** — builds temporary message list from session + agent result, calls LLM, sends to TTS
+
+**Config vars:**
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `AGENT_URL` | — | Base URL of the remote agent (OpenAI-compatible). If unset, agent tools are disabled. |
+| `AGENT_MODEL` | `local-model` | Model name sent to the agent server |
+| `AGENT_MAX_TOKENS` | `2048` | Max tokens for agent responses |
+
+**Agent protocol:** any OpenAI-compatible HTTP endpoint (`/v1/chat/completions`). Works with llama.cpp, Ollama, OpenRouter, Anthropic (via proxy), or a custom OpenClaw/Claude Code agent.
+
+**Tests:** 12 tests in `src/tools/run_agent.rs` covering sync response, async channel delivery, error handling, and round-trip via registry (wiremock-based).
 
 ---
 
@@ -711,7 +736,7 @@ The 7B is the voice; Claude (or any capable remote model) is the brain for hard 
 | Context summarization | ✅ Done | Auto-trigger at 75% context; persisted in DB |
 | User profile extraction + injection | ✅ Done | Background LLM; `user_profile` table |
 | MCP integration | Planned | `src/mcp/`; JSON-RPC over stdio/HTTP |
-| Agent delegation | Planned | Depends on tool use + proactive events |
+| Agent delegation | ✅ Done | `run_agent` (sync) + `run_agent_async` (proactive); OpenAI-compatible |
 | Voicebot as agent intermediary | Planned | Voice proxy over existing text agents |
 
 ### Butler pillars
@@ -734,7 +759,7 @@ The 7B is the voice; Claude (or any capable remote model) is the brain for hard 
 5. **MCP** — Vast tool ecosystem for free once the tool layer is mature.
 6. **Pillar E** — Episodic memory. Butler remembers your history together.
 7. **Pillar F** — Always-on daemon. Butler becomes a permanent presence.
-8. **Agent delegation** — Complex tasks farmed to specialised agents.
+8. **Agent delegation** ✅ — Complex tasks farmed to specialised agents (done).
 
 ---
 

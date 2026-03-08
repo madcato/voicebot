@@ -341,9 +341,9 @@ mod tests {
         use crate::tools::{CurrentTimeTool, ToolRegistry};
         let mut reg = ToolRegistry::new();
         reg.register(CurrentTimeTool);
-        let name = reg.parse_tool_call(&full).expect("should detect current_time tool call");
+        let (name, args) = reg.parse_tool_call(&full).expect("should detect current_time tool call");
         assert_eq!(name, "current_time");
-        let result = reg.execute(&name);
+        let result = reg.execute(&name, &args).await;
         assert!(!result.is_empty());
         assert!(result.contains(':'), "expected time in result: {result:?}");
     }

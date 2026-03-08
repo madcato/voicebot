@@ -1,14 +1,20 @@
 pub mod current_time;
+pub mod run_agent;
 
 use std::collections::HashMap;
+
+use async_trait::async_trait;
+
 pub use current_time::CurrentTimeTool;
+pub use run_agent::{RunAgentAsyncTool, RunAgentTool};
 
 /// A tool the LLM can invoke by name.
+#[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
-    /// Execute the tool and return the result as a string.
-    fn run(&self) -> String;
+    /// Execute the tool with optional args and return the result as a string.
+    async fn run(&self, args: &str) -> String;
 }
 
 /// Registry of available tools and tool-call parser.
@@ -37,7 +43,7 @@ impl ToolRegistry {
         let mut s = String::from(
             "\n\n[TOOLS]\nIf you need to use a tool, output ONLY the tool call on its own — \
              no other text before or after it:\n\
-             <tool_call>tool_name</tool_call>\n\n\
+             <tool_call>tool_name: args</tool_call>\n\n\
              Available tools:\n",
         );
         for tool in self.tools.values() {
@@ -46,19 +52,32 @@ impl ToolRegistry {
         s
     }
 
-    /// Parse a tool call from LLM output. Returns the tool name if found and registered.
-    pub fn parse_tool_call(&self, text: &str) -> Option<String> {
+    /// Parse a tool call from LLM output.
+    ///
+    /// Returns `(tool_name, args)` if a registered tool is found.
+    /// Content inside `<tool_call>…</tool_call>` is split on the first `:`;
+    /// everything before is the tool name, everything after (trimmed) is args.
+    /// Tools that take no arguments may omit the colon entirely.
+    pub fn parse_tool_call(&self, text: &str) -> Option<(String, String)> {
         let start = text.find("<tool_call>")?;
         let after = &text[start + "<tool_call>".len()..];
         let end = after.find("</tool_call>")?;
-        let name = after[..end].trim().to_string();
-        self.tools.contains_key(&name).then_some(name)
+        let content = after[..end].trim();
+
+        let (name, args) = match content.find(':') {
+            Some(pos) => {
+                (content[..pos].trim().to_string(), content[pos + 1..].trim().to_string())
+            }
+            None => (content.to_string(), String::new()),
+        };
+
+        self.tools.contains_key(&name).then_some((name, args))
     }
 
-    /// Execute a tool by name and return its output.
-    pub fn execute(&self, name: &str) -> String {
+    /// Execute a registered tool by name with the given args.
+    pub async fn execute(&self, name: &str, args: &str) -> String {
         match self.tools.get(name) {
-            Some(tool) => tool.run(),
+            Some(tool) => tool.run(args).await,
             None => format!("Unknown tool: {name}"),
         }
     }
@@ -80,16 +99,31 @@ mod tests {
     fn parse_detects_current_time_call() {
         let r = registry_with_current_time();
         let llm_output = "<tool_call>current_time</tool_call>";
-        assert_eq!(r.parse_tool_call(llm_output), Some("current_time".to_string()));
+        assert_eq!(
+            r.parse_tool_call(llm_output),
+            Some(("current_time".to_string(), String::new()))
+        );
+    }
+
+    #[test]
+    fn parse_detects_tool_call_with_args() {
+        let r = registry_with_current_time();
+        // The parser splits on ':' so any args after the colon are captured.
+        let llm_output = "<tool_call>current_time: some args</tool_call>";
+        assert_eq!(
+            r.parse_tool_call(llm_output),
+            Some(("current_time".to_string(), "some args".to_string()))
+        );
     }
 
     #[test]
     fn parse_detects_tool_call_embedded_in_text() {
-        // The tool call may appear at end of stream with no surrounding text,
-        // but parse should still work if there is leading whitespace.
         let r = registry_with_current_time();
         let llm_output = "  <tool_call>current_time</tool_call>  ";
-        assert_eq!(r.parse_tool_call(llm_output), Some("current_time".to_string()));
+        assert_eq!(
+            r.parse_tool_call(llm_output),
+            Some(("current_time".to_string(), String::new()))
+        );
     }
 
     #[test]
@@ -125,25 +159,25 @@ mod tests {
 
     // ── execute ───────────────────────────────────────────────────────────────
 
-    #[test]
-    fn execute_current_time_returns_non_empty() {
+    #[tokio::test]
+    async fn execute_current_time_returns_non_empty() {
         let r = registry_with_current_time();
-        let result = r.execute("current_time");
+        let result = r.execute("current_time", "").await;
         assert!(!result.is_empty());
     }
 
-    #[test]
-    fn execute_current_time_contains_colon_separator() {
+    #[tokio::test]
+    async fn execute_current_time_contains_colon_separator() {
         // Output is "HH:MM:SS, Weekday DD Month YYYY" — always has ':'
         let r = registry_with_current_time();
-        let result = r.execute("current_time");
+        let result = r.execute("current_time", "").await;
         assert!(result.contains(':'), "expected time separator ':' in {result:?}");
     }
 
-    #[test]
-    fn execute_unknown_tool_returns_error_message() {
+    #[tokio::test]
+    async fn execute_unknown_tool_returns_error_message() {
         let r = registry_with_current_time();
-        let result = r.execute("nonexistent");
+        let result = r.execute("nonexistent", "").await;
         assert!(result.contains("nonexistent"), "error message should mention the tool name");
     }
 
@@ -182,13 +216,13 @@ mod tests {
 
     // ── parse → execute round-trip ────────────────────────────────────────────
 
-    #[test]
-    fn parse_and_execute_current_time_round_trip() {
+    #[tokio::test]
+    async fn parse_and_execute_current_time_round_trip() {
         let r = registry_with_current_time();
         let llm_output = "<tool_call>current_time</tool_call>";
 
-        let name = r.parse_tool_call(llm_output).expect("should parse current_time");
-        let result = r.execute(&name);
+        let (name, args) = r.parse_tool_call(llm_output).expect("should parse current_time");
+        let result = r.execute(&name, &args).await;
 
         assert_eq!(name, "current_time");
         assert!(!result.is_empty());

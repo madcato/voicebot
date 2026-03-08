@@ -43,6 +43,14 @@ pub struct Config {
     /// Number of most-recent (role, content) turns to keep verbatim after summarization.
     pub llm_summary_keep_turns: usize,
 
+    // ── Agent delegation ──────────────────────────────────────────────────────
+    /// Base URL of the remote agent (OpenAI-compatible). None = agent tools disabled.
+    pub agent_url: Option<String>,
+    /// Model name for the remote agent server.
+    pub agent_model: String,
+    /// Max tokens for agent responses.
+    pub agent_max_tokens: u32,
+
     // ── Persistence ───────────────────────────────────────────────────────────
     pub db_path: String,
 }
@@ -113,6 +121,15 @@ impl Config {
                 .unwrap_or_else(|_| "6".to_string())
                 .parse()
                 .context("Invalid LLM_SUMMARY_KEEP_TURNS")?,
+
+            // Agent delegation
+            agent_url: env::var("AGENT_URL").ok(),
+            agent_model: env::var("AGENT_MODEL")
+                .unwrap_or_else(|_| "local-model".to_string()),
+            agent_max_tokens: env::var("AGENT_MAX_TOKENS")
+                .unwrap_or_else(|_| "2048".to_string())
+                .parse()
+                .context("Invalid AGENT_MAX_TOKENS")?,
 
             // DB
             db_path: env::var("DB_PATH")
