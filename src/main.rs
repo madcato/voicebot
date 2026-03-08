@@ -333,8 +333,12 @@ async fn main() -> Result<()> {
 
 /// Stream LLM tokens into TTS, sentence by sentence.
 ///
-/// Returns `(full_response, tool_call)`. If the LLM emitted a tool call,
-/// `tool_call` is `Some((name, args))` and the call text was NOT sent to TTS.
+/// Returns `(full_response, tool_call, last_play)`.
+/// - `tool_call`: if the LLM emitted a tool call, its text was NOT sent to TTS.
+/// - `last_play`: the still-running playback task for the last sentence, or
+///   `None` if already finished (cancelled / tool-call path). The caller is
+///   responsible for awaiting or aborting it — this allows the caller to do
+///   CPU/GPU work (DB writes, summarization) concurrently with the tail audio.
 ///
 /// Synthesis and playback are overlapped: as soon as sentence N's text is
 /// ready its synthesis starts in a blocking task, while sentence N-1 is still
@@ -347,7 +351,7 @@ async fn stream_and_tts(
     audio_output: &Arc<AudioOutput>,
     tts_sample_rate: u32,
     tools: &ToolRegistry,
-) -> (String, Option<(String, String)>) {
+) -> (String, Option<(String, String)>, Option<tokio::task::JoinHandle<anyhow::Result<()>>>) {
     let mut sentence_buf = SentenceSplitter::new();
     let mut full_response = String::new();
 
@@ -371,7 +375,7 @@ async fn stream_and_tts(
     loop {
         if cancel.load(Ordering::SeqCst) {
             if let Some(h) = play_handle { h.abort(); }
-            return (full_response, None);
+            return (full_response, None, None);
         }
 
         let token = token_rx.recv().await;
@@ -387,7 +391,7 @@ async fn stream_and_tts(
             if let Some((name, args)) = tools.parse_tool_call(&full_response) {
                 // Tool call detected — wait for any pending playback then return.
                 await_play!(play_handle);
-                return (full_response, Some((name, args)));
+                return (full_response, Some((name, args)), None);
             }
             let mut v = Vec::new();
             if let Some(s) = sentence_buf.push(&token) { v.push(s); }
@@ -402,7 +406,7 @@ async fn stream_and_tts(
         for sentence in sentences_to_play {
             if cancel.load(Ordering::SeqCst) {
                 if let Some(h) = play_handle { h.abort(); }
-                return (full_response, None);
+                return (full_response, None, None);
             }
 
             info!("TTS: {:?}", sentence);
@@ -418,7 +422,7 @@ async fn stream_and_tts(
 
             if cancel.load(Ordering::SeqCst) {
                 synth_handle.abort();
-                return (full_response, None);
+                return (full_response, None, None);
             }
 
             // ── Collect synthesis result (usually already done) ───────────────────
@@ -429,7 +433,7 @@ async fn stream_and_tts(
             };
 
             if cancel.load(Ordering::SeqCst) {
-                return (full_response, None);
+                return (full_response, None, None);
             }
 
             // ── Start playback without awaiting — next sentence can synthesise now ─
@@ -445,10 +449,9 @@ async fn stream_and_tts(
         }
     }
 
-    // Wait for the last sentence to finish playing before returning.
-    await_play!(play_handle);
-
-    (full_response, None)
+    // Return the last playback handle to the caller so it can overlap
+    // GPU/DB work (summarization, profile extraction) with tail audio.
+    (full_response, None, play_handle)
 }
 
 /// Full STT → LLM → (tools →)* TTS pipeline for a single utterance.
@@ -517,6 +520,10 @@ async fn run_pipeline(
     // We allow at most one tool call per user turn (sufficient for simple tools).
     let mut session_snapshot = session_for_llm;
     let mut final_response = String::new();
+    // Last playback handle returned by stream_and_tts (last sentence still playing).
+    // Awaited after committing DB/session so GPU work overlaps with tail audio.
+    let mut last_play: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
+    let mut committed = false;
 
     'pipeline: {
         // First LLM call
@@ -525,12 +532,17 @@ async fn run_pipeline(
             Err(e) => { error!("LLM stream error: {}", e); break 'pipeline; }
         };
 
-        let (llm_text, tool_call) =
+        let (llm_text, tool_call, play) =
             stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, &tools).await;
 
-        check_cancel!();
+        if cancel.load(Ordering::SeqCst) {
+            if let Some(h) = play { h.abort(); }
+            break 'pipeline;
+        }
 
         if let Some((name, args)) = tool_call {
+            // play is None here (tool-call path already awaited it inside stream_and_tts)
+
             // ── Tool execution ────────────────────────────────────────────────
             let result = tools.execute(&name, &args).await;
             info!("Tool `{}` → {}", name, result);
@@ -542,7 +554,7 @@ async fn run_pipeline(
             }
             session_snapshot = llm_session.lock().unwrap().clone();
 
-            check_cancel!();
+            if cancel.load(Ordering::SeqCst) { break 'pipeline; }
 
             // Second LLM call — produces the spoken response
             let token_rx2 = match llm_client.stream(&session_snapshot.all_messages()).await {
@@ -550,56 +562,76 @@ async fn run_pipeline(
                 Err(e) => { error!("LLM stream error (post-tool): {}", e); break 'pipeline; }
             };
 
-            let (response2, _) =
+            let (response2, _, play2) =
                 stream_and_tts(token_rx2, &cancel, &tts, &audio_output, tts_sample_rate, &tools).await;
 
-            check_cancel!();
+            if cancel.load(Ordering::SeqCst) {
+                if let Some(h) = play2 { h.abort(); }
+                break 'pipeline;
+            }
 
             final_response = response2;
+            last_play = play2;
         } else {
             final_response = llm_text;
+            last_play = play;
+        }
+
+        if final_response.is_empty() {
+            break 'pipeline;
+        }
+
+        info!("Assistant: {}", final_response);
+
+        // ── Commit to DB and session while last TTS sentence plays ────────────
+        // save_message is a fast SQLite write; it runs concurrently with last_play.
+        if let Err(e) = db.save_message(session_id, "Assistant", &final_response).await {
+            warn!("Failed to save assistant message: {}", e);
+        }
+        llm_session.lock().unwrap().add_assistant_turn(&final_response);
+        committed = true;
+
+        // ── Background GPU tasks — overlap with tail audio playback ───────────
+        // Both calls use cache_prompt=false so they don't touch the main slot.
+        {
+            let llm_session_c = Arc::clone(&llm_session);
+            let llm_client_c  = llm_client.clone();
+            let db_c          = db.clone();
+            tokio::spawn(async move {
+                maybe_summarize(&llm_session_c, &llm_client_c, &db_c, session_id, context_tokens, summary_keep_turns).await;
+            });
+        }
+        {
+            let llm_client_c = llm_client.clone();
+            let db_c         = db.clone();
+            let transcript_c = transcript.clone();
+            let response_c   = final_response.clone();
+            tokio::spawn(async move {
+                let facts = extract_facts(&llm_client_c, &transcript_c, &response_c).await;
+                for fact in facts {
+                    if let Err(e) = db_c.upsert_profile_fact(&fact.key, &fact.value, fact.confidence).await {
+                        warn!("Failed to save profile fact '{}': {}", fact.key, e);
+                    } else {
+                        debug!("Profile: {} = {} ({:.0}%)", fact.key, fact.value, fact.confidence * 100.0);
+                    }
+                }
+            });
+        }
+
+        // ── Await last TTS sentence — keeps pipeline_handle alive for barge-in ─
+        if let Some(h) = last_play {
+            match h.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => error!("Playback error: {}", e),
+                Err(e)     => error!("Playback task panicked: {}", e),
+            }
         }
     }
 
-    // ── Finalise or roll back ─────────────────────────────────────────────────
-    if cancel.load(Ordering::SeqCst) {
+    // ── Roll back session if cancelled before commit ───────────────────────────
+    if !committed && cancel.load(Ordering::SeqCst) {
         llm_session.lock().unwrap().messages = messages_snapshot;
         info!("Pipeline cancelled — session rolled back");
-        return;
-    }
-
-    if final_response.is_empty() {
-        return;
-    }
-
-    info!("Assistant: {}", final_response);
-
-    if let Err(e) = db.save_message(session_id, "Assistant", &final_response).await {
-        warn!("Failed to save assistant message: {}", e);
-    }
-
-    llm_session.lock().unwrap().add_assistant_turn(&final_response);
-
-    // ── Context summarization ─────────────────────────────────────────────────
-    maybe_summarize(&llm_session, &llm_client, &db, session_id, context_tokens, summary_keep_turns).await;
-
-    // ── User profile extraction (fire-and-forget background task) ─────────────
-    // Spawned after the turn is fully committed so it never delays the next response.
-    {
-        let llm_client_c = llm_client.clone();
-        let db_c = db.clone();
-        let transcript_c = transcript.clone();
-        let response_c = final_response.clone();
-        tokio::spawn(async move {
-            let facts = extract_facts(&llm_client_c, &transcript_c, &response_c).await;
-            for fact in facts {
-                if let Err(e) = db_c.upsert_profile_fact(&fact.key, &fact.value, fact.confidence).await {
-                    warn!("Failed to save profile fact '{}': {}", fact.key, e);
-                } else {
-                    debug!("Profile: {} = {} ({:.0}%)", fact.key, fact.value, fact.confidence * 100.0);
-                }
-            }
-        });
     }
 }
 
@@ -719,10 +751,18 @@ async fn run_proactive_pipeline(
         }
     };
 
-    let (response, _) =
+    let (response, _, last_play) =
         stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, &tools).await;
 
     if !response.is_empty() {
         info!("Proactive: {}", response);
+    }
+
+    if let Some(h) = last_play {
+        match h.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => error!("Proactive playback error: {}", e),
+            Err(e)     => error!("Proactive playback task panicked: {}", e),
+        }
     }
 }
