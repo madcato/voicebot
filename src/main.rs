@@ -102,6 +102,7 @@ async fn main() -> Result<()> {
     // ── LLM client ────────────────────────────────────────────────────────────
     let llm_client = LlamaClient::new(
         &config.llm_url,
+        &config.llm_model,
         config.llm_max_tokens,
         config.llm_temperature,
     );
@@ -380,7 +381,7 @@ async fn run_pipeline(
 
     info!("User: {}", transcript);
 
-    let prompt_snapshot = llm_session.lock().unwrap().accumulated_prompt.clone();
+    let messages_snapshot = llm_session.lock().unwrap().messages.clone();
 
     let session_for_llm = {
         let mut s = llm_session.lock().unwrap();
@@ -401,7 +402,7 @@ async fn run_pipeline(
 
     'pipeline: {
         // First LLM call
-        let token_rx = match llm_client.stream(&session_snapshot).await {
+        let token_rx = match llm_client.stream(&session_snapshot.all_messages()).await {
             Ok(r)  => r,
             Err(e) => { error!("LLM stream error: {}", e); break 'pipeline; }
         };
@@ -426,7 +427,7 @@ async fn run_pipeline(
             check_cancel!();
 
             // Second LLM call — produces the spoken response
-            let token_rx2 = match llm_client.stream(&session_snapshot).await {
+            let token_rx2 = match llm_client.stream(&session_snapshot.all_messages()).await {
                 Ok(r)  => r,
                 Err(e) => { error!("LLM stream error (post-tool): {}", e); break 'pipeline; }
             };
@@ -444,7 +445,7 @@ async fn run_pipeline(
 
     // ── Finalise or roll back ─────────────────────────────────────────────────
     if cancel.load(Ordering::SeqCst) {
-        llm_session.lock().unwrap().accumulated_prompt = prompt_snapshot;
+        llm_session.lock().unwrap().messages = messages_snapshot;
         info!("Pipeline cancelled — session rolled back");
         return;
     }

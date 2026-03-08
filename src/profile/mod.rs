@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-use crate::llm::LlamaClient;
+use crate::llm::{LlamaClient, Message};
 
 /// Minimum confidence required for a fact to be injected into the system prompt.
 const MIN_INJECT_CONFIDENCE: f64 = 0.5;
@@ -46,25 +46,21 @@ pub async fn extract_facts(
     user_text: &str,
     assistant_text: &str,
 ) -> Vec<ProfileFact> {
-    let prompt = format!(
-        "<|im_start|>system\n\
-         Extract facts about the user from the conversation excerpt below.\n\
-         Return ONLY a JSON array. Each element: {{\"key\": \"...\", \"value\": \"...\", \"confidence\": 0.0-1.0}}\n\
-         Keys must be lowercase with underscores. Use standard names when possible:\n\
-         name, age, city, country, language, job, company, field, skill, hobby, \
-         pet, family, preference, communication_style, personality_trait.\n\
-         For multiple values of the same category use key suffixes: hobby_1, hobby_2, etc.\n\
-         Only extract facts explicitly stated or strongly implied by the USER's words.\n\
-         If no user facts are present, return [].\n\
-         <|im_end|>\n\
-         <|im_start|>user\n\
-         User: {user_text}\n\
-         Assistant: {assistant_text}\n\
-         <|im_end|>\n\
-         <|im_start|>assistant\n"
-    );
+    let messages = vec![
+        Message::system(
+            "Extract facts about the user from the conversation excerpt below.\n\
+             Return ONLY a JSON array. Each element: {\"key\": \"...\", \"value\": \"...\", \"confidence\": 0.0-1.0}\n\
+             Keys must be lowercase with underscores. Use standard names when possible:\n\
+             name, age, city, country, language, job, company, field, skill, hobby, \
+             pet, family, preference, communication_style, personality_trait.\n\
+             For multiple values of the same category use key suffixes: hobby_1, hobby_2, etc.\n\
+             Only extract facts explicitly stated or strongly implied by the USER's words.\n\
+             If no user facts are present, return [].",
+        ),
+        Message::user(format!("User: {user_text}\nAssistant: {assistant_text}")),
+    ];
 
-    let raw = match client.complete_short(&prompt).await {
+    let raw = match client.complete_short(&messages).await {
         Ok(r) => r,
         Err(e) => {
             warn!("Profile extraction LLM call failed: {}", e);

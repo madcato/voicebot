@@ -49,3 +49,7 @@ whisper-rs = { version = "0.15", features = ["metal"] }
 
 # Sentence boundary detection for TTS streaming
 regex = "1"
+
+[dev-dependencies]
+# Mock HTTP server for LLM client integration tests
+wiremock = "0.6"

@@ -21,9 +21,11 @@ pub struct Config {
     pub whisper_model: String,
 
     // ── LLM ──────────────────────────────────────────────────────────────────
-    /// llama.cpp server base URL
+    /// LLM server base URL (OpenAI-compatible)
     pub llm_url: String,
-    /// KV-cache slot ID (0 for single-user)
+    /// Model name sent in the `model` field of API requests
+    pub llm_model: String,
+    /// KV-cache slot ID (0 for single-user, llama.cpp only)
     pub llm_slot_id: u8,
     /// Max tokens per response
     pub llm_max_tokens: u32,
@@ -77,6 +79,8 @@ impl Config {
             // LLM
             llm_url: env::var("LLM_URL")
                 .unwrap_or_else(|_| "http://localhost:8080".to_string()),
+            llm_model: env::var("LLM_MODEL")
+                .unwrap_or_else(|_| "local-model".to_string()),
             llm_slot_id: env::var("LLM_SLOT_ID")
                 .unwrap_or_else(|_| "0".to_string())
                 .parse()
