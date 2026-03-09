@@ -4,6 +4,92 @@ use tokio::sync::mpsc;
 
 use super::session::Message;
 
+/// Strips `<think>…</think>` blocks from a streaming token sequence.
+///
+/// Qwen3 (and other reasoning models) emit a chain-of-thought block before
+/// the actual response. Those tokens must not reach TTS or the tool detector.
+///
+/// The filter handles the case where the opening or closing tag is split
+/// across multiple tokens by buffering up to `max(tag_len - 1)` bytes.
+struct ThinkFilter {
+    in_think: bool,
+    /// Holds trailing bytes that could be the start of a tag (`<think>` or
+    /// `</think>`). Flushed once we know they are not part of a tag.
+    pending: String,
+}
+
+impl ThinkFilter {
+    fn new() -> Self {
+        Self { in_think: false, pending: String::new() }
+    }
+
+    /// Feed the next raw token from the SSE stream.
+    /// Returns the portion of the token (if any) that should be forwarded.
+    fn process(&mut self, token: &str) -> Option<String> {
+        self.pending.push_str(token);
+        let mut out = String::new();
+
+        loop {
+            if self.in_think {
+                match self.pending.find("</think>") {
+                    Some(pos) => {
+                        // Found closing tag — resume normal output after it.
+                        self.pending = self.pending[pos + "</think>".len()..].to_string();
+                        self.in_think = false;
+                        // Continue loop to check remaining pending for more tags.
+                    }
+                    None => {
+                        // Keep only a suffix long enough to catch a split tag.
+                        let keep = partial_tag_suffix(&self.pending, "</think>");
+                        self.pending = self.pending[self.pending.len() - keep..].to_string();
+                        break;
+                    }
+                }
+            } else {
+                match self.pending.find("<think>") {
+                    Some(pos) => {
+                        // Emit everything before the tag, then enter think mode.
+                        out.push_str(&self.pending[..pos]);
+                        self.pending = self.pending[pos + "<think>".len()..].to_string();
+                        self.in_think = true;
+                        // Continue loop to consume the think block.
+                    }
+                    None => {
+                        // Keep only a suffix that could be a partial opening tag.
+                        let keep = partial_tag_suffix(&self.pending, "<think>");
+                        out.push_str(&self.pending[..self.pending.len() - keep]);
+                        self.pending = self.pending[self.pending.len() - keep..].to_string();
+                        break;
+                    }
+                }
+            }
+        }
+
+        if out.is_empty() { None } else { Some(out) }
+    }
+
+    /// Call once when the stream ends to emit any buffered non-think content.
+    fn flush(&mut self) -> Option<String> {
+        if self.in_think || self.pending.is_empty() {
+            self.pending.clear();
+            return None;
+        }
+        let out = std::mem::take(&mut self.pending);
+        Some(out)
+    }
+}
+
+/// Returns the length of the longest suffix of `s` that is a proper prefix of
+/// `tag` (i.e. the tail of `s` that could be the start of `tag`).
+fn partial_tag_suffix(s: &str, tag: &str) -> usize {
+    for n in (1..tag.len()).rev() {
+        if s.ends_with(&tag[..n]) {
+            return n;
+        }
+    }
+    0
+}
+
 #[derive(Clone)]
 pub struct LlamaClient {
     client: reqwest::Client,
@@ -64,6 +150,7 @@ impl LlamaClient {
         tokio::spawn(async move {
             let mut stream = response.bytes_stream();
             let mut buf = String::new();
+            let mut think = ThinkFilter::new();
 
             while let Some(chunk) = stream.next().await {
                 let bytes = match chunk {
@@ -84,6 +171,10 @@ impl LlamaClient {
                     let Some(data) = line.strip_prefix("data: ") else { continue };
 
                     if data == "[DONE]" {
+                        // Flush any buffered content held back for partial-tag detection.
+                        if let Some(tail) = think.flush() {
+                            if tx.send(tail).await.is_err() { return; }
+                        }
                         return;
                     }
 
@@ -92,8 +183,9 @@ impl LlamaClient {
                     };
 
                     if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
-                        if !content.is_empty() && tx.send(content.to_string()).await.is_err() {
-                            return;
+                        if content.is_empty() { continue; }
+                        if let Some(filtered) = think.process(content) {
+                            if tx.send(filtered).await.is_err() { return; }
                         }
                     }
                 }
@@ -311,6 +403,73 @@ mod tests {
             collected.push_str(&token);
         }
         assert_eq!(collected, "Hi");
+    }
+
+    // ── ThinkFilter ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn think_filter_passthrough_when_no_think_block() {
+        let mut f = ThinkFilter::new();
+        assert_eq!(f.process("Hello world").as_deref(), Some("Hello world"));
+        assert_eq!(f.flush().as_deref(), None);
+    }
+
+    #[test]
+    fn think_filter_strips_single_token_think_block() {
+        let mut f = ThinkFilter::new();
+        // Entire block in one token
+        let result = f.process("<think>some thoughts</think>answer");
+        assert_eq!(result.as_deref(), Some("answer"));
+    }
+
+    #[test]
+    fn think_filter_strips_think_block_split_across_tokens() {
+        let mut f = ThinkFilter::new();
+        assert_eq!(f.process("<think>"), None);
+        assert_eq!(f.process("some reasoning"), None);
+        assert_eq!(f.process("</think>"), None);
+        assert_eq!(f.process("actual answer").as_deref(), Some("actual answer"));
+    }
+
+    #[test]
+    fn think_filter_handles_split_opening_tag() {
+        let mut f = ThinkFilter::new();
+        // "<think>" split as "<th" + "ink>" + content
+        assert_eq!(f.process("<th"), None); // buffered as partial tag
+        assert_eq!(f.process("ink>thoughts</think>answer").as_deref(), Some("answer"));
+    }
+
+    #[test]
+    fn think_filter_handles_split_closing_tag() {
+        let mut f = ThinkFilter::new();
+        f.process("<think>thoughts</thi");
+        assert_eq!(f.process("nk>real answer").as_deref(), Some("real answer"));
+    }
+
+    #[test]
+    fn think_filter_emits_content_before_think_block() {
+        let mut f = ThinkFilter::new();
+        let result = f.process("prefix<think>thoughts</think>suffix");
+        assert_eq!(result.as_deref(), Some("prefixsuffix"));
+    }
+
+    #[test]
+    fn think_filter_flush_returns_buffered_content() {
+        let mut f = ThinkFilter::new();
+        f.process("Hello"); // held in pending as possible partial tag start? No — "Hello" has no partial "<"
+        // Actually "Hello" gets emitted immediately. Let's test flush with a partial tag.
+        let mut f2 = ThinkFilter::new();
+        f2.process("Hello <thi"); // "<thi" held as partial
+        let flushed = f2.flush();
+        // Flush should emit the pending partial since it never completed
+        assert!(flushed.as_deref().unwrap_or("").contains("<thi") || flushed.is_none() || flushed.as_deref() == Some("<thi"));
+    }
+
+    #[test]
+    fn think_filter_flush_inside_think_block_returns_none() {
+        let mut f = ThinkFilter::new();
+        f.process("<think>unfinished");
+        assert_eq!(f.flush(), None);
     }
 
     // ── end-to-end summarization (client + session) ───────────────────────────

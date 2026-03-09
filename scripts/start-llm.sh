@@ -27,7 +27,7 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 # ── Configuration (override via env vars) ────────────────────────────────────
 
 # Path to the GGUF model. Default: look in project models/ directory.
-LLM_MODEL="${LLM_MODEL:-${ROOT_DIR}/models/Qwen3-8B-Q4_K_M.gguf}"
+LLM_MODEL="${LLM_MODEL:-${ROOT_DIR}/models/Qwen2.5-7B-Instruct-q8_0.gguf}"
 
 # llama-server bind address and port
 LLM_HOST="${LLM_HOST:-0.0.0.0}"

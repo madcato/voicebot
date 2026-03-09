@@ -66,6 +66,12 @@ pub struct Config {
     /// Max tokens for agent responses.
     pub agent_max_tokens: u32,
 
+    // ── Shell tool ────────────────────────────────────────────────────────────
+    /// Enable the `run_shell` tool (SHELL_ENABLED=1). Off by default.
+    pub shell_enabled: bool,
+    /// Hard timeout per shell command in seconds (SHELL_TIMEOUT_SECS).
+    pub shell_timeout_secs: u64,
+
     // ── Persistence ───────────────────────────────────────────────────────────
     pub db_path: String,
 }
@@ -161,6 +167,15 @@ impl Config {
                 .unwrap_or_else(|_| "2048".to_string())
                 .parse()
                 .context("Invalid AGENT_MAX_TOKENS")?,
+
+            // Shell tool
+            shell_enabled: env::var("SHELL_ENABLED")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(false),
+            shell_timeout_secs: env::var("SHELL_TIMEOUT_SECS")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .context("Invalid SHELL_TIMEOUT_SECS")?,
 
             // DB
             db_path: env::var("DB_PATH")

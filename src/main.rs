@@ -28,7 +28,7 @@ use crate::db::Database;
 use crate::llm::{LlamaClient, LlmSession, Message};
 use crate::profile::{build_profile_context, extract_facts, ProfileFact};
 use crate::stt::WhisperStt;
-use crate::tools::{CurrentTimeTool, RunAgentAsyncTool, RunAgentTool, ToolRegistry};
+use crate::tools::{CurrentTimeTool, RunAgentAsyncTool, RunAgentTool, RunShellTool, ToolRegistry};
 use crate::tts::{SayTts, SentenceSplitter, TtsEngine};
 #[cfg(feature = "kokoro")]
 use crate::tts::KokoroTts;
@@ -68,6 +68,10 @@ async fn main() -> Result<()> {
     // ── Tools ─────────────────────────────────────────────────────────────────
     let mut tool_registry = ToolRegistry::new();
     tool_registry.register(CurrentTimeTool);
+    if config.shell_enabled {
+        info!("Shell tool enabled (timeout={}s)", config.shell_timeout_secs);
+        tool_registry.register(RunShellTool::new(config.shell_timeout_secs));
+    }
     if let Some(ref agent_url) = config.agent_url {
         info!("Agent delegation enabled: {}", agent_url);
         tool_registry.register(RunAgentTool::new(

@@ -150,6 +150,8 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
 | `KOKORO_VOICES` | `models/voices-v1.0.bin` | Path to Kokoro voice embeddings file |
 | `KOKORO_VOICE` | `af_bella` | Kokoro voice style name (see available voices via `get_available_voices`) |
 | `KOKORO_LANGUAGE` | `en-us` | BCP-47 language code passed to espeak-ng for phonemisation |
+| `SHELL_ENABLED` | `0` | Set to `1` to enable the `run_shell` tool. Off by default for safety. |
+| `SHELL_TIMEOUT_SECS` | `30` | Hard timeout (seconds) per shell command |
 | `AUDIO_INPUT_DEVICE` | system default | Input device name substring |
 | `AUDIO_OUTPUT_DEVICE` | system default | Output device name substring |
 | `DB_PATH` | `data/voicebot.db` | SQLite database file path |
@@ -1016,6 +1018,7 @@ WAKE_WORD                 keyword to respond in ambient mode (default: "jarvis")
 | Kokoro TTS | ✅ Done | ONNX, 24 kHz, `--features kokoro`, selectable via `TTS_PROVIDER` |
 | CoreML STT encoder | ✅ Done | Neural Engine inference; `WHISPER_COREML=1`; requires `.mlmodelc` |
 | Background GPU overlap | ✅ Done | `maybe_summarize` + `extract_facts` start while last TTS plays |
+| Shell tool (`run_shell`) | ✅ Done | `SHELL_ENABLED=1`; denylist safety; 30s timeout; output capped at 2 KB |
 | MCP integration | Planned | `src/mcp/`; JSON-RPC over stdio/HTTP |
 | Agent delegation | ✅ Done | `run_agent` (sync) + `run_agent_async` (proactive); OpenAI-compatible |
 | Voicebot as agent intermediary | Planned | Voice proxy over existing text agents |
@@ -1027,7 +1030,7 @@ WAKE_WORD                 keyword to respond in ambient mode (default: "jarvis")
 |--------|--------|-------------------|
 | A — Character system prompt | ✅ Done | `LLM_SYSTEM_PROMPT` env var + Jarvis prompt in `.env` |
 | B — Eyes (situational awareness) | Planned | Screenshot + vision model; system state injection |
-| C — Arms (computer agency) | Planned | `run_shell` + file/app/clipboard/web tools |
+| C — Arms (computer agency) | 🔶 Partial | `run_shell` done (`SHELL_ENABLED=1`); file/app/clipboard/web tools planned |
 | D — Voice of its own (proactive) | 🔶 Partial | `proactive_tx` channel + startup greeting done; inference daemon + calendar/scheduler not yet |
 | E — Episodic memory (embeddings) | Planned | sqlite-vec + embedding model; semantic recall |
 | F — Always-on daemon | Planned | launchd plist + wake word detection |
