@@ -15,6 +15,10 @@ impl Tool for CurrentTimeTool {
         "Returns the current local date and time."
     }
 
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+
     async fn run(&self, _args: &str) -> String {
         Local::now().format("%H:%M:%S, %A %d %B %Y").to_string()
     }

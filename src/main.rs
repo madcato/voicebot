@@ -25,7 +25,7 @@ use crate::audio::output::AudioOutput;
 use crate::audio::vad::{VadResult, VoiceActivityDetector};
 use crate::config::Config;
 use crate::db::Database;
-use crate::llm::{LlamaClient, LlmSession, Message};
+use crate::llm::{LlamaClient, LlmSession, StreamToken};
 use crate::profile::{build_profile_context, extract_facts, ProfileFact};
 use crate::stt::WhisperStt;
 use crate::tools::{CurrentTimeTool, RunAgentAsyncTool, RunAgentTool, RunShellTool, ToolRegistry};
@@ -375,12 +375,11 @@ async fn main() -> Result<()> {
 /// playing. By the time N-1 finishes (typically 1–3 s), N is already
 /// synthesised, so the gap between sentences is near zero.
 async fn stream_and_tts(
-    mut token_rx: mpsc::Receiver<String>,
+    mut token_rx: mpsc::Receiver<StreamToken>,
     cancel: &Arc<AtomicBool>,
     tts: &Arc<TtsEngine>,
     audio_output: &Arc<AudioOutput>,
     tts_sample_rate: u32,
-    tools: &ToolRegistry,
 ) -> (String, Option<(String, String)>, Option<tokio::task::JoinHandle<anyhow::Result<()>>>) {
     let mut sentence_buf = SentenceSplitter::new();
     let mut full_response = String::new();
@@ -408,21 +407,23 @@ async fn stream_and_tts(
             return (full_response, None, None);
         }
 
-        let token = token_rx.recv().await;
-        let is_done = token.is_none();
-        let token = token.unwrap_or_default();
+        let event = token_rx.recv().await;
+
+        // ── Tool call ──────────────────────────────────────────────────────────
+        if let Some(StreamToken::ToolCall { name, args }) = &event {
+            await_play!(play_handle);
+            return (full_response, Some((name.clone(), args.clone())), None);
+        }
+
+        let is_done = event.is_none();
+        let token = match event {
+            Some(StreamToken::Content(s)) => s,
+            _ => String::new(),
+        };
 
         full_response.push_str(&token);
 
-        // At end-of-stream: check for tool call BEFORE flushing to TTS.
-        // Tool call XML has no punctuation, so the SentenceSplitter never
-        // emits it mid-stream — it only appears at flush time.
         let sentences_to_play: Vec<String> = if is_done {
-            if let Some((name, args)) = tools.parse_tool_call(&full_response) {
-                // Tool call detected — wait for any pending playback then return.
-                await_play!(play_handle);
-                return (full_response, Some((name, args)), None);
-            }
             let mut v = Vec::new();
             if let Some(s) = sentence_buf.push(&token) { v.push(s); }
             if let Some(s) = sentence_buf.flush()      { v.push(s); }
@@ -557,13 +558,14 @@ async fn run_pipeline(
 
     'pipeline: {
         // First LLM call
-        let token_rx = match llm_client.stream(&session_snapshot.all_messages()).await {
+        let tool_defs = tools.tool_definitions();
+        let token_rx = match llm_client.stream(&session_snapshot.all_messages_api(), &tool_defs).await {
             Ok(r)  => r,
             Err(e) => { error!("LLM stream error: {}", e); break 'pipeline; }
         };
 
         let (llm_text, tool_call, play) =
-            stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, &tools).await;
+            stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate).await;
 
         if cancel.load(Ordering::SeqCst) {
             if let Some(h) = play { h.abort(); }
@@ -577,23 +579,34 @@ async fn run_pipeline(
             let result = tools.execute(&name, &args).await;
             info!("Tool `{}` → {}", name, result);
 
-            // Inject tool result and reopen assistant turn
-            {
-                let mut s = llm_session.lock().unwrap();
-                s.add_tool_result(&llm_text, &result);
-            }
-            session_snapshot = llm_session.lock().unwrap().clone();
+            // Build the tool exchange as proper OpenAI messages (ephemeral, not stored in session).
+            let tool_call_id = format!("call_{}", &name);
+            let mut tool_messages = session_snapshot.all_messages_api();
+            tool_messages.push(serde_json::json!({
+                "role": "assistant",
+                "content": serde_json::Value::Null,
+                "tool_calls": [{
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": args}
+                }]
+            }));
+            tool_messages.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": result
+            }));
 
             if cancel.load(Ordering::SeqCst) { break 'pipeline; }
 
             // Second LLM call — produces the spoken response
-            let token_rx2 = match llm_client.stream(&session_snapshot.all_messages()).await {
+            let token_rx2 = match llm_client.stream(&tool_messages, &[]).await {
                 Ok(r)  => r,
                 Err(e) => { error!("LLM stream error (post-tool): {}", e); break 'pipeline; }
             };
 
             let (response2, _, play2) =
-                stream_and_tts(token_rx2, &cancel, &tts, &audio_output, tts_sample_rate, &tools).await;
+                stream_and_tts(token_rx2, &cancel, &tts, &audio_output, tts_sample_rate).await;
 
             if cancel.load(Ordering::SeqCst) {
                 if let Some(h) = play2 { h.abort(); }
@@ -763,17 +776,17 @@ async fn run_proactive_pipeline(
     info!("Proactive pipeline: {}", &notification[..notification.len().min(80)]);
 
     // Build a temporary message list that asks the LLM to respond.
-    let messages: Vec<Message> = {
+    let messages_api: Vec<serde_json::Value> = {
         let s = llm_session.lock().unwrap();
-        let mut msgs = s.all_messages();
-        msgs.push(Message {
-            role: "user".to_string(),
-            content: notification,
-        });
+        let mut msgs = s.all_messages_api();
+        msgs.push(serde_json::json!({
+            "role": "user",
+            "content": notification,
+        }));
         msgs
     };
 
-    let token_rx = match llm_client.stream(&messages).await {
+    let token_rx = match llm_client.stream(&messages_api, &[]).await {
         Ok(r) => r,
         Err(e) => {
             error!("Proactive LLM error: {}", e);
@@ -782,7 +795,7 @@ async fn run_proactive_pipeline(
     };
 
     let (response, _, last_play) =
-        stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, &tools).await;
+        stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate).await;
 
     if !response.is_empty() {
         info!("Proactive: {}", response);

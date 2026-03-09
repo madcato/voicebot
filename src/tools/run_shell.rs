@@ -51,8 +51,26 @@ impl Tool for RunShellTool {
          Do NOT run destructive commands (delete, overwrite, format) without explicit user confirmation."
     }
 
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The shell command to execute"
+                }
+            },
+            "required": ["command"]
+        })
+    }
+
     async fn run(&self, args: &str) -> String {
-        let cmd = args.trim();
+        // Extract the command from JSON {"command": "..."} or fall back to raw string.
+        let cmd = serde_json::from_str::<serde_json::Value>(args)
+            .ok()
+            .and_then(|v| v["command"].as_str().map(String::from))
+            .unwrap_or_else(|| args.to_string());
+        let cmd = cmd.trim();
         if cmd.is_empty() {
             return "Error: no command provided".to_string();
         }

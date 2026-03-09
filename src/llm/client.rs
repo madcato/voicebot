@@ -90,6 +90,18 @@ fn partial_tag_suffix(s: &str, tag: &str) -> usize {
     0
 }
 
+/// A token produced by `LlamaClient::stream`.
+///
+/// The LLM either generates text content (route to TTS) or calls a tool
+/// (stop streaming, execute the tool, then continue).
+#[derive(Debug)]
+pub enum StreamToken {
+    /// Regular text — forward to TTS.
+    Content(String),
+    /// The model invoked a tool. `args` is the JSON arguments string.
+    ToolCall { name: String, args: String },
+}
+
 #[derive(Clone)]
 pub struct LlamaClient {
     client: reqwest::Client,
@@ -117,8 +129,12 @@ impl LlamaClient {
     /// Stream completion tokens from an OpenAI-compatible endpoint.
     ///
     /// Returns a channel receiver that yields text tokens as they arrive.
-    pub async fn stream(&self, messages: &[Message]) -> Result<mpsc::Receiver<String>> {
-        let payload = serde_json::json!({
+    pub async fn stream(
+        &self,
+        messages: &[serde_json::Value],
+        tools: &[serde_json::Value],
+    ) -> Result<mpsc::Receiver<StreamToken>> {
+        let mut payload = serde_json::json!({
             "model": self.model,
             "messages": messages,
             "max_tokens": self.max_tokens,
@@ -130,6 +146,10 @@ impl LlamaClient {
             "cache_prompt": true,
             "slot_id": self.slot_id,
         });
+        if !tools.is_empty() {
+            payload["tools"] = serde_json::json!(tools);
+            payload["tool_choice"] = serde_json::json!("auto");
+        }
 
         let response = self
             .client
@@ -145,12 +165,16 @@ impl LlamaClient {
             anyhow::bail!("LLM error {}: {}", status, body);
         }
 
-        let (tx, rx) = mpsc::channel::<String>(256);
+        let (tx, rx) = mpsc::channel::<StreamToken>(256);
 
         tokio::spawn(async move {
             let mut stream = response.bytes_stream();
             let mut buf = String::new();
             let mut think = ThinkFilter::new();
+
+            // Accumulate tool call across streamed fragments
+            let mut tool_name: Option<String> = None;
+            let mut tool_args = String::new();
 
             while let Some(chunk) = stream.next().await {
                 let bytes = match chunk {
@@ -171,9 +195,13 @@ impl LlamaClient {
                     let Some(data) = line.strip_prefix("data: ") else { continue };
 
                     if data == "[DONE]" {
-                        // Flush any buffered content held back for partial-tag detection.
+                        // Flush any content held back for partial-tag detection.
                         if let Some(tail) = think.flush() {
-                            if tx.send(tail).await.is_err() { return; }
+                            let _ = tx.send(StreamToken::Content(tail)).await;
+                        }
+                        // If a tool call was accumulating but no finish_reason arrived.
+                        if let Some(name) = tool_name.take() {
+                            let _ = tx.send(StreamToken::ToolCall { name, args: tool_args.clone() }).await;
                         }
                         return;
                     }
@@ -182,10 +210,39 @@ impl LlamaClient {
                         continue;
                     };
 
+                    // Check finish_reason before looking at delta content.
+                    if let Some(finish_reason) = json["choices"][0]["finish_reason"].as_str() {
+                        if finish_reason == "tool_calls" {
+                            if let Some(tail) = think.flush() {
+                                let _ = tx.send(StreamToken::Content(tail)).await;
+                            }
+                            if let Some(name) = tool_name.take() {
+                                let _ = tx.send(StreamToken::ToolCall { name, args: tool_args.clone() }).await;
+                            }
+                            return;
+                        }
+                    }
+
+                    // Accumulate tool_calls fragments.
+                    if let Some(calls) = json["choices"][0]["delta"]["tool_calls"].as_array() {
+                        if let Some(call) = calls.first() {
+                            if let Some(name) = call["function"]["name"].as_str() {
+                                if !name.is_empty() {
+                                    tool_name = Some(name.to_string());
+                                }
+                            }
+                            if let Some(frag) = call["function"]["arguments"].as_str() {
+                                tool_args.push_str(frag);
+                            }
+                        }
+                        continue; // tool_calls and content are mutually exclusive
+                    }
+
+                    // Regular content token.
                     if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
                         if content.is_empty() { continue; }
                         if let Some(filtered) = think.process(content) {
-                            if tx.send(filtered).await.is_err() { return; }
+                            if tx.send(StreamToken::Content(filtered)).await.is_err() { return; }
                         }
                     }
                 }
@@ -279,6 +336,10 @@ mod tests {
         ]
     }
 
+    fn messages_to_json(msgs: &[Message]) -> Vec<serde_json::Value> {
+        msgs.iter().map(|m| serde_json::json!({"role": m.role, "content": m.content})).collect()
+    }
+
     // ── complete (non-streaming) ───────────────────────────────────────────────
 
     #[tokio::test]
@@ -368,11 +429,12 @@ mod tests {
             .await;
 
         let client = LlamaClient::new(&server.uri(), "test-model", 400, 0.7, 0);
-        let mut rx = client.stream(&make_messages()).await.unwrap();
+        let messages = make_messages();
+        let mut rx = client.stream(&messages_to_json(&messages), &[]).await.unwrap();
 
         let mut collected = String::new();
         while let Some(token) = rx.recv().await {
-            collected.push_str(&token);
+            if let StreamToken::Content(s) = token { collected.push_str(&s); }
         }
         assert_eq!(collected, "Hello world");
     }
@@ -396,11 +458,12 @@ mod tests {
             .await;
 
         let client = LlamaClient::new(&server.uri(), "test-model", 400, 0.7, 0);
-        let mut rx = client.stream(&make_messages()).await.unwrap();
+        let messages = make_messages();
+        let mut rx = client.stream(&messages_to_json(&messages), &[]).await.unwrap();
 
         let mut collected = String::new();
         while let Some(token) = rx.recv().await {
-            collected.push_str(&token);
+            if let StreamToken::Content(s) = token { collected.push_str(&s); }
         }
         assert_eq!(collected, "Hi");
     }
@@ -477,14 +540,13 @@ mod tests {
     // ── tool call detection via stream ────────────────────────────────────────
 
     #[tokio::test]
-    async fn stream_delivers_tool_call_tokens() {
-        // The LLM emits a tool call split across multiple SSE chunks, as happens
-        // in practice when tokens arrive one-by-one.
+    async fn stream_delivers_native_tool_call() {
         let server = MockServer::start().await;
+        // Simulate llama.cpp SSE for a native function call
         let sse_body = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"<tool_call>\"}}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"content\":\"current_time\"}}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"content\":\"</tool_call>\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_0\",\"type\":\"function\",\"function\":{\"name\":\"current_time\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
             "data: [DONE]\n\n",
         );
         Mock::given(method("POST"))
@@ -498,28 +560,16 @@ mod tests {
             .await;
 
         let client = LlamaClient::new(&server.uri(), "test-model", 400, 0.7, 0);
-        let mut rx = client.stream(&make_messages()).await.unwrap();
+        let mut rx = client.stream(&[], &[]).await.unwrap();
 
-        let mut full = String::new();
-        while let Some(token) = rx.recv().await {
-            full.push_str(&token);
+        let token = rx.recv().await.expect("should receive a token");
+        match token {
+            StreamToken::ToolCall { name, args } => {
+                assert_eq!(name, "current_time");
+                assert_eq!(args, "{}");
+            }
+            other => panic!("expected ToolCall, got {:?}", other),
         }
-
-        // The full response contains the complete tool call XML
-        assert_eq!(full, "<tool_call>current_time</tool_call>");
-
-        // ToolRegistry can detect and route it
-        let mut registry = super::super::session::LlmSession::new("", 0); // just to use the module
-        let _ = registry; // unused, registry test is below
-
-        use crate::tools::{CurrentTimeTool, ToolRegistry};
-        let mut reg = ToolRegistry::new();
-        reg.register(CurrentTimeTool);
-        let (name, args) = reg.parse_tool_call(&full).expect("should detect current_time tool call");
-        assert_eq!(name, "current_time");
-        let result = reg.execute(&name, &args).await;
-        assert!(!result.is_empty());
-        assert!(result.contains(':'), "expected time in result: {result:?}");
     }
 
     #[tokio::test]

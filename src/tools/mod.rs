@@ -15,6 +15,11 @@ pub use run_shell::RunShellTool;
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
+    /// JSON Schema for this tool's parameters (OpenAI function-calling format).
+    /// Default: no parameters.
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
     /// Execute the tool with optional args and return the result as a string.
     async fn run(&self, args: &str) -> String;
 }
@@ -37,21 +42,21 @@ impl ToolRegistry {
         self.tools.is_empty()
     }
 
+    /// Returns the tools array for the OpenAI `tools` request field.
+    pub fn tool_definitions(&self) -> Vec<serde_json::Value> {
+        self.tools.values().map(|t| serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": t.name(),
+                "description": t.description(),
+                "parameters": t.parameters(),
+            }
+        })).collect()
+    }
+
     /// Returns a section to append to the system prompt describing how to call tools.
     pub fn system_prompt_section(&self) -> String {
-        if self.tools.is_empty() {
-            return String::new();
-        }
-        let mut s = String::from(
-            "\n\n[TOOLS]\nIf you need to use a tool, output ONLY the tool call on its own — \
-             no other text before or after it:\n\
-             <tool_call>tool_name: args</tool_call>\n\n\
-             Available tools:\n",
-        );
-        for tool in self.tools.values() {
-            s.push_str(&format!("- {}: {}\n", tool.name(), tool.description()));
-        }
-        s
+        String::new()
     }
 
     /// Parse a tool call from LLM output.
@@ -192,28 +197,24 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_section_contains_tool_name() {
+    fn system_prompt_section_always_empty() {
         let r = registry_with_current_time();
-        let section = r.system_prompt_section();
-        assert!(section.contains("current_time"), "section: {section:?}");
+        assert!(r.system_prompt_section().is_empty());
     }
 
     #[test]
-    fn system_prompt_section_contains_tool_description() {
+    fn tool_definitions_contains_tool_name_and_description() {
         let r = registry_with_current_time();
-        let section = r.system_prompt_section();
-        assert!(
-            section.contains(CurrentTimeTool.description()),
-            "section should include the tool description: {section:?}"
-        );
+        let defs = r.tool_definitions();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0]["function"]["name"], "current_time");
+        assert!(!defs[0]["function"]["description"].as_str().unwrap_or("").is_empty());
     }
 
     #[test]
-    fn system_prompt_section_contains_xml_syntax_example() {
-        let r = registry_with_current_time();
-        let section = r.system_prompt_section();
-        assert!(section.contains("<tool_call>"), "section should show the XML call syntax");
-        assert!(section.contains("</tool_call>"));
+    fn tool_definitions_empty_for_empty_registry() {
+        let r = ToolRegistry::new();
+        assert!(r.tool_definitions().is_empty());
     }
 
     // ── parse → execute round-trip ────────────────────────────────────────────
