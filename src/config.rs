@@ -38,8 +38,18 @@ pub struct Config {
     pub llm_temperature: f32,
 
     // ── TTS ──────────────────────────────────────────────────────────────────
+    /// TTS backend: "say" (default, macOS) or "kokoro" (--features kokoro)
+    pub tts_provider: String,
     /// macOS `say` voice name (SAY_VOICE). List with: say -v ?
     pub say_voice: String,
+    /// Path to kokoro-v1.0.onnx model file (KOKORO_MODEL)
+    pub kokoro_model: String,
+    /// Path to voices-v1.0.bin embeddings file (KOKORO_VOICES)
+    pub kokoro_voices: String,
+    /// Kokoro voice style name, e.g. "af_bella" or "es_*" (KOKORO_VOICE)
+    pub kokoro_voice: String,
+    /// BCP-47 language code for espeak-ng, e.g. "en-us" or "es" (KOKORO_LANGUAGE)
+    pub kokoro_language: String,
 
     // ── Context summarization ─────────────────────────────────────────────────
     /// Approximate context window of the LLM model in tokens.
@@ -120,8 +130,18 @@ impl Config {
                 .context("Invalid LLM_TEMPERATURE")?,
 
             // TTS
+            tts_provider: env::var("TTS_PROVIDER")
+                .unwrap_or_else(|_| "say".to_string()),
             say_voice: env::var("SAY_VOICE")
                 .unwrap_or_else(|_| "Marisol (Enhanced)".to_string()),
+            kokoro_model: env::var("KOKORO_MODEL")
+                .unwrap_or_else(|_| "models/kokoro-v1.0.onnx".to_string()),
+            kokoro_voices: env::var("KOKORO_VOICES")
+                .unwrap_or_else(|_| "models/voices-v1.0.bin".to_string()),
+            kokoro_voice: env::var("KOKORO_VOICE")
+                .unwrap_or_else(|_| "af_bella".to_string()),
+            kokoro_language: env::var("KOKORO_LANGUAGE")
+                .unwrap_or_else(|_| "en-us".to_string()),
 
             // Context summarization
             llm_context_tokens: env::var("LLM_CONTEXT_TOKENS")

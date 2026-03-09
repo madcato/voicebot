@@ -29,7 +29,9 @@ use crate::llm::{LlamaClient, LlmSession, Message};
 use crate::profile::{build_profile_context, extract_facts, ProfileFact};
 use crate::stt::WhisperStt;
 use crate::tools::{CurrentTimeTool, RunAgentAsyncTool, RunAgentTool, ToolRegistry};
-use crate::tts::{SayTts, SentenceSplitter};
+use crate::tts::{SayTts, SentenceSplitter, TtsEngine};
+#[cfg(feature = "kokoro")]
+use crate::tts::KokoroTts;
 
 const AUDIO_CHANNEL_CAPACITY: usize = 200;
 const MAX_SPEECH_BUFFER_SECS: u32 = 30;
@@ -137,9 +139,33 @@ async fn main() -> Result<()> {
     .await??;
     let stt = Arc::new(stt);
 
-    // ── TTS (say) ─────────────────────────────────────────────────────────────
-    let say_voice = config.say_voice.clone();
-    let tts = tokio::task::spawn_blocking(move || SayTts::new(&say_voice)).await??;
+    // ── TTS ───────────────────────────────────────────────────────────────────
+    let tts: TtsEngine = match config.tts_provider.as_str() {
+        #[cfg(feature = "kokoro")]
+        "kokoro" => {
+            info!("TTS provider: Kokoro (voice={}, lang={})", config.kokoro_voice, config.kokoro_language);
+            let k = KokoroTts::new(
+                &config.kokoro_model,
+                &config.kokoro_voices,
+                &config.kokoro_voice,
+                &config.kokoro_language,
+            )
+            .await?;
+            TtsEngine::Kokoro(k)
+        }
+        #[cfg(not(feature = "kokoro"))]
+        "kokoro" => {
+            anyhow::bail!(
+                "TTS_PROVIDER=kokoro requires the 'kokoro' feature: cargo run --features kokoro"
+            );
+        }
+        _ => {
+            info!("TTS provider: say (voice={})", config.say_voice);
+            let say_voice = config.say_voice.clone();
+            let s = tokio::task::spawn_blocking(move || SayTts::new(&say_voice)).await??;
+            TtsEngine::Say(s)
+        }
+    };
     let tts_sample_rate = tts.sample_rate();
     let tts = Arc::new(tts);
 
@@ -347,7 +373,7 @@ async fn main() -> Result<()> {
 async fn stream_and_tts(
     mut token_rx: mpsc::Receiver<String>,
     cancel: &Arc<AtomicBool>,
-    tts: &Arc<SayTts>,
+    tts: &Arc<TtsEngine>,
     audio_output: &Arc<AudioOutput>,
     tts_sample_rate: u32,
     tools: &ToolRegistry,
@@ -459,7 +485,7 @@ async fn run_pipeline(
     audio: Vec<f32>,
     cancel: Arc<AtomicBool>,
     stt: Arc<WhisperStt>,
-    tts: Arc<SayTts>,
+    tts: Arc<TtsEngine>,
     audio_output: Arc<AudioOutput>,
     llm_session: Arc<Mutex<LlmSession>>,
     llm_client: LlamaClient,
@@ -719,7 +745,7 @@ async fn maybe_summarize(
 async fn run_proactive_pipeline(
     notification: String,
     cancel: Arc<AtomicBool>,
-    tts: Arc<SayTts>,
+    tts: Arc<TtsEngine>,
     audio_output: Arc<AudioOutput>,
     llm_session: Arc<Mutex<LlmSession>>,
     llm_client: LlamaClient,

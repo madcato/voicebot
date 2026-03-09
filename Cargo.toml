@@ -57,6 +57,14 @@ whisper-rs = { version = "0.15", features = ["coreml", "metal"] }
 # Sentence boundary detection for TTS streaming
 regex = "1"
 
+# TTS — Kokoro (optional, enable with: cargo build --features kokoro)
+# Requires: brew install espeak-ng
+# Models: kokoro-v1.0.onnx + voices-v1.0.bin (download from HuggingFace)
+kokorox = { version = "0.1", optional = true }
+
+[features]
+kokoro = ["dep:kokorox"]
+
 [dev-dependencies]
 # Mock HTTP server for LLM client integration tests
 wiremock = "0.6"
