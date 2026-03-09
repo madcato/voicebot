@@ -4,6 +4,12 @@ A voice AI assistant built in Rust. The long-term goal is a **Jarvis-style digit
 
 > A chatbot answers questions. A butler anticipates needs.
 
+## Run
+
+```sh
+WHISPER_COREML=1 TTS_PROVIDER=kokoro cargo run --features kokoro --release
+```
+
 ---
 
 ## Vision
@@ -1029,6 +1035,40 @@ Available open-source Speech-to-Speech models (alternative to the current STT+LL
 | [Ultravox](https://github.com/fixie-ai/ultravox) | — | Whisper + LLaMA hybrid |
 
 The current cascade (Whisper + llama.cpp + say) is preferred for now because it supports streaming sentence-by-sentence TTS while the LLM is still generating — true S2S models don't stream output token-by-token in a way that maps to sentence-level TTS.
+
+## Kokoro TTS
+
+
+### Instalar dependencia del sistema
+
+`brew install espeak-ng`
+
+### Descargar modelos (en el directorio del proyecto)
+
+### kokoro-v1.0.onnx y voices-v1.0.bin desde HuggingFace onnx-community/Kokoro-82M-v1.0-ONNX
+
+### Compilar con soporte Kokoro
+
+`cargo build --features kokoro`
+
+### Activar en .env
+
+TTS_PROVIDER=kokoro
+KOKORO_MODEL=models/kokoro-v1.0.onnx
+KOKORO_VOICES=models/voices-v1.0.bin
+KOKORO_VOICE=af_bella        # voz (ver lista con get_available_voices)
+KOKORO_LANGUAGE=en-us        # código BCP-47 para espeak-ng
+
+Arquitectura:
+
+- TtsEngine — enum con variante Say(SayTts) y Kokoro(KokoroTts), compilada con #[cfg(feature = "kokoro")]
+- TTS_PROVIDER=say (defecto) — sin cambios en build, sin espeak-ng
+- TTS_PROVIDER=kokoro + --features kokoro — activa Kokoro
+- Sin el feature, pedir kokoro falla con mensaje claro en runtime
+- El resto del pipeline (stream_and_tts, run_pipeline, run_proactive_pipeline) es agnóstico al backend
+
+Nota sobre voces en español: kokorox usa espeak-ng para fonetización. Para español pasa KOKORO_LANGUAGE=es. Las voces disponibles se pueden listar con
+tts.inner.get_available_voices() si añades un tracing al startup — aunque el modelo base es principalmente en inglés, espeak-ng puede fonetizar español.
 
 ---
 
