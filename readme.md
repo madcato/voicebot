@@ -32,12 +32,12 @@ The current implementation covers the conversational core. The roadmap below cha
 The core pipeline is fully operational:
 
 ```
-Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → SentenceSplitter → macOS say TTS → Speaker
+Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → SentenceSplitter → TTS (say/Kokoro) → Speaker
 ```
 
 **Implemented features:**
 - Real-time voice capture (CPAL), Silero VAD with pre-roll buffer
-- Whisper.cpp STT (Metal GPU, state cached across utterances)
+- Whisper.cpp STT (CoreML Neural Engine or Metal GPU, state cached across utterances)
 - Streaming LLM via llama.cpp HTTP (`cache_prompt=true`, KV-cache reuse across turns)
 - Sentence-by-sentence TTS playback — first sentence plays while next is being generated
 - **Barge-in**: user speech cancels active LLM/TTS pipeline instantly via `Arc<AtomicBool>`
@@ -47,6 +47,9 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
 - **Agent delegation**: `run_agent` (sync) and `run_agent_async` (background + proactive announce) tools; any OpenAI-compatible endpoint; proactive channel in VAD loop
 - **Context summarization**: auto-triggers at 75% of context window; keeps last N turns verbatim; summary persisted in DB and restored on restart
 - **User profile**: background LLM extraction of user facts after every turn; stored in `user_profile` SQLite table; injected into system prompt on startup
+- **Startup greeting**: bot speaks first on process launch — greets by name if known, asks for it otherwise
+- **Kokoro TTS**: high-quality ONNX-based TTS via `kokorox` crate (24 kHz); selectable at runtime via `TTS_PROVIDER`; macOS `say` remains the default
+- **Background GPU overlap**: `maybe_summarize` and `extract_facts` launch while the last TTS sentence is still playing, freeing the GPU sooner
 
 ---
 
@@ -67,7 +70,7 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
                                   │
                     ┌─────────────▼─────────────┐
                     │  STT (spawn_blocking)      │
-                    │  Whisper.cpp + Metal GPU   │
+                    │  Whisper.cpp + CoreML/Metal│
                     └─────────────┬─────────────┘
                                   │  transcript
                     ┌─────────────▼─────────────┐
@@ -83,7 +86,7 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
                            │   re-call LLM with result
                            │          │
                     ┌──────▼──────────▼──────────┐
-                    │  TTS (macOS say)            │
+                    │  TTS (say or Kokoro)        │
                     │  sentence-by-sentence       │
                     └─────────────┬──────────────┘
                                   │  f32 PCM
@@ -91,14 +94,12 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
                     │  AudioOutput (CPAL)        │
                     │  resample + play_blocking  │
                     └───────────────────────────┘
-                                  │  (turn complete)
+                                  │  (last sentence still playing)
                     ┌─────────────▼─────────────┐
-                    │  maybe_summarize()         │  ← if prompt > 75% context
-                    │  background LLM call       │
+                    │  maybe_summarize() [spawn] │  ← overlaps with last audio
+                    │  extract_facts()  [spawn]  │  ← GPU busy while speaker plays
                     └─────────────┬─────────────┘
-                    ┌─────────────▼─────────────┐
-                    │  extract_facts() [spawn]   │  ← fire-and-forget
-                    │  update user_profile DB    │
+                    await last play handle
                     └───────────────────────────┘
 ```
 
@@ -113,7 +114,7 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
 | STT | `src/stt/whisper.rs` | whisper-rs, cached WhisperState (no Metal re-init) |
 | LLM client | `src/llm/client.rs` | Streaming SSE + one-shot completion for llama.cpp |
 | LLM session | `src/llm/session.rs` | Accumulated prompt, turn tracking, summarization |
-| TTS | `src/tts/say.rs` | macOS `say` subprocess, WAV parsing |
+| TTS | `src/tts/say.rs`, `src/tts/kokoro.rs` | macOS `say` or Kokoro ONNX; unified `TtsEngine` enum |
 | Sentence splitter | `src/tts/sentence.rs` | Buffers tokens, emits complete sentences |
 | Tools | `src/tools/` | `Tool` trait + `ToolRegistry`; `current_time`, `run_agent`, `run_agent_async` |
 | Agents | `src/agents/mod.rs` | `ProactiveEvent` enum; proactive speech channel |
@@ -130,8 +131,8 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
 |---------|---------|-------------|
 | `VOICEBOT_LANGUAGE` | `es` | Language for STT and TTS voice selection |
 | `VAD_SILENCE_MS` | `800` | Silence duration (ms) before SpeechEnd fires. Lower = faster response; higher = safer for mid-sentence pauses. Range: 500–1500 |
-| `SAY_VOICE` | `Marisol (Enhanced)` | macOS voice name |
-| `WHISPER_MODEL` | — | Path to `.bin` Whisper model |
+| `WHISPER_MODEL` | — | Path to `.bin` Whisper model (and `.mlmodelc` for CoreML encoder) |
+| `WHISPER_COREML` | `0` | Set to `1` to use CoreML encoder (Neural Engine); requires `.mlmodelc` alongside the `.bin` |
 | `LLM_URL` | `http://localhost:8080` | llama.cpp server base URL (`llama-server --port 8080`) |
 | `LLM_MODEL` | `local-model` | Model name sent in API requests (llama.cpp ignores this field) |
 | `LLM_SLOT_ID` | `0` | llama.cpp KV-cache slot for this session (single-user = 0) |
@@ -143,7 +144,13 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
 | `AGENT_URL` | — | Remote agent base URL (OpenAI-compatible). Unset = agent tools disabled |
 | `AGENT_MODEL` | `local-model` | Model name sent to agent server |
 | `AGENT_MAX_TOKENS` | `2048` | Max tokens for agent responses |
-| `AUDIO_DEVICE` | system default | Input device name substring |
+| `TTS_PROVIDER` | `say` | TTS backend: `say` (macOS, default) or `kokoro` (requires `--features kokoro`) |
+| `SAY_VOICE` | `Marisol (Enhanced)` | macOS voice name (used when `TTS_PROVIDER=say`). List voices: `say -v ?` |
+| `KOKORO_MODEL` | `models/kokoro-v1.0.onnx` | Path to Kokoro ONNX model file |
+| `KOKORO_VOICES` | `models/voices-v1.0.bin` | Path to Kokoro voice embeddings file |
+| `KOKORO_VOICE` | `af_bella` | Kokoro voice style name (see available voices via `get_available_voices`) |
+| `KOKORO_LANGUAGE` | `en-us` | BCP-47 language code passed to espeak-ng for phonemisation |
+| `AUDIO_INPUT_DEVICE` | system default | Input device name substring |
 | `AUDIO_OUTPUT_DEVICE` | system default | Output device name substring |
 | `DB_PATH` | `data/voicebot.db` | SQLite database file path |
 | `LIST_AUDIO_DEVICES` | `0` | Print devices and exit |
@@ -155,6 +162,17 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
 ```bash
 cargo build --release
 cargo run --release
+
+# With Kokoro TTS (requires espeak-ng and ONNX model files)
+cargo build --features kokoro --release
+TTS_PROVIDER=kokoro cargo run --features kokoro --release
+
+# With CoreML STT encoder (Neural Engine; requires converted .mlmodelc)
+WHISPER_COREML=1 cargo run --release
+
+# Fully accelerated
+WHISPER_COREML=1 TTS_PROVIDER=kokoro cargo run --features kokoro --release
+
 cargo test
 cargo fmt
 cargo clippy
@@ -297,7 +315,7 @@ LLM emits <tool_call>run_agent_async: task</tool_call>
 
 ---
 
-### 4. Proactive Conversations (Bot-Initiated Speech)
+### 4. Proactive Conversations (Bot-Initiated Speech) ✅ Partially Implemented
 
 **Goal:** The bot can speak without being prompted by the user — to deliver agent results, reminders, greetings, or contextual observations.
 
@@ -994,6 +1012,10 @@ WAKE_WORD                 keyword to respond in ambient mode (default: "jarvis")
 | Tool use | ✅ Done | XML-based, extensible `Tool` trait, `current_time` |
 | Context summarization | ✅ Done | Auto-trigger at 75% context; persisted in DB |
 | User profile extraction + injection | ✅ Done | Background LLM; `user_profile` table |
+| Startup greeting | ✅ Done | Bot speaks first on launch; uses name if known |
+| Kokoro TTS | ✅ Done | ONNX, 24 kHz, `--features kokoro`, selectable via `TTS_PROVIDER` |
+| CoreML STT encoder | ✅ Done | Neural Engine inference; `WHISPER_COREML=1`; requires `.mlmodelc` |
+| Background GPU overlap | ✅ Done | `maybe_summarize` + `extract_facts` start while last TTS plays |
 | MCP integration | Planned | `src/mcp/`; JSON-RPC over stdio/HTTP |
 | Agent delegation | ✅ Done | `run_agent` (sync) + `run_agent_async` (proactive); OpenAI-compatible |
 | Voicebot as agent intermediary | Planned | Voice proxy over existing text agents |
@@ -1006,18 +1028,18 @@ WAKE_WORD                 keyword to respond in ambient mode (default: "jarvis")
 | A — Character system prompt | ✅ Done | `LLM_SYSTEM_PROMPT` env var + Jarvis prompt in `.env` |
 | B — Eyes (situational awareness) | Planned | Screenshot + vision model; system state injection |
 | C — Arms (computer agency) | Planned | `run_shell` + file/app/clipboard/web tools |
-| D — Voice of its own (proactive) | Planned | Inference daemon + event sources + `proactive_tx` |
+| D — Voice of its own (proactive) | 🔶 Partial | `proactive_tx` channel + startup greeting done; inference daemon + calendar/scheduler not yet |
 | E — Episodic memory (embeddings) | Planned | sqlite-vec + embedding model; semantic recall |
 | F — Always-on daemon | Planned | launchd plist + wake word detection |
 
 ### Recommended implementation order
 
-1. **Pillar A** — Character prompt. Zero code, maximum immediate impact on feel.
-2. **Pillar C** — `run_shell` tool. Unlocks real computer agency in one afternoon.
-3. **Pillar B** — `take_screenshot` + vision. Butler gets eyes.
-4. **Pillar D** — Proactive initiative. Butler speaks first; feels truly alive.
+1. **Pillar A** ✅ — Character prompt. Done.
+2. **Pillar C** — `run_shell` tool. **Highest leverage next step.** Unlocks real computer agency in one session: compile code, read files, run scripts — all from voice.
+3. **Pillar B** — `take_screenshot` + vision. Butler gets eyes; can answer "¿qué hace este código?" without copy-paste.
+4. **Pillar D** — Inference daemon + calendar. Startup greeting done; remaining piece is the background "is there anything worth saying?" loop.
 5. **MCP** — Vast tool ecosystem for free once the tool layer is mature.
-6. **Pillar E** — Episodic memory. Butler remembers your history together.
+6. **Pillar E** — Episodic memory. Butler remembers events, not just facts.
 7. **Pillar F** — Always-on daemon. Butler becomes a permanent presence.
 8. **Agent delegation** ✅ — Complex tasks farmed to specialised agents (done).
 
@@ -1036,39 +1058,49 @@ Available open-source Speech-to-Speech models (alternative to the current STT+LL
 
 The current cascade (Whisper + llama.cpp + say) is preferred for now because it supports streaming sentence-by-sentence TTS while the LLM is still generating — true S2S models don't stream output token-by-token in a way that maps to sentence-level TTS.
 
-## Kokoro TTS
+## Kokoro TTS Setup
 
+Kokoro is an ONNX-based TTS model that runs offline at 24 kHz. It produces higher-quality and more natural-sounding speech than macOS `say`.
 
-### Instalar dependencia del sistema
+### 1. Install system dependency
 
-`brew install espeak-ng`
+```bash
+brew install espeak-ng
+```
 
-### Descargar modelos (en el directorio del proyecto)
+### 2. Download model files
 
-### kokoro-v1.0.onnx y voices-v1.0.bin desde HuggingFace onnx-community/Kokoro-82M-v1.0-ONNX
+Download from [onnx-community/Kokoro-82M-v1.0-ONNX](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX) and place in the `models/` directory:
 
-### Compilar con soporte Kokoro
+```
+models/kokoro-v1.0.onnx
+models/voices-v1.0.bin
+```
 
-`cargo build --features kokoro`
+### 3. Build with Kokoro support
 
-### Activar en .env
+```bash
+cargo build --features kokoro --release
+```
 
+### 4. Configure in `.env`
+
+```env
 TTS_PROVIDER=kokoro
 KOKORO_MODEL=models/kokoro-v1.0.onnx
 KOKORO_VOICES=models/voices-v1.0.bin
-KOKORO_VOICE=af_bella        # voz (ver lista con get_available_voices)
-KOKORO_LANGUAGE=en-us        # código BCP-47 para espeak-ng
+KOKORO_VOICE=af_bella      # voice style (e.g. af_bella, af_heart, bf_emma)
+KOKORO_LANGUAGE=en-us      # BCP-47 code for espeak-ng phonemisation
+```
 
-Arquitectura:
+For Spanish phonemisation: `KOKORO_LANGUAGE=es`. Note that the base model is primarily English; Spanish output quality may vary.
 
-- TtsEngine — enum con variante Say(SayTts) y Kokoro(KokoroTts), compilada con #[cfg(feature = "kokoro")]
-- TTS_PROVIDER=say (defecto) — sin cambios en build, sin espeak-ng
-- TTS_PROVIDER=kokoro + --features kokoro — activa Kokoro
-- Sin el feature, pedir kokoro falla con mensaje claro en runtime
-- El resto del pipeline (stream_and_tts, run_pipeline, run_proactive_pipeline) es agnóstico al backend
+### Architecture
 
-Nota sobre voces en español: kokorox usa espeak-ng para fonetización. Para español pasa KOKORO_LANGUAGE=es. Las voces disponibles se pueden listar con
-tts.inner.get_available_voices() si añades un tracing al startup — aunque el modelo base es principalmente en inglés, espeak-ng puede fonetizar español.
+- `TtsEngine` enum with variants `Say(SayTts)` and `Kokoro(KokoroTts)`, compiled conditionally with `#[cfg(feature = "kokoro")]`
+- `TTS_PROVIDER=say` (default) — no extra build flags needed, no espeak-ng dependency
+- `TTS_PROVIDER=kokoro` + `--features kokoro` — enables Kokoro; fails with a clear message at runtime if the feature flag is missing
+- The rest of the pipeline (`stream_and_tts`, `run_pipeline`, `run_proactive_pipeline`) is backend-agnostic
 
 ---
 
