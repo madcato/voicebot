@@ -44,8 +44,15 @@ voice_activity_detector = "0.2"
 # HTTP client for LLM streaming (SSE)
 reqwest = { version = "0.12", features = ["json", "stream"] }
 
-# STT — whisper.cpp embedded (Metal GPU on Apple Silicon)
-whisper-rs = { version = "0.15", features = ["metal"] }
+# STT — whisper.cpp embedded (CoreML Neural Engine on Apple Silicon)
+# CoreML replaces the encoder with a compiled .mlmodelc model, using the
+# Neural Engine + GPU together. The .mlmodelc must sit alongside the .bin file:
+#   models/ggml-<name>-encoder.mlmodelc
+# Convert with: xcrun coremltools or the whisper.cpp script (convert-whisper-to-coreml.py)
+# whisper-rs = { version = "0.15", features = ["coreml"] }
+whisper-rs = { version = "0.15", features = ["coreml", "metal"] }
+# Or metal
+# whisper-rs = { version = "0.15", features = ["metal"] }
 
 # Sentence boundary detection for TTS streaming
 regex = "1"
