@@ -8,7 +8,7 @@ pub struct Config {
     pub sample_rate: u32,
     pub channels: u16,
     pub chunk_ms: u32,
-    pub audio_device: Option<String>,
+    pub audio_input_device: Option<String>,
     pub audio_output_device: Option<String>,
     pub list_devices: bool,
 
@@ -76,7 +76,7 @@ impl Config {
                 .unwrap_or_else(|_| "100".to_string())
                 .parse()
                 .context("Invalid AUDIO_CHUNK_MS")?,
-            audio_device: env::var("AUDIO_DEVICE").ok(),
+            audio_input_device: env::var("AUDIO_INPUT_DEVICE").ok(),
             audio_output_device: env::var("AUDIO_OUTPUT_DEVICE").ok(),
             list_devices: env::var("LIST_AUDIO_DEVICES")
                 .map(|v| v == "1" || v.to_lowercase() == "true")

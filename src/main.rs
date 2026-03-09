@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
     );
 
     // ── Audio capture ─────────────────────────────────────────────────────────
-    let audio_capture = AudioCapture::new(config.audio_device.as_deref())?;
+    let audio_capture = AudioCapture::new(config.audio_input_device.as_deref())?;
     let source_sample_rate = audio_capture.sample_rate();
     info!("Audio input: {}Hz", source_sample_rate);
 
