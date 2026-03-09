@@ -75,6 +75,18 @@ impl LlmSession {
         session
     }
 
+    /// Build the full message list as JSON values for an API call.
+    ///
+    /// Identical to `all_messages()` but returns serde_json::Value so callers
+    /// can append tool-call / tool-result messages with arbitrary fields
+    /// (tool_calls, tool_call_id, null content) that Message does not model.
+    pub fn all_messages_api(&self) -> Vec<serde_json::Value> {
+        self.all_messages()
+            .into_iter()
+            .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
+            .collect()
+    }
+
     /// Build the full message list for an API call: system first, then conversation.
     pub fn all_messages(&self) -> Vec<Message> {
         let system_content = match &self.summary {

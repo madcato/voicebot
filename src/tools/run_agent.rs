@@ -73,16 +73,32 @@ impl Tool for RunAgentTool {
 
     fn description(&self) -> &str {
         "Delegates a task to a remote AI agent and waits for the result (< 10 s). \
-         Use for tasks needing more reasoning than the local model. \
-         Usage: run_agent: <task description>"
+         Use for tasks needing more reasoning than the local model."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "Description of the task to delegate to the agent"
+                }
+            },
+            "required": ["task"]
+        })
     }
 
     async fn run(&self, args: &str) -> String {
-        if args.is_empty() {
-            return "Error: run_agent requires a task description after the colon.".to_string();
+        let task = serde_json::from_str::<serde_json::Value>(args)
+            .ok()
+            .and_then(|v| v["task"].as_str().map(String::from))
+            .unwrap_or_else(|| args.to_string());
+        if task.is_empty() {
+            return "Error: run_agent requires a task description.".to_string();
         }
-        info!("RunAgentTool: delegating task: {:?}", args);
-        call_agent(&self.client, &self.chat_url, &self.model, self.max_tokens, args).await
+        info!("RunAgentTool: delegating task: {:?}", task);
+        call_agent(&self.client, &self.chat_url, &self.model, self.max_tokens, &task).await
     }
 }
 
@@ -125,17 +141,31 @@ impl Tool for RunAgentAsyncTool {
     fn description(&self) -> &str {
         "Delegates a long-running task to a remote AI agent in the background and returns \
          immediately. The result will be delivered proactively when the agent finishes. \
-         Use for tasks that take more than 10 seconds (research, analysis, code generation). \
-         Usage: run_agent_async: <task description>"
+         Use for tasks that take more than 10 seconds (research, analysis, code generation)."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "Description of the long-running task to delegate in the background"
+                }
+            },
+            "required": ["task"]
+        })
     }
 
     async fn run(&self, args: &str) -> String {
-        if args.is_empty() {
-            return "Error: run_agent_async requires a task description after the colon."
-                .to_string();
+        let task = serde_json::from_str::<serde_json::Value>(args)
+            .ok()
+            .and_then(|v| v["task"].as_str().map(String::from))
+            .unwrap_or_else(|| args.to_string());
+        if task.is_empty() {
+            return "Error: run_agent_async requires a task description.".to_string();
         }
 
-        let task = args.to_string();
         let client = self.client.clone();
         let chat_url = self.chat_url.clone();
         let model = self.model.clone();
@@ -172,7 +202,7 @@ mod tests {
     fn sync_name_and_description() {
         let tool = RunAgentTool::new("http://localhost:8080", "test-model", 2048);
         assert_eq!(tool.name(), "run_agent");
-        assert!(tool.description().contains("run_agent:"), "should show usage format");
+        assert!(!tool.description().is_empty(), "description should be non-empty");
     }
 
     #[tokio::test]
@@ -246,7 +276,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<ProactiveEvent>(8);
         let tool = RunAgentAsyncTool::new("http://localhost:8080", "test-model", 2048, tx);
         assert_eq!(tool.name(), "run_agent_async");
-        assert!(tool.description().contains("run_agent_async:"), "should show usage format");
+        assert!(!tool.description().is_empty(), "description should be non-empty");
     }
 
     #[tokio::test]
