@@ -66,6 +66,11 @@ pub struct Config {
     /// Max tokens for agent responses.
     pub agent_max_tokens: u32,
 
+    // ── System state injection ────────────────────────────────────────────────
+    /// Prepend `[SYSTEM STATE]` (time, active app, battery) to each user turn.
+    /// Enabled via `INJECT_SYSTEM_DATA=true`.
+    pub inject_system_data: bool,
+
     // ── Vision ────────────────────────────────────────────────────────────────
     /// Base URL of the vision model provider (VISION_URL). None = disabled.
     pub vision_url: Option<String>,
@@ -175,6 +180,11 @@ impl Config {
                 .unwrap_or_else(|_| "2048".to_string())
                 .parse()
                 .context("Invalid AGENT_MAX_TOKENS")?,
+
+            // System state injection
+            inject_system_data: env::var("INJECT_SYSTEM_DATA")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(false),
 
             // Vision
             vision_url: env::var("VISION_URL").ok(),

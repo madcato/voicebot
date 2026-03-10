@@ -5,6 +5,7 @@ mod db;
 mod llm;
 mod profile;
 mod stt;
+mod system_state;
 mod tools;
 mod tts;
 
@@ -318,16 +319,17 @@ async fn main() -> Result<()> {
 
                         cancel.store(false, Ordering::SeqCst);
 
-                        let cancel_c        = Arc::clone(&cancel);
-                        let stt_c           = Arc::clone(&stt);
-                        let tts_c           = Arc::clone(&tts);
-                        let audio_out_c     = Arc::clone(&audio_output);
-                        let llm_session_c   = Arc::clone(&llm_session);
-                        let llm_client_c    = llm_client.clone();
-                        let db_c            = db.clone();
-                        let tools_c         = Arc::clone(&tools);
-                        let context_tokens  = config.llm_context_tokens;
-                        let keep_turns      = config.llm_summary_keep_turns;
+                        let cancel_c           = Arc::clone(&cancel);
+                        let stt_c              = Arc::clone(&stt);
+                        let tts_c              = Arc::clone(&tts);
+                        let audio_out_c        = Arc::clone(&audio_output);
+                        let llm_session_c      = Arc::clone(&llm_session);
+                        let llm_client_c       = llm_client.clone();
+                        let db_c               = db.clone();
+                        let tools_c            = Arc::clone(&tools);
+                        let context_tokens     = config.llm_context_tokens;
+                        let keep_turns         = config.llm_summary_keep_turns;
+                        let inject_system_data = config.inject_system_data;
 
                         pipeline_handle = Some(tokio::spawn(async move {
                             run_pipeline(
@@ -344,6 +346,7 @@ async fn main() -> Result<()> {
                                 tools_c,
                                 context_tokens,
                                 keep_turns,
+                                inject_system_data,
                             )
                             .await;
                         }));
@@ -493,6 +496,9 @@ async fn stream_and_tts(
     (full_response, None, play_handle)
 }
 
+/// Maximum number of sequential tool calls allowed per user turn.
+const MAX_TOOL_ITERATIONS: usize = 5;
+
 /// Full STT → LLM → (tools →)* TTS pipeline for a single utterance.
 async fn run_pipeline(
     audio: Vec<f32>,
@@ -508,6 +514,7 @@ async fn run_pipeline(
     tools: Arc<ToolRegistry>,
     context_tokens: usize,
     summary_keep_turns: usize,
+    inject_system_data: bool,
 ) {
     macro_rules! check_cancel {
         () => {
@@ -555,8 +562,7 @@ async fn run_pipeline(
 
     check_cancel!();
 
-    // ── LLM streaming (with optional tool call loop) ───────────────────────────
-    // We allow at most one tool call per user turn (sufficient for simple tools).
+    // ── LLM streaming + tool call loop ────────────────────────────────────────
     let mut session_snapshot = session_for_llm;
     let mut final_response = String::new();
     // Last playback handle returned by stream_and_tts (last sentence still playing).
@@ -565,67 +571,72 @@ async fn run_pipeline(
     let mut committed = false;
 
     'pipeline: {
-        // First LLM call
         let tool_defs = tools.tool_definitions();
-        let token_rx = match llm_client.stream(&session_snapshot.all_messages_api(), &tool_defs).await {
-            Ok(r)  => r,
-            Err(e) => { error!("LLM stream error: {}", e); break 'pipeline; }
-        };
 
-        let (llm_text, tool_call, play) =
-            stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate).await;
-
-        if cancel.load(Ordering::SeqCst) {
-            if let Some(h) = play { h.abort(); }
-            break 'pipeline;
+        // Build the initial message list. Inject ambient system state as a
+        // prefix to the current user message (ephemeral — not stored in session).
+        let mut messages = session_snapshot.all_messages_api();
+        if inject_system_data {
+            let state = system_state::build().await;
+            if let Some(last_msg) = messages.last_mut() {
+                if last_msg["role"] == "user" {
+                    let original = last_msg["content"].as_str().unwrap_or("").to_string();
+                    last_msg["content"] = serde_json::Value::String(
+                        format!("{state}\n\n{original}")
+                    );
+                }
+            }
+            debug!("System state injected: {}", state);
         }
 
-        if let Some((name, args)) = tool_call {
-            // play is None here (tool-call path already awaited it inside stream_and_tts)
-
-            // ── Tool execution ────────────────────────────────────────────────
-            let result = tools.execute(&name, &args).await;
-            info!("Tool `{}` → {}", name, result);
-
-            // Build the tool exchange as proper OpenAI messages (ephemeral, not stored in session).
-            let tool_call_id = format!("call_{}", &name);
-            let mut tool_messages = session_snapshot.all_messages_api();
-            tool_messages.push(serde_json::json!({
-                "role": "assistant",
-                "content": serde_json::Value::Null,
-                "tool_calls": [{
-                    "id": tool_call_id,
-                    "type": "function",
-                    "function": {"name": name, "arguments": args}
-                }]
-            }));
-            tool_messages.push(serde_json::json!({
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": result
-            }));
-
-            if cancel.load(Ordering::SeqCst) { break 'pipeline; }
-
-            // Second LLM call — produces the spoken response
-            let token_rx2 = match llm_client.stream(&tool_messages, &[]).await {
+        // Tool call loop — allows the model to call multiple tools sequentially
+        // before producing its final spoken response (max MAX_TOOL_ITERATIONS).
+        'tool_loop: for iter in 0..MAX_TOOL_ITERATIONS {
+            let token_rx = match llm_client.stream(&messages, &tool_defs).await {
                 Ok(r)  => r,
-                Err(e) => { error!("LLM stream error (post-tool): {}", e); break 'pipeline; }
+                Err(e) => { error!("LLM stream error: {}", e); break 'pipeline; }
             };
 
-            let (response2, _, play2) =
-                stream_and_tts(token_rx2, &cancel, &tts, &audio_output, tts_sample_rate).await;
+            let (llm_text, tool_call, play) =
+                stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate).await;
 
             if cancel.load(Ordering::SeqCst) {
-                if let Some(h) = play2 { h.abort(); }
+                if let Some(h) = play { h.abort(); }
                 break 'pipeline;
             }
 
-            final_response = response2;
-            last_play = play2;
-        } else {
-            final_response = llm_text;
-            last_play = play;
+            match tool_call {
+                Some((name, args)) => {
+                    // play is None here — tool-call path already awaited it.
+                    let result = tools.execute(&name, &args).await;
+                    info!("Tool[{}] `{}` → {}", iter, name, result);
+
+                    let tool_call_id = format!("call_{}_{}", name, iter);
+                    messages.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": serde_json::Value::Null,
+                        "tool_calls": [{
+                            "id": tool_call_id,
+                            "type": "function",
+                            "function": {"name": name, "arguments": args}
+                        }]
+                    }));
+                    messages.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": result
+                    }));
+
+                    if cancel.load(Ordering::SeqCst) { break 'pipeline; }
+                    // Continue to next iteration for the model's follow-up.
+                }
+                None => {
+                    // No tool call — this is the final spoken response.
+                    final_response = llm_text;
+                    last_play = play;
+                    break 'tool_loop;
+                }
+            }
         }
 
         if final_response.is_empty() {
