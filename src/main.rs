@@ -805,19 +805,58 @@ async fn run_proactive_pipeline(
         msgs
     };
 
-    let token_rx = match llm_client.stream(&messages_api, &[]).await {
-        Ok(r) => r,
-        Err(e) => {
-            error!("Proactive LLM error: {}", e);
+    let tool_defs = tools.tool_definitions();
+    let mut messages = messages_api;
+    let mut last_play: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
+
+    'tool_loop: for iter in 0..MAX_TOOL_ITERATIONS {
+        let token_rx = match llm_client.stream(&messages, &tool_defs).await {
+            Ok(r) => r,
+            Err(e) => {
+                error!("Proactive LLM error: {}", e);
+                return;
+            }
+        };
+
+        let (llm_text, tool_call, play) =
+            stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate).await;
+
+        if cancel.load(Ordering::SeqCst) {
+            if let Some(h) = play { h.abort(); }
             return;
         }
-    };
 
-    let (response, _, last_play) =
-        stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate).await;
+        match tool_call {
+            Some((name, args)) => {
+                let result = tools.execute(&name, &args).await;
+                info!("Proactive tool[{}] `{}` → {}", iter, name, result);
 
-    if !response.is_empty() {
-        info!("Proactive: {}", response);
+                let tool_call_id = format!("call_{}_{}", name, iter);
+                messages.push(serde_json::json!({
+                    "role": "assistant",
+                    "content": serde_json::Value::Null,
+                    "tool_calls": [{
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {"name": name, "arguments": args}
+                    }]
+                }));
+                messages.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": result
+                }));
+
+                if cancel.load(Ordering::SeqCst) { return; }
+            }
+            None => {
+                if !llm_text.is_empty() {
+                    info!("Proactive: {}", llm_text);
+                }
+                last_play = play;
+                break 'tool_loop;
+            }
+        }
     }
 
     if let Some(h) = last_play {
