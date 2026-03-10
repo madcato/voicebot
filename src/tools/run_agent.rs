@@ -344,6 +344,7 @@ mod tests {
                 assert!(task.contains("Research Rust"), "task: {task:?}");
                 assert!(result.contains("Rust is fast"), "result: {result:?}");
             }
+            other => panic!("unexpected event: {other:?}"),
         }
     }
 
@@ -369,6 +370,7 @@ mod tests {
             ProactiveEvent::AgentResult { result, .. } => {
                 assert!(!result.is_empty(), "error result must not be empty");
             }
+            other => panic!("unexpected event: {other:?}"),
         }
     }
 
@@ -432,6 +434,7 @@ mod tests {
                 assert!(task.contains("climate"), "task: {task:?}");
                 assert!(result.contains("Background research done"), "result: {result:?}");
             }
+            other => panic!("unexpected event: {other:?}"),
         }
     }
 }

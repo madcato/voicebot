@@ -66,6 +66,12 @@ pub struct Config {
     /// Max tokens for agent responses.
     pub agent_max_tokens: u32,
 
+    // ── Inference daemon ──────────────────────────────────────────────────────
+    /// Enable the background "is there anything worth saying?" loop.
+    pub daemon_enabled: bool,
+    /// Seconds between daemon checks (DAEMON_INTERVAL_SECS, default 300).
+    pub daemon_interval_secs: u64,
+
     // ── System state injection ────────────────────────────────────────────────
     /// Prepend `[SYSTEM STATE]` (time, active app, battery) to each user turn.
     /// Enabled via `INJECT_SYSTEM_DATA=true`.
@@ -180,6 +186,15 @@ impl Config {
                 .unwrap_or_else(|_| "2048".to_string())
                 .parse()
                 .context("Invalid AGENT_MAX_TOKENS")?,
+
+            // Inference daemon
+            daemon_enabled: env::var("DAEMON_ENABLED")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(false),
+            daemon_interval_secs: env::var("DAEMON_INTERVAL_SECS")
+                .unwrap_or_else(|_| "300".to_string())
+                .parse()
+                .context("Invalid DAEMON_INTERVAL_SECS")?,
 
             // System state injection
             inject_system_data: env::var("INJECT_SYSTEM_DATA")

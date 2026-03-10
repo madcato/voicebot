@@ -39,6 +39,11 @@ pub struct LlmSession {
 }
 
 impl LlmSession {
+    /// Returns the base system prompt (before any summary injection).
+    pub fn system_prompt(&self) -> &str {
+        &self.original_system_prompt
+    }
+
     /// Create a fresh session.
     pub fn new(system_prompt: &str, slot_id: u8) -> Self {
         Self {

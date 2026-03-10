@@ -1,6 +1,7 @@
 mod agents;
 mod audio;
 mod config;
+mod daemon;
 mod db;
 mod llm;
 mod profile;
@@ -92,7 +93,7 @@ async fn main() -> Result<()> {
             agent_url,
             &config.agent_model,
             config.agent_max_tokens,
-            proactive_tx,
+            proactive_tx.clone(),
         ));
     }
     let tools = Arc::new(tool_registry);
@@ -142,6 +143,21 @@ async fn main() -> Result<()> {
         config.llm_slot_id,
     );
     info!("LLM endpoint: {}", config.llm_url);
+
+    // ── Inference daemon ──────────────────────────────────────────────────────
+    if config.daemon_enabled {
+        info!(
+            "Inference daemon enabled (interval={}s)",
+            config.daemon_interval_secs
+        );
+        daemon::InferenceDaemon {
+            interval_secs: config.daemon_interval_secs,
+            llm_client: llm_client.clone(),
+            llm_session: Arc::clone(&llm_session),
+            proactive_tx: proactive_tx.clone(),
+        }
+        .spawn();
+    }
 
     // ── STT (whisper) ─────────────────────────────────────────────────────────
     let whisper_model = config.whisper_model.clone();
@@ -247,13 +263,20 @@ async fn main() -> Result<()> {
                         Err(e) => { error!("Audio channel closed: {}", e); break; }
                     },
                     Some(event) = proactive_rx.recv() => {
-                        let ProactiveEvent::AgentResult { task, result } = event;
-                        let notification = format!(
-                            "[Sistema: una tarea en segundo plano ha terminado.]\n\
-                             Tarea: {task}\n\
-                             Resultado: {result}\n\
-                             Informa al usuario de forma natural y concisa."
-                        );
+                        let notification = match event {
+                            ProactiveEvent::AgentResult { task, result } => format!(
+                                "[Sistema: una tarea en segundo plano ha terminado.]\n\
+                                 Tarea: {task}\n\
+                                 Resultado: {result}\n\
+                                 Informa al usuario de forma natural y concisa."
+                            ),
+                            ProactiveEvent::InferenceDaemon { message } => format!(
+                                "[Sistema: el demonio de inferencia ha detectado algo \
+                                 que merece la atención del usuario.]\n\
+                                 Observación: {message}\n\
+                                 Comunícalo de forma natural y concisa, con tu personalidad habitual."
+                            ),
+                        };
                         let cancel_c      = Arc::clone(&cancel);
                         let tts_c         = Arc::clone(&tts);
                         let audio_out_c   = Arc::clone(&audio_output);
