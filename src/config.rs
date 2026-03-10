@@ -66,6 +66,14 @@ pub struct Config {
     /// Max tokens for agent responses.
     pub agent_max_tokens: u32,
 
+    // ── Vision ────────────────────────────────────────────────────────────────
+    /// Base URL of the vision model provider (VISION_URL). None = disabled.
+    pub vision_url: Option<String>,
+    /// Model name for vision requests (VISION_MODEL).
+    pub vision_model: String,
+    /// Max tokens for vision responses (VISION_MAX_TOKENS, default 512).
+    pub vision_max_tokens: u32,
+
     // ── Shell tool ────────────────────────────────────────────────────────────
     /// Enable the `run_shell` tool (SHELL_ENABLED=1). Off by default.
     pub shell_enabled: bool,
@@ -167,6 +175,15 @@ impl Config {
                 .unwrap_or_else(|_| "2048".to_string())
                 .parse()
                 .context("Invalid AGENT_MAX_TOKENS")?,
+
+            // Vision
+            vision_url: env::var("VISION_URL").ok(),
+            vision_model: env::var("VISION_MODEL")
+                .unwrap_or_else(|_| "local-model".to_string()),
+            vision_max_tokens: env::var("VISION_MAX_TOKENS")
+                .unwrap_or_else(|_| "512".to_string())
+                .parse()
+                .context("Invalid VISION_MAX_TOKENS")?,
 
             // Shell tool
             shell_enabled: env::var("SHELL_ENABLED")

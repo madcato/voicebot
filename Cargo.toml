@@ -44,6 +44,9 @@ voice_activity_detector = "0.2"
 # HTTP client for LLM streaming (SSE)
 reqwest = { version = "0.12", features = ["json", "stream"] }
 
+# Base64 encoding (screenshot → vision model)
+base64 = "0.22"
+
 # STT — whisper.cpp embedded (CoreML Neural Engine on Apple Silicon)
 # CoreML replaces the encoder with a compiled .mlmodelc model, using the
 # Neural Engine + GPU together. The .mlmodelc must sit alongside the .bin file:

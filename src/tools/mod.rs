@@ -1,6 +1,7 @@
 pub mod current_time;
 pub mod run_agent;
 pub mod run_shell;
+pub mod take_screenshot;
 
 use std::collections::HashMap;
 
@@ -9,6 +10,7 @@ use async_trait::async_trait;
 pub use current_time::CurrentTimeTool;
 pub use run_agent::{RunAgentAsyncTool, RunAgentTool};
 pub use run_shell::RunShellTool;
+pub use take_screenshot::TakeScreenshotTool;
 
 /// A tool the LLM can invoke by name.
 #[async_trait]
