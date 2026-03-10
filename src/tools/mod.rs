@@ -1,15 +1,23 @@
+pub mod clipboard;
 pub mod current_time;
+pub mod open_app;
+pub mod read_file;
 pub mod run_agent;
 pub mod run_shell;
+pub mod send_notification;
 pub mod take_screenshot;
 
 use std::collections::HashMap;
 
 use async_trait::async_trait;
 
+pub use clipboard::{ReadClipboardTool, SetClipboardTool};
 pub use current_time::CurrentTimeTool;
+pub use open_app::OpenAppTool;
+pub use read_file::ReadFileTool;
 pub use run_agent::{RunAgentAsyncTool, RunAgentTool};
 pub use run_shell::RunShellTool;
+pub use send_notification::SendNotificationTool;
 pub use take_screenshot::TakeScreenshotTool;
 
 /// A tool the LLM can invoke by name.

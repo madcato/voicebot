@@ -73,3 +73,5 @@ kokoro = ["dep:kokorox"]
 wiremock = "0.6"
 # Safe env-var overrides in parallel tests
 temp-env = "0.3"
+# Temporary directories for file I/O tests
+tempfile = "3"
