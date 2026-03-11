@@ -1,3 +1,4 @@
+pub mod calendar;
 pub mod clipboard;
 pub mod current_time;
 pub mod open_app;
@@ -11,6 +12,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 
+pub use calendar::{CalendarCreateTool, CalendarGetEventsTool};
 pub use clipboard::{ReadClipboardTool, SetClipboardTool};
 pub use current_time::CurrentTimeTool;
 pub use open_app::OpenAppTool;
