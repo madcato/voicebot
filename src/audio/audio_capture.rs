@@ -3,7 +3,7 @@ use async_channel::Sender;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, StreamConfig};
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, trace};
 
 /// Raw audio data from the microphone
 #[derive(Debug, Clone)]
@@ -271,7 +271,7 @@ impl AudioCapture {
             if let Err(e) = tx.try_send(chunk) {
                 warn!("Failed to send audio chunk: {}", e);
             } else {
-                debug!("Sent audio chunk with {} samples", total_samples_needed);
+                trace!("Sent audio chunk with {} samples", total_samples_needed);
             }
         }
     }
