@@ -59,12 +59,12 @@ pub struct Config {
     pub llm_summary_keep_turns: usize,
 
     // ── Agent delegation ──────────────────────────────────────────────────────
-    /// Base URL of the remote agent (OpenAI-compatible). None = agent tools disabled.
-    pub agent_url: Option<String>,
-    /// Model name for the remote agent server.
-    pub agent_model: String,
-    /// Max tokens for agent responses.
-    pub agent_max_tokens: u32,
+    /// CLI command used to invoke the agent (e.g. "hermes"). May include arguments.
+    /// None = agent tools disabled. The voicebot writes the task to stdin and reads
+    /// the result from stdout.
+    pub agent_command: Option<String>,
+    /// Hard timeout in seconds for synchronous agent calls (AGENT_TIMEOUT_SECS).
+    pub agent_timeout_secs: u64,
 
     // ── Inference daemon ──────────────────────────────────────────────────────
     /// Enable the background "is there anything worth saying?" loop.
@@ -179,13 +179,11 @@ impl Config {
                 .context("Invalid LLM_SUMMARY_KEEP_TURNS")?,
 
             // Agent delegation
-            agent_url: env::var("AGENT_URL").ok(),
-            agent_model: env::var("AGENT_MODEL")
-                .unwrap_or_else(|_| "local-model".to_string()),
-            agent_max_tokens: env::var("AGENT_MAX_TOKENS")
-                .unwrap_or_else(|_| "2048".to_string())
+            agent_command: env::var("AGENT_COMMAND").ok(),
+            agent_timeout_secs: env::var("AGENT_TIMEOUT_SECS")
+                .unwrap_or_else(|_| "120".to_string())
                 .parse()
-                .context("Invalid AGENT_MAX_TOKENS")?,
+                .context("Invalid AGENT_TIMEOUT_SECS")?,
 
             // Inference daemon
             daemon_enabled: env::var("DAEMON_ENABLED")

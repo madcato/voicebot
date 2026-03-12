@@ -14,7 +14,7 @@ use anyhow::Result;
 use async_channel::bounded;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -30,11 +30,7 @@ use crate::db::Database;
 use crate::llm::{LlamaClient, LlmSession, StreamToken};
 use crate::profile::{build_profile_context, extract_facts, ProfileFact};
 use crate::stt::WhisperStt;
-use crate::tools::{
-    CalendarCreateTool, CalendarGetEventsTool, CurrentTimeTool, OpenAppTool, ReadClipboardTool,
-    ReadFileTool, RunAgentAsyncTool, RunAgentTool, RunShellTool, SendNotificationTool,
-    SetClipboardTool, TakeScreenshotTool, ToolRegistry,
-};
+use crate::tools::{format_history, CurrentTimeTool, RunAgentAsyncTool, ToolRegistry};
 use crate::tts::{SayTts, SentenceSplitter, TtsEngine};
 #[cfg(feature = "kokoro")]
 use crate::tts::KokoroTts;
@@ -72,38 +68,20 @@ async fn main() -> Result<()> {
     let (proactive_tx, proactive_rx) = mpsc::channel::<ProactiveEvent>(32);
 
     // ── Tools ─────────────────────────────────────────────────────────────────
+    // Voicebot tools are intentionally minimal: only instant, voice-layer operations.
+    // Everything else (calendar, files, shell, clipboard, vision) is delegated to
+    // the external agent via run_agent_async.
+    //
+    // `shared_history` is updated after every user turn so the agent always
+    // receives full conversational context via `hermes chat -q "{history}"`.
+    let shared_history: Arc<RwLock<String>> = Arc::new(RwLock::new(String::new()));
     let mut tool_registry = ToolRegistry::new();
     tool_registry.register(CurrentTimeTool);
-    tool_registry.register(ReadClipboardTool);
-    tool_registry.register(SetClipboardTool);
-    tool_registry.register(OpenAppTool);
-    tool_registry.register(SendNotificationTool);
-    tool_registry.register(ReadFileTool);
-    tool_registry.register(CalendarGetEventsTool);
-    tool_registry.register(CalendarCreateTool);
-    if config.shell_enabled {
-        info!("Shell tool enabled (timeout={}s)", config.shell_timeout_secs);
-        tool_registry.register(RunShellTool::new(config.shell_timeout_secs));
-    }
-    if let Some(ref vision_url) = config.vision_url {
-        info!("Vision tool enabled: {} (model={})", vision_url, config.vision_model);
-        tool_registry.register(TakeScreenshotTool::new(
-            vision_url,
-            &config.vision_model,
-            config.vision_max_tokens,
-        ));
-    }
-    if let Some(ref agent_url) = config.agent_url {
-        info!("Agent delegation enabled: {}", agent_url);
-        tool_registry.register(RunAgentTool::new(
-            agent_url,
-            &config.agent_model,
-            config.agent_max_tokens,
-        ));
+    if let Some(ref agent_command) = config.agent_command {
+        info!("Agent delegation enabled: {}", agent_command);
         tool_registry.register(RunAgentAsyncTool::new(
-            agent_url,
-            &config.agent_model,
-            config.agent_max_tokens,
+            agent_command,
+            shared_history.clone(),
             proactive_tx.clone(),
         ));
     }
@@ -361,6 +339,7 @@ async fn main() -> Result<()> {
                         let llm_client_c       = llm_client.clone();
                         let db_c               = db.clone();
                         let tools_c            = Arc::clone(&tools);
+                        let shared_history_c   = Arc::clone(&shared_history);
                         let context_tokens     = config.llm_context_tokens;
                         let keep_turns         = config.llm_summary_keep_turns;
                         let inject_system_data = config.inject_system_data;
@@ -378,6 +357,7 @@ async fn main() -> Result<()> {
                                 session_id,
                                 tts_sample_rate,
                                 tools_c,
+                                shared_history_c,
                                 context_tokens,
                                 keep_turns,
                                 inject_system_data,
@@ -546,6 +526,7 @@ async fn run_pipeline(
     session_id: Uuid,
     tts_sample_rate: u32,
     tools: Arc<ToolRegistry>,
+    shared_history: Arc<RwLock<String>>,
     context_tokens: usize,
     summary_keep_turns: usize,
     inject_system_data: bool,
@@ -580,6 +561,11 @@ async fn run_pipeline(
     let session_for_llm = {
         let mut s = llm_session.lock().unwrap();
         s.add_user_turn(&transcript);
+        // Update shared history so the agent tool has the current conversation
+        // context (including this user turn) when run_agent_async is called.
+        if let Ok(mut h) = shared_history.write() {
+            *h = format_history(&s.messages);
+        }
         s.clone()
     };
 
