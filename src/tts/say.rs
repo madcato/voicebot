@@ -47,6 +47,7 @@ impl SayTts {
                 &self.voice,
                 "--file-format=WAVE",
                 "--data-format=LEI16",
+                "-r 180",
                 "-o",
                 tmp_path.to_str().unwrap(),
             ])
