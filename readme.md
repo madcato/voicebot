@@ -43,8 +43,8 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
 - **Barge-in**: user speech cancels active LLM/TTS pipeline instantly via `Arc<AtomicBool>`
 - Persistent SQLite conversation history — restored on startup
 - LLM session rollback on barge-in interruption
-- **Tool use**: `<tool_call>tool_name: args</tool_call>` XML detection mid-stream; LLM loops back after tool result; `current_time` built-in
-- **Agent delegation**: `run_agent` (sync) and `run_agent_async` (background + proactive announce) tools; any OpenAI-compatible endpoint; proactive channel in VAD loop
+- **Tool use**: OpenAI-native function calling (`tools: [...]`, `tool_choice: "auto"`); multi-tool loop (up to 5 iterations); voicebot-only tools: `current_time`, `take_screenshot`, `send_notification`, `read_clipboard`, `set_clipboard`, `open_app`
+- **Agent delegation**: `run_agent` (sync) and `run_agent_async` (background + proactive announce) via stdin/stdout subprocess; any CLI agent; proactive channel in VAD loop
 - **Context summarization**: auto-triggers at 75% of context window; keeps last N turns verbatim; summary persisted in DB and restored on restart
 - **User profile**: background LLM extraction of user facts after every turn; stored in `user_profile` SQLite table; injected into system prompt on startup
 - **Startup greeting**: bot speaks first on process launch — greets by name if known, asks for it otherwise
@@ -54,6 +54,72 @@ Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → Sentenc
 ---
 
 ## Architecture
+
+### Voicebot as Pure Voice Layer
+
+The voicebot is deliberately narrow in scope: it owns the audio pipeline and the conversational voice experience. Everything else — computer control, file access, calendar, web, vision, long-running tasks — belongs to an external agent.
+
+This separation exists for one reason: **response latency**. The more tools and context the voicebot LLM has to consider, the slower the first token arrives. A voice model that only knows about conversation and a handful of instant local operations responds in under 1 second. A voice model that also thinks about shell commands, file trees, and calendar APIs is slower and less reliable.
+
+```
+┌────────────────────────────────────────────────────────────┐
+│  VOICEBOT  (voice layer — always fast)                      │
+│                                                             │
+│  • STT → LLM (fast 7B) → TTS                               │
+│  • Barge-in, conversation awareness, speaker ID            │
+│  • Proactive speech (inference daemon)                      │
+│  • Voice-local tools: time, screenshot, clipboard,          │
+│    notification, open_app                                   │
+│                                                             │
+│  When task is complex or requires computer agency:          │
+│    run_agent(task) ──stdin/stdout──► AGENT                  │
+│    run_agent_async(task) ─────────► AGENT (background)      │
+│                              result ◄── proactive_tx        │
+└────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────┐
+│  EXTERNAL AGENT  (capable — latency acceptable)             │
+│                                                             │
+│  • Larger LLM, full tool suite                             │
+│  • Eyes: screenshot + vision, system state, calendar       │
+│  • Arms: shell, file r/w, web search, browser, email       │
+│  • Memory: long-term, episodic                             │
+│  • Any future capability without touching voicebot          │
+└────────────────────────────────────────────────────────────┘
+```
+
+**Voicebot tools (voice-layer only — instant, no blocking):**
+
+| Tool | Latency | Why here |
+|------|---------|----------|
+| `current_time` | <1ms | Trivial; no subprocess |
+| `take_screenshot` + vision | ~500ms | Needs screen access before speaking |
+| `send_notification` | <100ms | Instant `osascript` |
+| `read_clipboard` / `set_clipboard` | <50ms | Instant `pbpaste`/`pbcopy` |
+| `open_app` | <100ms | Instant `open -a` |
+| `run_agent` / `run_agent_async` | varies | The delegation bridge |
+
+Everything else — shell, calendar, files, web, email, vision analysis — goes to the agent.
+
+**Agent integration via stdin/stdout:**
+
+The agent is invoked as a subprocess. This is intentionally simple: any CLI agent that reads from stdin and writes to stdout works without modification. Switching agents (Hermes today, something else tomorrow) requires changing one env var.
+
+```
+AGENT_COMMAND=hermes        # CLI command to invoke
+AGENT_ARGS=                 # Optional extra arguments
+AGENT_TIMEOUT_SECS=120      # Timeout for synchronous calls
+```
+
+Protocol:
+1. Voicebot spawns the agent process
+2. Writes the task (plain text) to its stdin, then closes stdin
+3. Reads the complete response from stdout
+4. Returns the response (sync) or pushes to `proactive_tx` (async)
+
+This is a fire-and-read pattern — no JSON protocol, no shared state, no persistent daemon. Each delegation is an isolated subprocess invocation.
+
+---
 
 ### Current pipeline
 
@@ -262,34 +328,35 @@ env = { BRAVE_API_KEY = "..." }
 
 ### 3. Agent Delegation ✅ Implemented
 
-**Goal:** The LLM can delegate complex tasks (deep research, code generation, long-running automation) to specialized agents. Results are routed back through the LLM, which summarizes them into a voice response.
+**Goal:** The LLM can delegate complex tasks (research, shell automation, file operations, calendar management, web browsing) to an external agent. The voicebot keeps its voice pipeline unblocked. Results return via the proactive channel and are spoken naturally.
 
 **Two delegation modes:**
 
-**Synchronous (`run_agent` — tasks < 10s):**
+**Synchronous (`run_agent` — tasks expected < 30s):**
 ```
-LLM emits <tool_call>run_agent: task description</tool_call>
+LLM calls run_agent(task)
          ↓
-    HTTP POST to agent (OpenAI-compatible)
-         ↓ blocks until response
+    spawn subprocess: AGENT_COMMAND
+    write task to stdin, close stdin
+         ↓ wait for process to exit
+    read stdout as result
     result injected as tool message
          ↓
     LLM re-called → streams spoken response → TTS
 ```
 
-**Asynchronous (`run_agent_async` — long tasks):**
+**Asynchronous (`run_agent_async` — long or uncertain duration):**
 ```
 User: "Research X and tell me the summary"
-LLM emits <tool_call>run_agent_async: task</tool_call>
+LLM calls run_agent_async(task)
          ↓
-    tokio::spawn background HTTP call
-    tool returns immediately: "[Tarea delegada al agente. El resultado llegará en breve.]"
+    tokio::spawn background subprocess
+    tool returns immediately → LLM acknowledges verbally (< 1s)
+         ↓ (seconds or minutes later, in background)
+    subprocess exits → read stdout
+    ProactiveEvent::AgentResult pushed to proactive_tx
          ↓
-    LLM speaks acknowledgment (< 1s)
-         ↓ (minutes later, in background)
-    agent completes → ProactiveEvent::AgentResult pushed to proactive_tx
-         ↓
-    VAD loop receives proactive event → spawns run_proactive_pipeline
+    VAD loop receives event → spawns run_proactive_pipeline
          ↓
     LLM builds natural announcement → TTS plays proactively
 ```
@@ -298,22 +365,26 @@ LLM emits <tool_call>run_agent_async: task</tool_call>
 
 - **`src/agents/mod.rs`** — `ProactiveEvent::AgentResult { task, result }` enum
 - **`src/tools/run_agent.rs`** — `RunAgentTool` (sync) and `RunAgentAsyncTool` (async + proactive channel)
-- **Tool call format:** `<tool_call>run_agent: task description</tool_call>` — args after the colon
-- **`ToolRegistry`** updated: `parse_tool_call` now returns `Option<(name, args)>`; `execute` is async
-- **VAD loop** extended with inner `tokio::select!` watching both audio and `proactive_rx`
+- **VAD loop** extended with `tokio::select!` watching both audio and `proactive_rx`
 - **`run_proactive_pipeline`** — builds temporary message list from session + agent result, calls LLM, sends to TTS
 
 **Config vars:**
 
 | Env var | Default | Description |
 |---------|---------|-------------|
-| `AGENT_URL` | — | Base URL of the remote agent (OpenAI-compatible). If unset, agent tools are disabled. |
-| `AGENT_MODEL` | `local-model` | Model name sent to the agent server |
-| `AGENT_MAX_TOKENS` | `2048` | Max tokens for agent responses |
+| `AGENT_COMMAND` | — | CLI command to invoke (e.g. `hermes`, `claude`, `python agent.py`). Unset = agent tools disabled. |
+| `AGENT_ARGS` | — | Optional arguments appended to the command |
+| `AGENT_TIMEOUT_SECS` | `120` | Hard timeout for synchronous agent calls |
 
-**Agent protocol:** any OpenAI-compatible HTTP endpoint (`/v1/chat/completions`). Works with llama.cpp, Ollama, OpenRouter, Anthropic (via proxy), or a custom OpenClaw/Claude Code agent.
+**Agent protocol:** stdin/stdout. The voicebot writes the task as plain text to the subprocess stdin, closes it, and reads the complete response from stdout. Any CLI agent that follows this contract works — Hermes, Claude CLI, a custom Python script, or anything else. Switching agents requires changing only `AGENT_COMMAND`.
 
-**Tests:** 12 tests in `src/tools/run_agent.rs` covering sync response, async channel delivery, error handling, and round-trip via registry (wiremock-based).
+**Why stdin/stdout and not HTTP:**
+- No persistent service to manage — the agent starts only when needed
+- No protocol negotiation — plain text in, plain text out
+- Trivially portable to any CLI agent as the ecosystem evolves
+- The async mode (`run_agent_async`) hides all latency: the user hears an immediate acknowledgment; the result arrives as proactive speech
+
+**Tests:** `src/tools/run_agent.rs` — sync response, async channel delivery, error handling, timeout, round-trip via registry.
 
 ---
 
@@ -529,30 +600,26 @@ This prompt is a starting point. It should be refined over time as Jarvis learns
 
 **The problem:** Butler is blind. It does not know what you are doing, what is on your screen, or what the system state is. Without this, it cannot anticipate anything.
 
-**What Butler needs to know at all times:**
-- What is visible on screen right now
-- What applications are open and which is in focus
-- Current time, calendar events, upcoming deadlines
-- System state: battery, CPU, running processes, notifications
-- Recent activity: files edited, terminal commands run, browser tabs
+**Architectural note:** In the voicebot/agent split, most of Pillar B belongs to the **external agent**. The agent has the time, the tools, and the context window to reason about screen state, calendar, and system activity. The voicebot's only eye is `take_screenshot` — used on-demand when the user asks something like "¿qué hace este código?" and the voicebot needs to see the screen before speaking.
 
-**Implementation:**
+**Division of responsibility:**
 
-```
-Screenshot tool → vision model (LLaVA local or Claude) → text description → injected into context
-macOS APIs (NSWorkspace, IOKit, EventKit) → system state → injected as [SYSTEM STATE] block
-FSEvents watcher → file activity → summarised and available on demand
-```
+| Capability | Owner | Reason |
+|-----------|-------|--------|
+| `take_screenshot` + vision | Voicebot | On-demand, before speaking; must be synchronous |
+| System state injection (time, battery, active app) | Voicebot | Injected ephemerally into each turn; already implemented |
+| Calendar, upcoming events | Agent | Async, AppleScript, acceptable latency |
+| File activity (FSEvents) | Agent | Background monitoring, not latency-sensitive |
+| Screen monitoring loop | Agent | Periodic background task, not in voice hot path |
 
-The context block injected before each response:
-```
-[SYSTEM STATE]
-time: 09:14 | battery: 67% | focus: Cursor (voicebot/src/main.rs)
-next_event: Reunión equipo in 46 min
-recent_files: main.rs (edited 3m ago), README.md (edited 8m ago)
-```
+**Voicebot implementation (done):**
+- `take_screenshot` tool: `screencapture -x -t png` → base64 → secondary vision provider (LM Studio)
+- System state injection: `INJECT_SYSTEM_DATA=true` prepends `[SYSTEM STATE] time | app | battery` to each turn ephemerally
 
-**Key tool to implement:** `take_screenshot()` → send to vision model → return description. This alone enables Butler to answer questions like "¿qué hace este código?" without the user having to paste anything.
+**Agent implementation (agent-side, not in voicebot):**
+- Calendar queries, reminders, upcoming deadlines
+- File activity watcher
+- Periodic screen summary for proactive awareness
 
 ---
 
@@ -560,25 +627,40 @@ recent_files: main.rs (edited 3m ago), README.md (edited 8m ago)
 
 **The problem:** Butler can only talk. Jarvis acts.
 
-**The `run_shell` tool is the master key.** With a single well-sandboxed shell tool, Butler can do nearly everything Jarvis does in the films. Everything else is ergonomic convenience on top.
+**Architectural note:** In the voicebot/agent split, Pillar C belongs almost entirely to the **external agent**. Shell execution, file editing, calendar creation, web search — these are slow, stateful, and potentially dangerous operations. They have no business being in the voice hot path.
 
-| Tool | What it enables |
-|------|----------------|
-| `run_shell(cmd)` | Execute anything — compile, search, move files, run scripts |
-| `read_file(path)` | Read any file without the user copy-pasting |
-| `write_file(path, content)` | Edit files directly |
-| `open_app(name)` | Launch applications by name |
-| `read_clipboard()` / `set_clipboard(text)` | Access what the user just copied |
-| `send_notification(title, msg)` | macOS notification centre |
-| `take_screenshot()` | See the screen on demand |
-| `calendar_events(days)` | Read upcoming events |
-| `send_email(to, subject, body)` | Send mail |
-| `web_search(query)` | Search and return results |
-| `browse(url)` | Fetch and read a web page |
+The voicebot keeps only the instant, side-effect-light operations that are natural parts of a voice interaction:
 
-**Safety:** `run_shell` should have a configurable allowlist/denylist of commands and a confirmation step for destructive operations. The LLM should be instructed to describe what it is about to do before doing it.
+**Voicebot tools (implemented, instant):**
 
-**macOS integration:** `osascript` (AppleScript) gives access to most native apps. `open -a AppName` opens applications. `pbpaste` / `pbcopy` handle the clipboard. Most Jarvis capabilities map directly to shell one-liners.
+| Tool | Latency | Use case |
+|------|---------|----------|
+| `open_app(name)` | <100ms | "Abre Spotify" |
+| `send_notification(title, msg)` | <100ms | Alert alongside voice response |
+| `read_clipboard()` | <50ms | "¿Qué tengo copiado?" |
+| `set_clipboard(text)` | <50ms | "Copia esto al portapapeles" |
+
+**Agent tools (delegated via `run_agent`):**
+
+| Tool | Why in the agent |
+|------|-----------------|
+| `run_shell(cmd)` | Arbitrary execution time; dangerous |
+| `read_file` / `write_file` | File size unknown; stateful |
+| `calendar_events` / `create_event` | AppleScript 1–3s |
+| `web_search` / `browse` | Network, seconds |
+| `send_email` | Async by nature |
+
+**Safety:** Shell access in the agent is the agent's responsibility to sandbox. The voicebot never executes shell commands directly.
+
+**The delegation pattern for arms:**
+```
+User: "Busca el error de compilación y arréglalo"
+Voicebot LLM: calls run_agent_async("find the compilation error and fix it")
+Voicebot speaks: "Lo delego, te aviso cuando esté listo"
+                                    ↓ (seconds later)
+Agent runs shell → fixes code → returns summary
+proactive_tx → voicebot speaks: "Hecho. Cuatro errores corregidos en main.rs"
+```
 
 ---
 
@@ -1011,40 +1093,51 @@ WAKE_WORD                 keyword to respond in ambient mode (default: "jarvis")
 | STT → LLM → TTS streaming pipeline | ✅ Done | Whisper + llama.cpp + macOS say |
 | Barge-in interruption | ✅ Done | `Arc<AtomicBool>` cancel, CPAL callback |
 | Persistent conversation history | ✅ Done | SQLite, restored on startup |
-| Tool use | ✅ Done | XML-based, extensible `Tool` trait, `current_time` |
+| Tool use (native function calling) | ✅ Done | OpenAI `tools:[]` format; multi-tool loop; voice-layer tools only |
 | Context summarization | ✅ Done | Auto-trigger at 75% context; persisted in DB |
 | User profile extraction + injection | ✅ Done | Background LLM; `user_profile` table |
 | Startup greeting | ✅ Done | Bot speaks first on launch; uses name if known |
 | Kokoro TTS | ✅ Done | ONNX, 24 kHz, `--features kokoro`, selectable via `TTS_PROVIDER` |
 | CoreML STT encoder | ✅ Done | Neural Engine inference; `WHISPER_COREML=1`; requires `.mlmodelc` |
 | Background GPU overlap | ✅ Done | `maybe_summarize` + `extract_facts` start while last TTS plays |
-| Shell tool (`run_shell`) | ✅ Done | `SHELL_ENABLED=1`; denylist safety; 30s timeout; output capped at 2 KB |
-| MCP integration | Planned | `src/mcp/`; JSON-RPC over stdio/HTTP |
-| Agent delegation | ✅ Done | `run_agent` (sync) + `run_agent_async` (proactive); OpenAI-compatible |
-| Voicebot as agent intermediary | Planned | Voice proxy over existing text agents |
-| Conversation awareness | Planned | Speaker ID (sherpa-onnx) + state machine + linguistic/LLM classifier |
+| System state injection | ✅ Done | `INJECT_SYSTEM_DATA=true`; time, active app, battery prepended ephemerally |
+| Screenshot + vision | ✅ Done | `take_screenshot` tool; secondary LM Studio provider; base64 PNG |
+| Inference daemon | ✅ Done | `DAEMON_ENABLED=true`; background proactive check every N min |
+| Voice-layer tools | ✅ Done | `send_notification`, `read_clipboard`, `set_clipboard`, `open_app`, `read_file` |
+| Agent delegation (stdin/stdout) | 🔶 Partial | Architecture defined; implementation uses HTTP; needs subprocess refactor |
+| Conversation awareness | Planned | Speaker ID (sherpa-onnx) + state machine + linguistic classifier |
+| Episodic memory (embeddings) | Planned | sqlite-vec + embedding model; semantic recall |
+| Always-on daemon (launchd) | Planned | plist + wake word detection |
 
 ### Butler pillars
 
 | Pillar | Status | Quick description |
 |--------|--------|-------------------|
 | A — Character system prompt | ✅ Done | `LLM_SYSTEM_PROMPT` env var + Jarvis prompt in `.env` |
-| B — Eyes (situational awareness) | Planned | Screenshot + vision model; system state injection |
-| C — Arms (computer agency) | 🔶 Partial | `run_shell` done (`SHELL_ENABLED=1`); file/app/clipboard/web tools planned |
-| D — Voice of its own (proactive) | 🔶 Partial | `proactive_tx` channel + startup greeting done; inference daemon + calendar/scheduler not yet |
+| B — Eyes (situational awareness) | 🔶 Partial | `take_screenshot` + vision done; system state injection done; calendar/FSEvents → agent-side |
+| C — Arms (computer agency) | 🔶 Partial | Voice-layer tools done (`notification`, `clipboard`, `open_app`); shell/files/web/calendar → agent-side |
+| D — Voice of its own (proactive) | 🔶 Partial | Startup greeting + inference daemon done; calendar reminders + scheduler → agent-side |
 | E — Episodic memory (embeddings) | Planned | sqlite-vec + embedding model; semantic recall |
 | F — Always-on daemon | Planned | launchd plist + wake word detection |
 
 ### Recommended implementation order
 
 1. **Pillar A** ✅ — Character prompt. Done.
-2. **Pillar C** — `run_shell` tool. **Highest leverage next step.** Unlocks real computer agency in one session: compile code, read files, run scripts — all from voice.
-3. **Pillar B** — `take_screenshot` + vision. Butler gets eyes; can answer "¿qué hace este código?" without copy-paste.
-4. **Pillar D** — Inference daemon + calendar. Startup greeting done; remaining piece is the background "is there anything worth saying?" loop.
-5. **MCP** — Vast tool ecosystem for free once the tool layer is mature.
-6. **Pillar E** — Episodic memory. Butler remembers events, not just facts.
-7. **Pillar F** — Always-on daemon. Butler becomes a permanent presence.
-8. **Agent delegation** ✅ — Complex tasks farmed to specialised agents (done).
+2. **Voice-layer tools** ✅ — Notification, clipboard, open_app, screenshot, vision. Done.
+3. **Inference daemon** ✅ — Proactive background loop. Done.
+4. **Agent delegation (stdin/stdout)** 🔶 — Refactor `run_agent`/`run_agent_async` from HTTP to subprocess. This is the bridge that moves eyes + arms + calendar to the agent side cleanly.
+5. **Conversation awareness** — Speaker ID + state machine. This is the next high-value voicebot-specific feature that has no parallel in agent work.
+6. **Pillar E** — Episodic memory. Embeddings + semantic recall. Makes conversations feel like they have history.
+7. **Pillar F** — Always-on daemon (launchd). Butler becomes a permanent presence.
+
+**What the agent side should implement** (not tracked here — agent's own roadmap):
+- Shell execution (`run_shell`)
+- File read/write
+- Calendar queries and event creation
+- Web search and browsing
+- Email
+- Periodic screen monitoring
+- Long-term memory
 
 ---
 

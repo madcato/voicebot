@@ -17,7 +17,7 @@ pub use clipboard::{ReadClipboardTool, SetClipboardTool};
 pub use current_time::CurrentTimeTool;
 pub use open_app::OpenAppTool;
 pub use read_file::ReadFileTool;
-pub use run_agent::{RunAgentAsyncTool, RunAgentTool};
+pub use run_agent::{format_history, RunAgentAsyncTool, RunAgentTool};
 pub use run_shell::RunShellTool;
 pub use send_notification::SendNotificationTool;
 pub use take_screenshot::TakeScreenshotTool;
