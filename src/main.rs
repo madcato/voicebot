@@ -30,7 +30,11 @@ use crate::db::Database;
 use crate::llm::{LlamaClient, LlmSession, StreamToken};
 use crate::profile::{build_profile_context, extract_facts, ProfileFact};
 use crate::stt::WhisperStt;
-use crate::tools::{format_history, CurrentTimeTool, RunAgentAsyncTool, ToolRegistry};
+use crate::tools::{
+    format_history, CalendarCreateTool, CalendarGetEventsTool, CurrentTimeTool,
+    OpenAppTool, ReadClipboardTool, ReadFileTool, RunAgentAsyncTool, RunShellTool,
+    SendNotificationTool, SetClipboardTool, TakeScreenshotTool, ToolRegistry,
+};
 use crate::tts::{SayTts, SentenceSplitter, TtsEngine};
 #[cfg(feature = "kokoro")]
 use crate::tts::KokoroTts;
@@ -68,15 +72,38 @@ async fn main() -> Result<()> {
     let (proactive_tx, proactive_rx) = mpsc::channel::<ProactiveEvent>(32);
 
     // ── Tools ─────────────────────────────────────────────────────────────────
-    // Voicebot tools are intentionally minimal: only instant, voice-layer operations.
-    // Everything else (calendar, files, shell, clipboard, vision) is delegated to
-    // the external agent via run_agent_async.
-    //
     // `shared_history` is updated after every user turn so the agent always
-    // receives full conversational context via `hermes chat -q "{history}"`.
+    // receives full conversational context via `hermes -q "{history}"`.
     let shared_history: Arc<RwLock<String>> = Arc::new(RwLock::new(String::new()));
     let mut tool_registry = ToolRegistry::new();
+
+    // Always available
     tool_registry.register(CurrentTimeTool);
+    tool_registry.register(CalendarGetEventsTool);
+    tool_registry.register(CalendarCreateTool);
+    tool_registry.register(ReadClipboardTool);
+    tool_registry.register(SetClipboardTool);
+    tool_registry.register(ReadFileTool);
+    tool_registry.register(OpenAppTool);
+    tool_registry.register(SendNotificationTool);
+
+    // Shell — enabled via SHELL_ENABLED=1
+    if config.shell_enabled {
+        info!("Shell tool enabled (timeout={}s)", config.shell_timeout_secs);
+        tool_registry.register(RunShellTool::new(config.shell_timeout_secs));
+    }
+
+    // Vision (screenshot) — enabled when VISION_URL is set
+    if let Some(ref vision_url) = config.vision_url {
+        info!("Vision tool enabled: {} (model={})", vision_url, config.vision_model);
+        tool_registry.register(TakeScreenshotTool::new(
+            vision_url,
+            &config.vision_model,
+            config.vision_max_tokens,
+        ));
+    }
+
+    // External agent delegation — enabled when AGENT_COMMAND is set
     if let Some(ref agent_command) = config.agent_command {
         info!("Agent delegation enabled: {}", agent_command);
         tool_registry.register(RunAgentAsyncTool::new(
@@ -85,6 +112,7 @@ async fn main() -> Result<()> {
             proactive_tx.clone(),
         ));
     }
+
     let tools = Arc::new(tool_registry);
 
     // ── Database ─────────────────────────────────────────────────────────────
