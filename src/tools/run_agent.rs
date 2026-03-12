@@ -204,7 +204,7 @@ impl Tool for RunAgentAsyncTool {
         tokio::spawn(async move {
             info!("RunAgentAsyncTool: task started: {:?}", task);
             let result = call_agent(command, query).await;
-            info!("RunAgentAsyncTool: task complete ({} chars)", result.len());
+            info!("RunAgentAsyncTool: task complete ({} chars): {:?}", result.len(), result);
             let _ = proactive_tx.send(ProactiveEvent::AgentResult { task, result }).await;
         });
 
