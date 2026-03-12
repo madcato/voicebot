@@ -212,12 +212,13 @@ async fn main() -> Result<()> {
     // ── Barge-in state ────────────────────────────────────────────────────────
     let cancel = Arc::new(AtomicBool::new(false));
     let mut pipeline_handle: Option<tokio::task::JoinHandle<()>> = None;
+    // Agent results that arrived while the voicebot was busy — processed in order when idle.
+    let mut pending_agent_results: std::collections::VecDeque<(String, String)> =
+        std::collections::VecDeque::new();
 
     info!("Ready. Speak to interact...");
 
     // ── Startup greeting ──────────────────────────────────────────────────────
-    // The voicebot greets the user once at startup. It uses the proactive
-    // pipeline so it doesn't modify the conversation history.
     {
         let now = chrono::Local::now();
         let time_str = now.format("%H:%M").to_string();
@@ -232,11 +233,12 @@ async fn main() -> Result<()> {
         let audio_out_c   = Arc::clone(&audio_output);
         let llm_session_c = Arc::clone(&llm_session);
         let llm_client_c  = llm_client.clone();
+        let db_c          = db.clone();
         let tools_c       = Arc::clone(&tools);
         tokio::spawn(async move {
-            run_proactive_pipeline(
+            run_text_pipeline(
                 notification, cancel_c, tts_c, audio_out_c,
-                llm_session_c, llm_client_c, tts_sample_rate, tools_c,
+                llm_session_c, llm_client_c, db_c, session_id, tts_sample_rate, tools_c,
             )
             .await;
         });
@@ -246,39 +248,59 @@ async fn main() -> Result<()> {
     tokio::select! {
         _ = async {
             loop {
+                // If the active pipeline finished naturally, release it so we look idle.
+                if pipeline_handle.as_ref().map(|h| h.is_finished()).unwrap_or(false) {
+                    pipeline_handle = None;
+                }
+
+                // If idle and there are pending agent results, process the next one.
+                if pipeline_handle.is_none() {
+                    if let Some((task, result)) = pending_agent_results.pop_front() {
+                        let notification = format!(
+                            "[Sistema: una tarea en segundo plano ha terminado.]\n\
+                             Tarea: {task}\n\
+                             Resultado: {result}\n\
+                             Informa al usuario de forma natural y concisa."
+                        );
+                        cancel.store(false, Ordering::SeqCst);
+                        let cancel_c      = Arc::clone(&cancel);
+                        let tts_c         = Arc::clone(&tts);
+                        let audio_out_c   = Arc::clone(&audio_output);
+                        let llm_session_c = Arc::clone(&llm_session);
+                        let llm_client_c  = llm_client.clone();
+                        let db_c          = db.clone();
+                        let tools_c       = Arc::clone(&tools);
+                        pipeline_handle = Some(tokio::spawn(async move {
+                            run_text_pipeline(
+                                notification, cancel_c, tts_c, audio_out_c,
+                                llm_session_c, llm_client_c, db_c, session_id,
+                                tts_sample_rate, tools_c,
+                            )
+                            .await;
+                        }));
+                    }
+                }
+
                 let chunk: AudioChunk = tokio::select! {
                     result = rx.recv() => match result {
                         Ok(c) => c,
                         Err(e) => { error!("Audio channel closed: {}", e); break; }
                     },
                     Some(event) = proactive_rx.recv() => {
-                        let notification = match event {
-                            ProactiveEvent::AgentResult { task, result } => format!(
-                                "[Sistema: una tarea en segundo plano ha terminado.]\n\
-                                 Tarea: {task}\n\
-                                 Resultado: {result}\n\
-                                 Informa al usuario de forma natural y concisa."
-                            ),
-                            ProactiveEvent::InferenceDaemon { message } => format!(
-                                "[Sistema: el demonio de inferencia ha detectado algo \
-                                 que merece la atención del usuario.]\n\
-                                 Observación: {message}\n\
-                                 Comunícalo de forma natural y concisa, con tu personalidad habitual."
-                            ),
-                        };
-                        let cancel_c      = Arc::clone(&cancel);
-                        let tts_c         = Arc::clone(&tts);
-                        let audio_out_c   = Arc::clone(&audio_output);
-                        let llm_session_c = Arc::clone(&llm_session);
-                        let llm_client_c  = llm_client.clone();
-                        let tools_c       = Arc::clone(&tools);
-                        tokio::spawn(async move {
-                            run_proactive_pipeline(
-                                notification, cancel_c, tts_c, audio_out_c,
-                                llm_session_c, llm_client_c, tts_sample_rate, tools_c,
-                            )
-                            .await;
-                        });
+                        match event {
+                            ProactiveEvent::AgentResult { task, result } => {
+                                if pipeline_handle.is_none() {
+                                    // Idle: put at front so it's picked up next iteration.
+                                    pending_agent_results.push_front((task, result));
+                                } else {
+                                    // Busy: queue for later.
+                                    pending_agent_results.push_back((task, result));
+                                }
+                            }
+                            ProactiveEvent::InferenceDaemon { .. } => {
+                                // Daemon events ignored in the queue-based pipeline.
+                            }
+                        }
                         continue;
                     },
                 };
@@ -792,19 +814,19 @@ async fn maybe_summarize(
     );
 }
 
-/// Speak a proactive notification without a preceding user utterance.
+/// Speak a notification, persisting it to session and DB.
 ///
-/// Builds a temporary message list (current session context + a synthetic
-/// notification message), calls the LLM to produce a natural-language
-/// announcement, and streams the result straight to TTS.
-/// The response is NOT committed to the session or database.
-async fn run_proactive_pipeline(
+/// Adds the notification as a user turn, calls the LLM, speaks the response,
+/// then commits the assistant turn. Used for agent results and startup greeting.
+async fn run_text_pipeline(
     notification: String,
     cancel: Arc<AtomicBool>,
     tts: Arc<TtsEngine>,
     audio_output: Arc<AudioOutput>,
     llm_session: Arc<Mutex<LlmSession>>,
     llm_client: LlamaClient,
+    db: Database,
+    session_id: uuid::Uuid,
     tts_sample_rate: u32,
     tools: Arc<ToolRegistry>,
 ) {
@@ -812,28 +834,38 @@ async fn run_proactive_pipeline(
         return;
     }
 
-    info!("Proactive pipeline: {}", &notification[..notification.len().min(80)]);
+    info!("Text pipeline: {}", &notification[..notification.len().min(80)]);
 
-    // Build a temporary message list that asks the LLM to respond.
+    // Add the notification as a user turn so the LLM has it in context.
+    {
+        let mut s = llm_session.lock().unwrap();
+        s.add_user_turn(&notification);
+    }
+    {
+        let db_c = db.clone();
+        let notif_c = notification.clone();
+        tokio::spawn(async move {
+            if let Err(e) = db_c.save_message(session_id, "User", &notif_c).await {
+                warn!("Failed to save text-pipeline user message: {}", e);
+            }
+        });
+    }
+
     let messages_api: Vec<serde_json::Value> = {
         let s = llm_session.lock().unwrap();
-        let mut msgs = s.all_messages_api();
-        msgs.push(serde_json::json!({
-            "role": "user",
-            "content": notification,
-        }));
-        msgs
+        s.all_messages_api()
     };
 
     let tool_defs = tools.tool_definitions();
     let mut messages = messages_api;
     let mut last_play: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
+    let mut llm_text_final = String::new();
 
     'tool_loop: for iter in 0..MAX_TOOL_ITERATIONS {
         let token_rx = match llm_client.stream(&messages, &tool_defs).await {
             Ok(r) => r,
             Err(e) => {
-                error!("Proactive LLM error: {}", e);
+                error!("Text pipeline LLM error: {}", e);
                 return;
             }
         };
@@ -849,7 +881,7 @@ async fn run_proactive_pipeline(
         match tool_call {
             Some((name, args)) => {
                 let result = tools.execute(&name, &args).await;
-                info!("Proactive tool[{}] `{}` → {}", iter, name, result);
+                info!("Text pipeline tool[{}] `{}` → {}", iter, name, result);
 
                 let tool_call_id = format!("call_{}_{}", name, iter);
                 messages.push(serde_json::json!({
@@ -871,19 +903,32 @@ async fn run_proactive_pipeline(
             }
             None => {
                 if !llm_text.is_empty() {
-                    info!("Proactive: {}", llm_text);
+                    info!("Text pipeline: {}", llm_text);
                 }
+                llm_text_final = llm_text;
                 last_play = play;
                 break 'tool_loop;
             }
         }
     }
 
+    // Persist assistant response to session and DB.
+    if !llm_text_final.is_empty() {
+        llm_session.lock().unwrap().add_assistant_turn(&llm_text_final);
+        let db_c = db.clone();
+        let text_c = llm_text_final.clone();
+        tokio::spawn(async move {
+            if let Err(e) = db_c.save_message(session_id, "Assistant", &text_c).await {
+                warn!("Failed to save text-pipeline assistant message: {}", e);
+            }
+        });
+    }
+
     if let Some(h) = last_play {
         match h.await {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => error!("Proactive playback error: {}", e),
-            Err(e)     => error!("Proactive playback task panicked: {}", e),
+            Ok(Err(e)) => error!("Text pipeline playback error: {}", e),
+            Err(e)     => error!("Text pipeline playback task panicked: {}", e),
         }
     }
 }
