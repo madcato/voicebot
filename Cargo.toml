@@ -65,8 +65,13 @@ regex = "1"
 # Models: kokoro-v1.0.onnx + voices-v1.0.bin (download from HuggingFace)
 kokorox = { version = "0.1", optional = true }
 
+# Speaker verification (optional, enable with: cargo build --features speaker)
+# Requires: models/speaker_embedding.onnx (sherpa-onnx speaker-id model)
+sherpa-rs = { version = "0.6.8", optional = true }
+
 [features]
 kokoro = ["dep:kokorox"]
+speaker = ["dep:sherpa-rs"]
 
 [dev-dependencies]
 # Mock HTTP server for LLM client integration tests

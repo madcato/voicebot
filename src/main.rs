@@ -24,6 +24,7 @@ use crate::agents::ProactiveEvent;
 use crate::audio::audio_capture::{AudioCapture, AudioChunk};
 use crate::audio::buffer::AudioBuffer;
 use crate::audio::output::AudioOutput;
+use crate::audio::speaker::{SpeakerVerdict, SpeakerVerifier};
 use crate::audio::vad::{VadResult, VoiceActivityDetector};
 use crate::config::Config;
 use crate::db::Database;
@@ -184,6 +185,34 @@ async fn main() -> Result<()> {
     })
     .await??;
     let stt = Arc::new(stt);
+
+    // ── Speaker verifier ──────────────────────────────────────────────────────
+    let mut speaker_verifier: Option<SpeakerVerifier> =
+        if let Some(ref model_path) = config.speaker_model {
+            match SpeakerVerifier::new(
+                model_path,
+                std::path::Path::new(&config.speaker_enrollment_path),
+                config.speaker_similarity_min,
+            ) {
+                Ok(sv) => {
+                    info!(
+                        "Speaker verification enabled (threshold={})",
+                        config.speaker_similarity_min
+                    );
+                    Some(sv)
+                }
+                Err(e) => {
+                    warn!("Speaker verification disabled — model load failed: {e}");
+                    None
+                }
+            }
+        } else {
+            info!(
+                "Speaker verification disabled \
+                 (place model at models/speaker_embedding.onnx to enable)"
+            );
+            None
+        };
 
     // ── TTS ───────────────────────────────────────────────────────────────────
     let tts: TtsEngine = match config.tts_provider.as_str() {
@@ -373,6 +402,25 @@ async fn main() -> Result<()> {
                         }
 
                         info!("Speech: {}ms — starting pipeline", duration_ms);
+
+                        // ── Speaker verification ──────────────────────────────
+                        if let Some(ref mut sv) = speaker_verifier {
+                            match sv.verify(config.sample_rate, &audio) {
+                                SpeakerVerdict::Enrolled => {
+                                    info!("Main speaker enrolled — processing utterance");
+                                }
+                                SpeakerVerdict::IsMainSpeaker { similarity } => {
+                                    debug!("Speaker verified (similarity={similarity:.3})");
+                                }
+                                SpeakerVerdict::OtherSpeaker { similarity } => {
+                                    info!(
+                                        "Unknown speaker (similarity={similarity:.3}) — discarding"
+                                    );
+                                    vad.reset();
+                                    continue;
+                                }
+                            }
+                        }
 
                         if let Some(h) = pipeline_handle.take() {
                             cancel.store(true, Ordering::SeqCst);
