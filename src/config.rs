@@ -91,6 +91,15 @@ pub struct Config {
     /// Hard timeout per shell command in seconds (SHELL_TIMEOUT_SECS).
     pub shell_timeout_secs: u64,
 
+    // ── Speaker verification ──────────────────────────────────────────────────
+    /// Path to sherpa-onnx speaker embedding ONNX model (SPEAKER_MODEL).
+    /// None = auto-detect from models/speaker_embedding.onnx; disabled if absent.
+    pub speaker_model: Option<String>,
+    /// Path where the enrolled speaker embedding is persisted (SPEAKER_ENROLLMENT_PATH).
+    pub speaker_enrollment_path: String,
+    /// Cosine similarity threshold [0..1] (SPEAKER_SIMILARITY_MIN, default 0.45).
+    pub speaker_similarity_min: f32,
+
     // ── Persistence ───────────────────────────────────────────────────────────
     pub db_path: String,
 }
@@ -216,6 +225,27 @@ impl Config {
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .context("Invalid SHELL_TIMEOUT_SECS")?,
+
+            // Speaker verification
+            speaker_model: {
+                let default = "models/speaker_embedding.onnx";
+                match env::var("SPEAKER_MODEL") {
+                    Ok(v) => Some(v),
+                    Err(_) => {
+                        if std::path::Path::new(default).exists() {
+                            Some(default.into())
+                        } else {
+                            None
+                        }
+                    }
+                }
+            },
+            speaker_enrollment_path: env::var("SPEAKER_ENROLLMENT_PATH")
+                .unwrap_or_else(|_| "data/speaker.emb".to_string()),
+            speaker_similarity_min: env::var("SPEAKER_SIMILARITY_MIN")
+                .unwrap_or_else(|_| "0.45".to_string())
+                .parse()
+                .context("Invalid SPEAKER_SIMILARITY_MIN")?,
 
             // DB
             db_path: env::var("DB_PATH")

@@ -855,6 +855,16 @@ Both must be solved for the voicebot to work reliably in a real home or office e
 
 Speaker *diarization* labels every speaker in a long recording. Speaker *verification* answers a simpler question: "Is this clip the enrolled user?" Verification is realtime-friendly — it runs on a 1–3 second clip in under 50ms.
 
+**To activate:**
+```sh
+mkdir -p models
+curl -L "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recog-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx" -o models/speaker_embedding.onnx
+
+cargo run --features speaker
+```
+
+To re-enroll: `rm data/speaker.emb`. Adjust threshold via `SPEAKER_SIMILARITY_MIN` (default `0.45`, stricter at `0.55`).
+
 **How it works:**
 1. **Enrollment:** Record 5–10 seconds of the user's voice at first startup → extract a speaker embedding vector → store it
 2. **Runtime:** After each VAD segment, extract an embedding → compute cosine similarity with the enrolled vector → if similarity < threshold (e.g. 0.70), discard the audio without transcribing it
