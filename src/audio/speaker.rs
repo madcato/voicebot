@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 #[cfg(feature = "speaker")]
-use sherpa_rs::speaker_id::{SpeakerIdExtractor, SpeakerIdExtractorConfig};
+use sherpa_rs::speaker_id::{EmbeddingExtractor, ExtractorConfig};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SpeakerVerdict {
@@ -14,7 +14,7 @@ pub enum SpeakerVerdict {
 
 pub struct SpeakerVerifier {
     #[cfg(feature = "speaker")]
-    extractor: SpeakerIdExtractor,
+    extractor: EmbeddingExtractor,
     enrollment: Option<Vec<f32>>,
     enrollment_path: PathBuf,
     threshold: f32,
@@ -24,14 +24,14 @@ impl SpeakerVerifier {
     pub fn new(model_path: &str, enrollment_path: &Path, threshold: f32) -> Result<Self> {
         #[cfg(feature = "speaker")]
         {
-            let config = SpeakerIdExtractorConfig {
+            let config = ExtractorConfig {
                 model: model_path.to_string(),
                 debug: false,
-                num_threads: 1,
-                provider: "cpu".to_string(),
+                num_threads: Some(1),
+                provider: None, // uses get_default_provider() internally
             };
-            let extractor = SpeakerIdExtractor::new(config)
-                .context("Failed to load speaker embedding model")?;
+            let extractor = EmbeddingExtractor::new(config)
+                .map_err(|e| anyhow::anyhow!("Failed to load speaker embedding model: {e}"))?;
             let enrollment = Self::load_embedding(enrollment_path);
             if enrollment.is_some() {
                 info!(target: "speaker", "Speaker enrollment loaded from {:?}", enrollment_path);
@@ -60,14 +60,16 @@ impl SpeakerVerifier {
     pub fn verify(&mut self, sample_rate: u32, samples: &[f32]) -> SpeakerVerdict {
         #[cfg(feature = "speaker")]
         {
-            let embedding =
-                match self.extractor.compute_speaker_embedding(sample_rate as i32, samples) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        warn!(target: "speaker", "Speaker embedding error: {e} — passing through");
-                        return SpeakerVerdict::IsMainSpeaker { similarity: 1.0 };
-                    }
-                };
+            let embedding = match self
+                .extractor
+                .compute_speaker_embedding(samples.to_vec(), sample_rate)
+            {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(target: "speaker", "Speaker embedding error: {e} — passing through");
+                    return SpeakerVerdict::IsMainSpeaker { similarity: 1.0 };
+                }
+            };
             match &self.enrollment {
                 None => {
                     if let Err(e) = Self::save_embedding(&self.enrollment_path, &embedding) {
