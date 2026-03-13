@@ -63,7 +63,7 @@ pub async fn extract_facts(
     let raw = match client.complete_short(&messages).await {
         Ok(r) => r,
         Err(e) => {
-            warn!("Profile extraction LLM call failed: {}", e);
+            warn!(target: "profile", "Profile extraction LLM call failed: {}", e);
             return vec![];
         }
     };
@@ -102,7 +102,7 @@ fn parse_facts(raw: &str) -> Vec<ProfileFact> {
             })
             .collect(),
         Err(e) => {
-            debug!("Could not parse profile extraction JSON: {} — raw: {:?}", e, raw);
+            debug!(target: "profile", "Could not parse profile extraction JSON: {} — raw: {:?}", e, raw);
             vec![]
         }
     }

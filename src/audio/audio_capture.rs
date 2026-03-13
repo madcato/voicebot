@@ -37,13 +37,14 @@ impl AudioCapture {
         };
 
         let actual_device_name = device.description()?;
-        info!("Using input device: {}", actual_device_name);
+        info!(target: "audio", "Using input device: {}", actual_device_name);
 
         let supported_config = device
             .default_input_config()
             .context("Failed to get default input config")?;
 
         info!(
+            target: "audio",
             "Default input config: {:?} Hz, {:?} channels, format: {:?}",
             supported_config.sample_rate(),
             supported_config.channels(),
@@ -71,7 +72,7 @@ impl AudioCapture {
         for device in devices {
             if let Ok(device_name) = device.description() {
                 if device_name.name().to_lowercase().contains(&name_lower) {
-                    info!("Found matching device: {}", device_name);
+                    info!(target: "audio", "Found matching device: {}", device_name);
                     return Ok(device);
                 }
             }
@@ -162,7 +163,7 @@ impl AudioCapture {
         let channels = self.config.channels;
         let sample_rate = self.config.sample_rate;
 
-        let err_fn = |err| error!("Audio stream error: {}", err);
+        let err_fn = |err| error!(target: "audio", "Audio stream error: {}", err);
 
         // Buffer to accumulate samples
         let buffer = Arc::new(std::sync::Mutex::new(Vec::with_capacity(
@@ -239,7 +240,7 @@ impl AudioCapture {
         };
 
         stream.play().context("Failed to start audio stream")?;
-        info!("Audio capture started");
+        info!(target: "audio", "Audio capture started");
 
         Ok(stream)
     }
@@ -269,9 +270,9 @@ impl AudioCapture {
 
             // Non-blocking send - drop chunk if channel is full
             if let Err(e) = tx.try_send(chunk) {
-                warn!("Failed to send audio chunk: {}", e);
+                warn!(target: "audio", "Failed to send audio chunk: {}", e);
             } else {
-                trace!("Sent audio chunk with {} samples", total_samples_needed);
+                trace!(target: "audio", "Sent audio chunk with {} samples", total_samples_needed);
             }
         }
     }

@@ -36,7 +36,7 @@ impl VoiceActivityDetector {
 
         // Each Silero frame is VAD_FRAME_SIZE samples at 16kHz = 32ms.
         let silence_frames_needed = ((silence_ms as f32 / 32.0).round() as u32).max(1);
-        tracing::debug!("VAD silence threshold: {}ms ({} frames)", silence_ms, silence_frames_needed);
+        tracing::debug!(target: "audio", "VAD silence threshold: {}ms ({} frames)", silence_ms, silence_frames_needed);
 
         Ok(Self {
             detector,
@@ -65,7 +65,7 @@ impl VoiceActivityDetector {
             let frame: Vec<f32> = self.frame_buffer.drain(..VAD_FRAME_SIZE).collect();
             let prob = self.detector.predict(frame);
 
-            trace!("VAD prob: {:.3}", prob);
+            trace!(target: "audio", "VAD prob: {:.3}", prob);
 
             if prob >= SPEECH_THRESHOLD {
                 self.speech_counter += 1;

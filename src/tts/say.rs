@@ -26,7 +26,7 @@ impl SayTts {
             .status()
             .context("'say' command not found — this TTS backend requires macOS")?;
 
-        tracing::info!("SayTts ready: voice={:?} (22050Hz)", voice);
+        tracing::info!(target: "tts", "SayTts ready: voice={:?} (22050Hz)", voice);
 
         Ok(Self {
             voice: voice.to_string(),
@@ -94,7 +94,7 @@ fn wav_to_f32(bytes: &[u8]) -> Result<Vec<f32>> {
         anyhow::bail!("WAV file too short ({} bytes)", bytes.len());
     }
     let sample_rate = u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]);
-    tracing::debug!("WAV sample_rate from header: {}", sample_rate);
+    tracing::debug!(target: "tts", "WAV sample_rate from header: {}", sample_rate);
 
     // Find "data" chunk to locate raw PCM
     let data_pos = bytes

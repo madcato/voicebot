@@ -15,6 +15,7 @@ use async_channel::bounded;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -56,7 +57,7 @@ async fn main() -> Result<()> {
 
     dotenvy::dotenv().ok();
 
-    info!("Starting voicebot...");
+    info!(target: "voicebot", "Starting voicebot...");
     let config = Config::from_env()?;
 
     // ── Device listing shortcut ───────────────────────────────────────────────
@@ -67,7 +68,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    info!("Language: {}", config.language);
+    info!(target: "voicebot", "Language: {}", config.language);
 
     // ── Proactive event channel ───────────────────────────────────────────────
     let (proactive_tx, proactive_rx) = mpsc::channel::<ProactiveEvent>(32);
@@ -90,13 +91,13 @@ async fn main() -> Result<()> {
 
     // Shell — enabled via SHELL_ENABLED=1
     if config.shell_enabled {
-        info!("Shell tool enabled (timeout={}s)", config.shell_timeout_secs);
+        info!(target: "voicebot", "Shell tool enabled (timeout={}s)", config.shell_timeout_secs);
         tool_registry.register(RunShellTool::new(config.shell_timeout_secs));
     }
 
     // Vision (screenshot) — enabled when VISION_URL is set
     if let Some(ref vision_url) = config.vision_url {
-        info!("Vision tool enabled: {} (model={})", vision_url, config.vision_model);
+        info!(target: "voicebot", "Vision tool enabled: {} (model={})", vision_url, config.vision_model);
         tool_registry.register(TakeScreenshotTool::new(
             vision_url,
             &config.vision_model,
@@ -106,7 +107,7 @@ async fn main() -> Result<()> {
 
     // External agent delegation — enabled when AGENT_COMMAND is set
     if let Some(ref agent_command) = config.agent_command {
-        info!("Agent delegation enabled: {}", agent_command);
+        info!(target: "voicebot", "Agent delegation enabled: {}", agent_command);
         tool_registry.register(RunAgentAsyncTool::new(
             agent_command,
             shared_history.clone(),
@@ -121,6 +122,7 @@ async fn main() -> Result<()> {
     let session_id = db.get_or_create_session().await?;
     let (summary, history) = db.get_session_context(session_id).await?;
     info!(
+        target: "db",
         "Loaded {} messages from history (summary: {})",
         history.len(),
         if summary.is_some() { "yes" } else { "no" }
@@ -134,7 +136,7 @@ async fn main() -> Result<()> {
         .map(|(key, value, confidence)| ProfileFact { key, value, confidence })
         .collect();
     if !profile_facts.is_empty() {
-        info!("Loaded {} user profile facts", profile_facts.len());
+        info!(target: "profile", "Loaded {} user profile facts", profile_facts.len());
     }
 
     // ── LLM session ───────────────────────────────────────────────────────────
@@ -160,11 +162,12 @@ async fn main() -> Result<()> {
         config.llm_temperature,
         config.llm_slot_id,
     );
-    info!("LLM endpoint: {}", config.llm_url);
+    info!(target: "llm", "LLM endpoint: {}", config.llm_url);
 
     // ── Inference daemon ──────────────────────────────────────────────────────
     if config.daemon_enabled {
         info!(
+            target: "daemon",
             "Inference daemon enabled (interval={}s)",
             config.daemon_interval_secs
         );
@@ -196,18 +199,20 @@ async fn main() -> Result<()> {
             ) {
                 Ok(sv) => {
                     info!(
+                        target: "speaker",
                         "Speaker verification enabled (threshold={})",
                         config.speaker_similarity_min
                     );
                     Some(sv)
                 }
                 Err(e) => {
-                    warn!("Speaker verification disabled — model load failed: {e}");
+                    warn!(target: "speaker", "Speaker verification disabled — model load failed: {e}");
                     None
                 }
             }
         } else {
             info!(
+                target: "speaker",
                 "Speaker verification disabled \
                  (place model at models/speaker_embedding.onnx to enable)"
             );
@@ -218,7 +223,7 @@ async fn main() -> Result<()> {
     let tts: TtsEngine = match config.tts_provider.as_str() {
         #[cfg(feature = "kokoro")]
         "kokoro" => {
-            info!("TTS provider: Kokoro (voice={}, lang={})", config.kokoro_voice, config.kokoro_language);
+            info!(target: "tts", "TTS provider: Kokoro (voice={}, lang={})", config.kokoro_voice, config.kokoro_language);
             let k = KokoroTts::new(
                 &config.kokoro_model,
                 &config.kokoro_voices,
@@ -235,7 +240,7 @@ async fn main() -> Result<()> {
             );
         }
         _ => {
-            info!("TTS provider: say (voice={})", config.say_voice);
+            info!(target: "tts", "TTS provider: say (voice={})", config.say_voice);
             let say_voice = config.say_voice.clone();
             let s = tokio::task::spawn_blocking(move || SayTts::new(&say_voice)).await??;
             TtsEngine::Say(s)
@@ -247,6 +252,7 @@ async fn main() -> Result<()> {
     // ── Audio output ──────────────────────────────────────────────────────────
     let audio_output = Arc::new(AudioOutput::new(config.audio_output_device.as_deref())?);
     info!(
+        target: "audio",
         "Audio output: {}Hz, {}ch",
         audio_output.sample_rate(),
         audio_output.channels()
@@ -255,14 +261,14 @@ async fn main() -> Result<()> {
     // ── Audio capture ─────────────────────────────────────────────────────────
     let audio_capture = AudioCapture::new(config.audio_input_device.as_deref())?;
     let source_sample_rate = audio_capture.sample_rate();
-    info!("Audio input: {}Hz", source_sample_rate);
+    info!(target: "audio", "Audio input: {}Hz", source_sample_rate);
 
     let samples_per_chunk = config.samples_per_chunk();
     let (tx, rx) = bounded(AUDIO_CHANNEL_CAPACITY);
     let _stream = audio_capture.start_capture(tx, samples_per_chunk)?;
 
     let mut vad = VoiceActivityDetector::new(source_sample_rate, config.vad_silence_ms)?;
-    info!("VAD silence threshold: {}ms", config.vad_silence_ms);
+    info!(target: "audio", "VAD silence threshold: {}ms", config.vad_silence_ms);
     let mut speech_buffer = AudioBuffer::new(source_sample_rate, MAX_SPEECH_BUFFER_SECS);
     let mut pre_roll: VecDeque<Vec<f32>> = VecDeque::with_capacity(PRE_ROLL_CHUNKS + 1);
 
@@ -273,7 +279,7 @@ async fn main() -> Result<()> {
     let mut pending_agent_results: std::collections::VecDeque<(String, String)> =
         std::collections::VecDeque::new();
 
-    info!("Ready. Speak to interact...");
+    info!(target: "voicebot", "Ready. Speak to interact...");
 
     // ── Startup greeting ──────────────────────────────────────────────────────
     {
@@ -341,7 +347,7 @@ async fn main() -> Result<()> {
                 let chunk: AudioChunk = tokio::select! {
                     result = rx.recv() => match result {
                         Ok(c) => c,
-                        Err(e) => { error!("Audio channel closed: {}", e); break; }
+                        Err(e) => { error!(target: "audio", "Audio channel closed: {}", e); break; }
                     },
                     Some(event) = proactive_rx.recv() => {
                         match event {
@@ -376,7 +382,7 @@ async fn main() -> Result<()> {
                     VadResult::SpeechStart => {
                         // ── Barge-in ─────────────────────────────────────────
                         if let Some(h) = pipeline_handle.take() {
-                            info!("Barge-in detected — cancelling active pipeline");
+                            info!(target: "pipeline", "Barge-in detected — cancelling active pipeline");
                             cancel.store(true, Ordering::SeqCst);
                             h.abort();
                         }
@@ -397,23 +403,24 @@ async fn main() -> Result<()> {
                         pre_roll.clear();
 
                         if duration_ms < MIN_SPEECH_DURATION_MS {
-                            debug!("Too short ({}ms), skipping", duration_ms);
+                            debug!(target: "pipeline", "Too short ({}ms), skipping", duration_ms);
                             continue;
                         }
 
-                        info!("Speech: {}ms — starting pipeline", duration_ms);
+                        info!(target: "pipeline", "Speech: {}ms — starting pipeline", duration_ms);
 
                         // ── Speaker verification ──────────────────────────────
                         if let Some(ref mut sv) = speaker_verifier {
                             match sv.verify(config.sample_rate, &audio) {
                                 SpeakerVerdict::Enrolled => {
-                                    info!("Main speaker enrolled — processing utterance");
+                                    info!(target: "speaker", "Main speaker enrolled — processing utterance");
                                 }
                                 SpeakerVerdict::IsMainSpeaker { similarity } => {
-                                    debug!("Speaker verified (similarity={similarity:.3})");
+                                    debug!(target: "speaker", "Speaker verified (similarity={similarity:.3})");
                                 }
                                 SpeakerVerdict::OtherSpeaker { similarity } => {
                                     info!(
+                                        target: "speaker",
                                         "Unknown speaker (similarity={similarity:.3}) — discarding"
                                     );
                                     vad.reset();
@@ -473,7 +480,7 @@ async fn main() -> Result<()> {
             }
         } => {}
         _ = tokio::signal::ctrl_c() => {
-            info!("Shutting down...");
+            info!(target: "voicebot", "Shutting down...");
             cancel.store(true, Ordering::SeqCst);
             if let Some(h) = pipeline_handle.take() {
                 h.abort();
@@ -517,12 +524,15 @@ async fn stream_and_tts(
             if let Some(h) = $h.take() {
                 match h.await {
                     Ok(Ok(())) => {}
-                    Ok(Err(e)) => error!("Playback error: {}", e),
-                    Err(e) => error!("Playback task panicked: {}", e),
+                    Ok(Err(e)) => error!(target: "audio", "Playback error: {}", e),
+                    Err(e) => error!(target: "audio", "Playback task panicked: {}", e),
                 }
             }
         };
     }
+
+    let t_llm = Instant::now();
+    let mut first_token_logged = false;
 
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -544,6 +554,11 @@ async fn stream_and_tts(
             _ => String::new(),
         };
 
+        if !first_token_logged && !token.is_empty() {
+            debug!(target: "performance", "LLM PP: {}ms", t_llm.elapsed().as_millis());
+            first_token_logged = true;
+        }
+
         full_response.push_str(&token);
 
         let sentences_to_play: Vec<String> = if is_done {
@@ -563,13 +578,15 @@ async fn stream_and_tts(
                 return (full_response, None, None);
             }
 
-            info!("TTS: {:?}", sentence);
+            info!(target: "tts", "TTS: {:?}", sentence);
 
             // ── Start synthesis immediately (runs while previous sentence plays) ──
             let tts_c = Arc::clone(tts);
             let sentence_c = sentence.clone();
-            let synth_handle =
-                tokio::task::spawn_blocking(move || tts_c.synthesize(&sentence_c));
+            let t_synth = Instant::now();
+            let synth_handle = tokio::task::spawn_blocking(move || {
+                tts_c.synthesize(&sentence_c).map(|s| (s, t_synth.elapsed()))
+            });
 
             // ── Wait for the previous sentence to finish playing ──────────────────
             await_play!(play_handle);
@@ -580,11 +597,12 @@ async fn stream_and_tts(
             }
 
             // ── Collect synthesis result (usually already done) ───────────────────
-            let samples = match synth_handle.await {
-                Ok(Ok(s)) => s,
-                Ok(Err(e)) => { error!("TTS error: {}", e); continue; }
-                Err(e) => { error!("TTS task panicked: {}", e); continue; }
+            let (samples, synth_elapsed) = match synth_handle.await {
+                Ok(Ok((s, t))) => (s, t),
+                Ok(Err(e)) => { error!(target: "tts", "TTS error: {}", e); continue; }
+                Err(e) => { error!(target: "tts", "TTS task panicked: {}", e); continue; }
             };
+            debug!(target: "performance", "TTS IN: {}ms", synth_elapsed.as_millis());
 
             if cancel.load(Ordering::SeqCst) {
                 return (full_response, None, None);
@@ -602,6 +620,8 @@ async fn stream_and_tts(
             break;
         }
     }
+
+    debug!(target: "performance", "LLM TG: {}ms", t_llm.elapsed().as_millis());
 
     // Return the last playback handle to the caller so it can overlap
     // GPU/DB work (summarization, profile extraction) with tail audio.
@@ -632,27 +652,29 @@ async fn run_pipeline(
     macro_rules! check_cancel {
         () => {
             if cancel.load(Ordering::SeqCst) {
-                debug!("Pipeline cancelled");
+                debug!(target: "pipeline", "Pipeline cancelled");
                 return;
             }
         };
     }
 
     // ── STT ───────────────────────────────────────────────────────────────────
+    let t_stt = Instant::now();
     let transcript = match tokio::task::spawn_blocking(move || stt.transcribe(&audio)).await {
         Ok(Ok(t)) => t,
-        Ok(Err(e)) => { error!("STT error: {}", e); return; }
-        Err(e)     => { error!("STT task panicked: {}", e); return; }
+        Ok(Err(e)) => { error!(target: "stt", "STT error: {}", e); return; }
+        Err(e)     => { error!(target: "stt", "STT task panicked: {}", e); return; }
     };
+    info!(target: "performance", "STT: {}ms", t_stt.elapsed().as_millis());
 
     check_cancel!();
 
     if transcript.is_empty() {
-        debug!("Empty transcript, skipping");
+        debug!(target: "stt", "Empty transcript, skipping");
         return;
     }
 
-    info!("User: {}", transcript);
+    info!(target: "pipeline", "User: {}", transcript);
 
     let messages_snapshot = llm_session.lock().unwrap().messages.clone();
 
@@ -673,7 +695,7 @@ async fn run_pipeline(
         let transcript_c = transcript.clone();
         tokio::spawn(async move {
             if let Err(e) = db_c.save_message(session_id, "User", &transcript_c).await {
-                warn!("Failed to save user message: {}", e);
+                warn!(target: "db", "Failed to save user message: {}", e);
             }
         });
     }
@@ -704,7 +726,7 @@ async fn run_pipeline(
                     );
                 }
             }
-            debug!("System state injected: {}", state);
+            debug!(target: "pipeline", "System state injected: {}", state);
         }
 
         // Tool call loop — allows the model to call multiple tools sequentially
@@ -712,7 +734,7 @@ async fn run_pipeline(
         'tool_loop: for iter in 0..MAX_TOOL_ITERATIONS {
             let token_rx = match llm_client.stream(&messages, &tool_defs).await {
                 Ok(r)  => r,
-                Err(e) => { error!("LLM stream error: {}", e); break 'pipeline; }
+                Err(e) => { error!(target: "llm", "LLM stream error: {}", e); break 'pipeline; }
             };
 
             let (llm_text, tool_call, play) =
@@ -727,7 +749,7 @@ async fn run_pipeline(
                 Some((name, args)) => {
                     // play is None here — tool-call path already awaited it.
                     let result = tools.execute(&name, &args).await;
-                    info!("Tool[{}] `{}` → {}", iter, name, result);
+                    info!(target: "pipeline", "Tool[{}] `{}` → {}", iter, name, result);
 
                     let tool_call_id = format!("call_{}_{}", name, iter);
                     messages.push(serde_json::json!({
@@ -761,12 +783,12 @@ async fn run_pipeline(
             break 'pipeline;
         }
 
-        info!("Assistant: {}", final_response);
+        info!(target: "pipeline", "Assistant: {}", final_response);
 
         // ── Commit to DB and session while last TTS sentence plays ────────────
         // save_message is a fast SQLite write; it runs concurrently with last_play.
         if let Err(e) = db.save_message(session_id, "Assistant", &final_response).await {
-            warn!("Failed to save assistant message: {}", e);
+            warn!(target: "db", "Failed to save assistant message: {}", e);
         }
         llm_session.lock().unwrap().add_assistant_turn(&final_response);
         committed = true;
@@ -790,9 +812,9 @@ async fn run_pipeline(
                 let facts = extract_facts(&llm_client_c, &transcript_c, &response_c).await;
                 for fact in facts {
                     if let Err(e) = db_c.upsert_profile_fact(&fact.key, &fact.value, fact.confidence).await {
-                        warn!("Failed to save profile fact '{}': {}", fact.key, e);
+                        warn!(target: "profile", "Failed to save profile fact '{}': {}", fact.key, e);
                     } else {
-                        debug!("Profile: {} = {} ({:.0}%)", fact.key, fact.value, fact.confidence * 100.0);
+                        debug!(target: "profile", "Profile: {} = {} ({:.0}%)", fact.key, fact.value, fact.confidence * 100.0);
                     }
                 }
             });
@@ -802,8 +824,8 @@ async fn run_pipeline(
         if let Some(h) = last_play {
             match h.await {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => error!("Playback error: {}", e),
-                Err(e)     => error!("Playback task panicked: {}", e),
+                Ok(Err(e)) => error!(target: "audio", "Playback error: {}", e),
+                Err(e)     => error!(target: "audio", "Playback task panicked: {}", e),
             }
         }
     }
@@ -811,7 +833,7 @@ async fn run_pipeline(
     // ── Roll back session if cancelled before commit ───────────────────────────
     if !committed && cancel.load(Ordering::SeqCst) {
         llm_session.lock().unwrap().messages = messages_snapshot;
-        info!("Pipeline cancelled — session rolled back");
+        info!(target: "pipeline", "Pipeline cancelled — session rolled back");
     }
 }
 
@@ -844,21 +866,21 @@ async fn maybe_summarize(
         return;
     };
 
-    info!("Context limit approaching — summarizing {} old turns...", turns_to_summarize);
+    info!(target: "llm", "Context limit approaching — summarizing {} old turns...", turns_to_summarize);
 
     let summary = match llm_client.complete(&prompt).await {
         Ok(s) if !s.is_empty() => s,
         Ok(_) => {
-            warn!("Summarization returned empty result, skipping");
+            warn!(target: "llm", "Summarization returned empty result, skipping");
             return;
         }
         Err(e) => {
-            warn!("Summarization failed: {}", e);
+            warn!(target: "llm", "Summarization failed: {}", e);
             return;
         }
     };
 
-    info!("Summary: {}", summary);
+    info!(target: "llm", "Summary: {}", summary);
 
     // Find the DB message id of the last turn that is being summarized.
     // Each turn in `turns` corresponds to one row in messages (alternating User/Assistant),
@@ -869,22 +891,23 @@ async fn maybe_summarize(
     {
         Ok(Some(id)) => id,
         Ok(None) => {
-            warn!("Could not find message offset for summary cutpoint, skipping");
+            warn!(target: "llm", "Could not find message offset for summary cutpoint, skipping");
             return;
         }
         Err(e) => {
-            warn!("DB error finding summary cutpoint: {}", e);
+            warn!(target: "llm", "DB error finding summary cutpoint: {}", e);
             return;
         }
     };
 
     if let Err(e) = db.save_summary(session_id, &summary, through_id).await {
-        warn!("Failed to persist summary: {}", e);
+        warn!(target: "db", "Failed to persist summary: {}", e);
     }
 
     llm_session.lock().unwrap().apply_summary(&summary, keep_turns);
 
     info!(
+        target: "llm",
         "Summarization complete — prompt compacted (keeping {} recent turns)",
         keep_turns
     );
@@ -910,7 +933,7 @@ async fn run_text_pipeline(
         return;
     }
 
-    info!("Text pipeline: {}", &notification[..notification.len().min(80)]);
+    info!(target: "pipeline", "Text pipeline: {}", &notification[..notification.len().min(80)]);
 
     // Add the notification as a user turn so the LLM has it in context.
     {
@@ -922,7 +945,7 @@ async fn run_text_pipeline(
         let notif_c = notification.clone();
         tokio::spawn(async move {
             if let Err(e) = db_c.save_message(session_id, "User", &notif_c).await {
-                warn!("Failed to save text-pipeline user message: {}", e);
+                warn!(target: "db", "Failed to save text-pipeline user message: {}", e);
             }
         });
     }
@@ -941,7 +964,7 @@ async fn run_text_pipeline(
         let token_rx = match llm_client.stream(&messages, &tool_defs).await {
             Ok(r) => r,
             Err(e) => {
-                error!("Text pipeline LLM error: {}", e);
+                error!(target: "llm", "Text pipeline LLM error: {}", e);
                 return;
             }
         };
@@ -957,7 +980,7 @@ async fn run_text_pipeline(
         match tool_call {
             Some((name, args)) => {
                 let result = tools.execute(&name, &args).await;
-                info!("Text pipeline tool[{}] `{}` → {}", iter, name, result);
+                info!(target: "pipeline", "Text pipeline tool[{}] `{}` → {}", iter, name, result);
 
                 let tool_call_id = format!("call_{}_{}", name, iter);
                 messages.push(serde_json::json!({
@@ -979,7 +1002,7 @@ async fn run_text_pipeline(
             }
             None => {
                 if !llm_text.is_empty() {
-                    info!("Text pipeline: {}", llm_text);
+                    info!(target: "pipeline", "Text pipeline: {}", llm_text);
                 }
                 llm_text_final = llm_text;
                 last_play = play;
@@ -995,7 +1018,7 @@ async fn run_text_pipeline(
         let text_c = llm_text_final.clone();
         tokio::spawn(async move {
             if let Err(e) = db_c.save_message(session_id, "Assistant", &text_c).await {
-                warn!("Failed to save text-pipeline assistant message: {}", e);
+                warn!(target: "db", "Failed to save text-pipeline assistant message: {}", e);
             }
         });
     }
@@ -1003,8 +1026,8 @@ async fn run_text_pipeline(
     if let Some(h) = last_play {
         match h.await {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => error!("Text pipeline playback error: {}", e),
-            Err(e)     => error!("Text pipeline playback task panicked: {}", e),
+            Ok(Err(e)) => error!(target: "audio", "Text pipeline playback error: {}", e),
+            Err(e)     => error!(target: "audio", "Text pipeline playback task panicked: {}", e),
         }
     }
 }

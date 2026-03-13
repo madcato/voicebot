@@ -180,7 +180,7 @@ impl LlamaClient {
                 let bytes = match chunk {
                     Ok(b) => b,
                     Err(e) => {
-                        tracing::error!("LLM stream error: {}", e);
+                        tracing::error!(target: "llm", "LLM stream error: {}", e);
                         break;
                     }
                 };

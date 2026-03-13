@@ -222,6 +222,60 @@ This is a fire-and-read pattern — no JSON protocol, no shared state, no persis
 | `AUDIO_OUTPUT_DEVICE` | system default | Output device name substring |
 | `DB_PATH` | `data/voicebot.db` | SQLite database file path |
 | `LIST_AUDIO_DEVICES` | `0` | Print devices and exit |
+| `SPEAKER_MODEL` | auto-detect | Path to speaker embedding ONNX model. Auto-detected from `models/speaker_embedding.onnx` if it exists. |
+| `SPEAKER_ENROLLMENT_PATH` | `data/speaker.emb` | Path where the enrolled speaker embedding is persisted. Delete to re-enroll. |
+| `SPEAKER_SIMILARITY_MIN` | `0.45` | Cosine similarity threshold [0–1]. Higher = stricter. 0.45 permissive, 0.55 strict. |
+
+---
+
+## Logging and debugging
+
+Every subsystem has its own `RUST_LOG` target. Use them to see only the logs you care about without the noise from unrelated parts of the pipeline.
+
+### Targets
+
+| Target | What it covers |
+|--------|----------------|
+| `voicebot` | Startup, language, feature flags, ready, shutdown |
+| `audio` | Microphone/speaker device selection, CPAL events, VAD probabilities, playback errors |
+| `speaker` | Speaker verification enabled/disabled, enrollment, per-utterance similarity verdict |
+| `stt` | Whisper model load, transcription errors, empty-transcript skips |
+| `llm` | LLM endpoint, stream errors, summarization lifecycle |
+| `tts` | TTS provider init, per-sentence synthesis, WAV header |
+| `pipeline` | Barge-in, SpeechEnd, User/Assistant turns, tool calls, cancel/rollback |
+| `db` | Session restore/create, message save errors, summary persistence |
+| `daemon` | Inference daemon ticks and proactive messages |
+| `profile` | User fact extraction, load count, save errors |
+| `performance` | Per-turn timing: `STT Xms`, `LLM PP Xms`, `LLM TG Xms`, `TTS IN Xms` |
+
+`LLM PP` = prefill latency (time to first token). `LLM TG` = total generation time. `TTS IN` = synthesis time per sentence (measured inside the blocking task, excludes playback wait).
+
+### Examples
+
+```sh
+# Only conversation turns — what the user said and what the bot replied
+RUST_LOG=pipeline=info cargo run
+
+# Pipeline + latency breakdown
+RUST_LOG=pipeline=info,performance=debug cargo run
+
+# Debug the audio stack (device selection, VAD, playback)
+RUST_LOG=audio=debug cargo run
+
+# Debug speaker verification only
+RUST_LOG=speaker=debug cargo run --features speaker
+
+# Focus on STT + LLM, silence everything else
+RUST_LOG=stt=info,llm=info cargo run
+
+# Full trace on one subsystem while keeping others quiet
+RUST_LOG=audio=trace,voicebot=info cargo run
+
+# Everything at debug level (noisy but complete)
+RUST_LOG=debug cargo run
+```
+
+The default (`RUST_LOG` unset) shows `info` level across all targets.
 
 ---
 

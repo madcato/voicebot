@@ -25,6 +25,7 @@ impl WhisperStt {
         let state = ctx.create_state().context("Failed to create Whisper state")?;
 
         tracing::info!(
+            target: "stt",
             "Whisper model loaded: {} (language: {}) — Metal state cached",
             model_path,
             language

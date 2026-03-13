@@ -34,9 +34,9 @@ impl SpeakerVerifier {
                 .context("Failed to load speaker embedding model")?;
             let enrollment = Self::load_embedding(enrollment_path);
             if enrollment.is_some() {
-                info!("Speaker enrollment loaded from {:?}", enrollment_path);
+                info!(target: "speaker", "Speaker enrollment loaded from {:?}", enrollment_path);
             } else {
-                info!("No enrollment found — will auto-enroll first speaker");
+                info!(target: "speaker", "No enrollment found — will auto-enroll first speaker");
             }
             Ok(Self {
                 extractor,
@@ -64,16 +64,16 @@ impl SpeakerVerifier {
                 match self.extractor.compute_speaker_embedding(sample_rate as i32, samples) {
                     Ok(e) => e,
                     Err(e) => {
-                        warn!("Speaker embedding error: {e} — passing through");
+                        warn!(target: "speaker", "Speaker embedding error: {e} — passing through");
                         return SpeakerVerdict::IsMainSpeaker { similarity: 1.0 };
                     }
                 };
             match &self.enrollment {
                 None => {
                     if let Err(e) = Self::save_embedding(&self.enrollment_path, &embedding) {
-                        warn!("Failed to save enrollment: {e}");
+                        warn!(target: "speaker", "Failed to save enrollment: {e}");
                     } else {
-                        info!("Speaker enrolled → {:?}", self.enrollment_path);
+                        info!(target: "speaker", "Speaker enrolled → {:?}", self.enrollment_path);
                     }
                     self.enrollment = Some(embedding);
                     SpeakerVerdict::Enrolled

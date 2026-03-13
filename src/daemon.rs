@@ -33,6 +33,7 @@ impl InferenceDaemon {
 
     async fn run(self) {
         info!(
+            target: "daemon",
             "Inference daemon started (interval={}s)",
             self.interval_secs
         );
@@ -43,12 +44,12 @@ impl InferenceDaemon {
             // Don't bother if the proactive channel is already full — the user
             // is probably busy processing a previous event.
             if self.proactive_tx.capacity() == 0 {
-                debug!("Inference daemon: proactive channel full, skipping tick");
+                debug!(target: "daemon", "Inference daemon: proactive channel full, skipping tick");
                 continue;
             }
 
             let state = system_state::build().await;
-            debug!("Inference daemon tick: {}", state);
+            debug!(target: "daemon", "Inference daemon tick: {}", state);
 
             let system_prompt = {
                 let s = self.llm_session.lock().unwrap();
@@ -70,19 +71,19 @@ impl InferenceDaemon {
                 Ok(response) => {
                     let trimmed = response.trim();
                     if trimmed.is_empty() || trimmed.to_uppercase().starts_with(NOTHING) {
-                        debug!("Inference daemon: nothing to say");
+                        debug!(target: "daemon", "Inference daemon: nothing to say");
                     } else {
-                        info!("Inference daemon: proactive message → {:?}", trimmed);
+                        info!(target: "daemon", "Inference daemon: proactive message → {:?}", trimmed);
                         let event = ProactiveEvent::InferenceDaemon {
                             message: trimmed.to_string(),
                         };
                         if let Err(e) = self.proactive_tx.try_send(event) {
-                            warn!("Inference daemon: failed to send proactive event: {}", e);
+                            warn!(target: "daemon", "Inference daemon: failed to send proactive event: {}", e);
                         }
                     }
                 }
                 Err(e) => {
-                    warn!("Inference daemon LLM call failed: {}", e);
+                    warn!(target: "daemon", "Inference daemon LLM call failed: {}", e);
                 }
             }
         }

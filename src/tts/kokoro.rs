@@ -37,6 +37,7 @@ impl KokoroTts {
     ) -> Result<Self> {
         let inner = TTSKoko::new(Some(model_path), Some(voices_path)).await;
         tracing::info!(
+            target: "tts",
             "Kokoro TTS loaded: model={} voice={} lang={}",
             model_path, voice, language
         );

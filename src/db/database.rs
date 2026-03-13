@@ -102,13 +102,13 @@ impl Database {
         if let Some(row) = row {
             let id: String = row.try_get("id")?;
             let uuid = Uuid::parse_str(&id)?;
-            tracing::info!("Restored session {}", uuid);
+            tracing::info!(target: "db", "Restored session {}", uuid);
             return Ok(uuid);
         }
 
         let id = Uuid::new_v4();
         self.create_session(id).await?;
-        tracing::info!("Created new session {}", id);
+        tracing::info!(target: "db", "Created new session {}", id);
         Ok(id)
     }
 

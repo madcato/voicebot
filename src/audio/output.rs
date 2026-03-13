@@ -25,7 +25,7 @@ impl AudioOutput {
                 .context("No output device available")?
         };
 
-        info!("Output device: {}", device.name().unwrap_or_default());
+        info!(target: "audio", "Output device: {}", device.name().unwrap_or_default());
 
         let supported = device
             .default_output_config()
@@ -35,6 +35,7 @@ impl AudioOutput {
         let channels = supported.channels().min(2);
 
         info!(
+            target: "audio",
             "Output config: {}Hz, {}ch",
             supported.sample_rate(),
             channels
@@ -102,6 +103,7 @@ impl AudioOutput {
         }
 
         debug!(
+            target: "audio",
             "play_blocking: {} samples in, source={}Hz → device={}Hz {}ch, prepared={}",
             samples.len(), source_rate, self.sample_rate(), self.channels(), prepared.len()
         );
