@@ -663,14 +663,37 @@ async fn run_pipeline(
         };
     }
 
+    // ── Speculative KV-cache warm-up — runs in parallel with STT ──────────────
+    // Fire a 1-token streaming request with the current session messages so
+    // llama.cpp starts computing KV vectors while Whisper transcribes audio.
+    // Aborted as soon as STT is done; the partial cache is kept by the server.
+    let spec_msgs = llm_session.lock().unwrap().all_messages_api();
+    let spec_client = llm_client.clone();
+    let spec_handle = tokio::spawn(async move {
+        if let Err(e) = spec_client.prefill_warm(spec_msgs).await {
+            debug!(target: "llm", "Speculative prefill ended: {e}");
+        }
+    });
+
+    // ── system_state::build() — also in parallel with STT ─────────────────────
+    let state_handle = if inject_system_data {
+        Some(tokio::spawn(system_state::build()))
+    } else {
+        None
+    };
+
     // ── STT ───────────────────────────────────────────────────────────────────
     let t_stt = Instant::now();
     let transcript = match tokio::task::spawn_blocking(move || stt.transcribe(&audio)).await {
         Ok(Ok(t)) => t,
-        Ok(Err(e)) => { error!(target: "stt", "STT error: {}", e); return; }
-        Err(e)     => { error!(target: "stt", "STT task panicked: {}", e); return; }
+        Ok(Err(e)) => { error!(target: "stt", "STT error: {}", e); spec_handle.abort(); return; }
+        Err(e)     => { error!(target: "stt", "STT task panicked: {}", e); spec_handle.abort(); return; }
     };
     info!(target: "performance", "STT: {}ms", t_stt.elapsed().as_millis());
+
+    // Abort speculative prefill — the real request is about to be sent.
+    spec_handle.abort();
+    let _ = spec_handle.await;
 
     check_cancel!();
 
@@ -721,8 +744,8 @@ async fn run_pipeline(
         // Build the initial message list. Inject ambient system state as a
         // prefix to the current user message (ephemeral — not stored in session).
         let mut messages = session_snapshot.all_messages_api();
-        if inject_system_data {
-            let state = system_state::build().await;
+        if let Some(h) = state_handle {
+            let state = h.await.unwrap_or_default();
             if let Some(last_msg) = messages.last_mut() {
                 if last_msg["role"] == "user" {
                     let original = last_msg["content"].as_str().unwrap_or("").to_string();

@@ -280,6 +280,66 @@ The default (`RUST_LOG` unset) shows `info` level across all targets.
 
 ---
 
+## Latency tuning
+
+Target: **< 1 second** from end of user speech to first bot audio.
+
+### Speculative KV-cache warm-up
+
+When the user stops speaking the pipeline launches two tasks in parallel:
+
+1. **Whisper STT** — transcribes the utterance (`spawn_blocking`)
+2. **Speculative prefill** — fires a 1-token streaming request to llama.cpp with the
+   *current* session history (no new user turn yet), using `cache_prompt=true` and the
+   main `slot_id`
+
+llama.cpp starts computing KV vectors for the full conversation history immediately.
+When STT finishes (~200–400 ms), the speculative task is aborted and the real request
+is sent with the user turn appended.  llama.cpp matches the cached prefix and only
+prefills the new user turn (typically < 20 tokens) instead of the full history.
+
+If `INJECT_SYSTEM_DATA=true`, `system_state::build()` (active app, battery, time) also
+runs in parallel with STT so it adds zero sequential latency.
+
+### llama.cpp server flags (`scripts/start-llm.sh`)
+
+| Flag | Value | Effect |
+|------|-------|--------|
+| `--parallel 2` | 2 | Slot 0 = main conversation; Slot 1 = background calls (summarization, profile). Never evict each other's KV cache. |
+| `--cache-type-k/v` | `q4_0` | Halves KV cache VRAM vs `q8_0`, faster prefill; negligible quality impact for conversational use. |
+| `--flash-attn on` | — | Flash Attention — faster inference on Apple Silicon. |
+| `-ngl 99` | — | Offload all layers to Metal GPU. |
+| `--mlock` | — | Lock model weights in RAM, prevents swap latency. |
+| `--reasoning-budget 0` | 0 | Disables chain-of-thought for Qwen3 — avoids silent latency before the first spoken token. |
+
+Run the server:
+```sh
+./scripts/start-llm.sh
+# or
+LLM_MODEL=/path/to/model.gguf ./scripts/start-llm.sh
+```
+
+### Background calls
+
+Background LLM calls (conversation summarization, profile fact extraction) use
+`LLM_BACKGROUND_SLOT_ID` (default `-1` = any free slot).  With `--parallel 2`, set
+`LLM_BACKGROUND_SLOT_ID=1` to guarantee they always land on Slot 1 and never touch
+the main conversation's KV cache in Slot 0.
+
+### Whisper model size tradeoff
+
+| Model | STT latency | Accuracy |
+|-------|------------|----------|
+| `ggml-tiny.bin` | ~80 ms | Low |
+| `ggml-base.bin` | ~150 ms | Good |
+| `ggml-small.bin` | ~250 ms | Very good |
+| `ggml-large-v3-turbo.bin` | ~400 ms | Best |
+
+Smaller model = faster STT = more speculative prefill overlap = lower total latency.
+With CoreML encoder (`WHISPER_COREML=1`) each tier is ~30–50% faster.
+
+---
+
 ## Commands
 
 ```bash
