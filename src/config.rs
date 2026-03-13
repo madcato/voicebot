@@ -132,7 +132,7 @@ impl Config {
 
             // VAD
             vad_silence_ms: env::var("VAD_SILENCE_MS")
-                .unwrap_or_else(|_| "800".to_string())
+                .unwrap_or_else(|_| "500".to_string())
                 .parse()
                 .context("Invalid VAD_SILENCE_MS")?,
 

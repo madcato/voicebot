@@ -401,6 +401,7 @@ async fn main() -> Result<()> {
                         speech_buffer.push(&mono);
                     }
                     VadResult::SpeechEnd => {
+                        let t_speech_end = Instant::now();
                         speech_buffer.push(&mono);
                         let audio = speech_buffer.get_samples();
                         let duration_ms = speech_buffer.duration_ms();
@@ -413,6 +414,7 @@ async fn main() -> Result<()> {
                         }
 
                         info!(target: "pipeline", "Speech: {}ms — starting pipeline", duration_ms);
+                        info!(target: "performance", "SpeechEnd fired (speech {}ms)", duration_ms);
 
                         // ── Speaker verification ──────────────────────────────
                         if let Some(ref mut sv) = speaker_verifier {
@@ -471,6 +473,7 @@ async fn main() -> Result<()> {
                                 context_tokens,
                                 keep_turns,
                                 inject_system_data,
+                                t_speech_end,
                             )
                             .await;
                         }));
@@ -516,6 +519,7 @@ async fn stream_and_tts(
     audio_output: &Arc<AudioOutput>,
     tts_sample_rate: u32,
     t_llm_start: Instant,
+    t_speech_end: Instant,
 ) -> (String, Option<(String, String)>, Option<tokio::task::JoinHandle<anyhow::Result<()>>>) {
     let mut sentence_buf = SentenceSplitter::new();
     let mut full_response = String::new();
@@ -614,6 +618,11 @@ async fn stream_and_tts(
             }
 
             // ── Start playback without awaiting — next sentence can synthesise now ─
+            // Log end-to-end latency from SpeechEnd on the very first sentence only.
+            if play_handle.is_none() {
+                info!(target: "performance", "E2E (SpeechEnd→first audio): {}ms",
+                    t_speech_end.elapsed().as_millis());
+            }
             let out_c = Arc::clone(audio_output);
             let cancel_c = Arc::clone(cancel);
             play_handle = Some(tokio::task::spawn_blocking(move || {
@@ -653,6 +662,7 @@ async fn run_pipeline(
     context_tokens: usize,
     summary_keep_turns: usize,
     inject_system_data: bool,
+    t_speech_end: Instant,
 ) {
     macro_rules! check_cancel {
         () => {
@@ -663,13 +673,15 @@ async fn run_pipeline(
         };
     }
 
+    debug!(target: "performance", "Pipeline spawn lag: {}ms", t_speech_end.elapsed().as_millis());
+
     // ── Speculative KV-cache warm-up — runs in parallel with STT ──────────────
     // Fire a 1-token streaming request with the current session messages so
     // llama.cpp starts computing KV vectors while Whisper transcribes audio.
     // Aborted as soon as STT is done; the partial cache is kept by the server.
     let spec_msgs = llm_session.lock().unwrap().all_messages_api();
     let spec_client = llm_client.clone();
-    let spec_handle = tokio::spawn(async move {
+    let mut spec_handle = tokio::spawn(async move {
         if let Err(e) = spec_client.prefill_warm(spec_msgs).await {
             debug!(target: "llm", "Speculative prefill ended: {e}");
         }
@@ -691,9 +703,19 @@ async fn run_pipeline(
     };
     info!(target: "performance", "STT: {}ms", t_stt.elapsed().as_millis());
 
-    // Abort speculative prefill — the real request is about to be sent.
-    spec_handle.abort();
-    let _ = spec_handle.await;
+    // Wait briefly for speculative prefill to finish cleanly (max_tokens=1 means
+    // it completes in ~200ms for typical histories). A clean finish lets llama.cpp
+    // release the slot without cleanup delay; abort only if still running after window.
+    tokio::select! {
+        _ = &mut spec_handle => {
+            debug!(target: "llm", "Speculative prefill completed cleanly");
+        }
+        _ = tokio::time::sleep(std::time::Duration::from_millis(80)) => {
+            debug!(target: "llm", "Speculative prefill still running after STT — aborting");
+            spec_handle.abort();
+            let _ = spec_handle.await;
+        }
+    }
 
     check_cancel!();
 
@@ -767,7 +789,7 @@ async fn run_pipeline(
             };
 
             let (llm_text, tool_call, play) =
-                stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, t_llm_start).await;
+                stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, t_llm_start, t_speech_end).await;
 
             if cancel.load(Ordering::SeqCst) {
                 if let Some(h) = play { h.abort(); }
@@ -1000,7 +1022,7 @@ async fn run_text_pipeline(
         };
 
         let (llm_text, tool_call, play) =
-            stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, t_llm_start).await;
+            stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, t_llm_start, t_llm_start).await;
 
         if cancel.load(Ordering::SeqCst) {
             if let Some(h) = play { h.abort(); }

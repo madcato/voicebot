@@ -196,7 +196,7 @@ This is a fire-and-read pattern — no JSON protocol, no shared state, no persis
 | Env var | Default | Description |
 |---------|---------|-------------|
 | `VOICEBOT_LANGUAGE` | `es` | Language for STT and TTS voice selection |
-| `VAD_SILENCE_MS` | `800` | Silence duration (ms) before SpeechEnd fires. Lower = faster response; higher = safer for mid-sentence pauses. Range: 500–1500 |
+| `VAD_SILENCE_MS` | `500` | Silence duration (ms) before SpeechEnd fires. Lower = faster response; higher = safer for mid-sentence pauses. Range: 400–1500. This is the largest single contributor to perceived latency after your last word. |
 | `WHISPER_MODEL` | — | Path to `.bin` Whisper model (and `.mlmodelc` for CoreML encoder) |
 | `WHISPER_COREML` | `0` | Set to `1` to use CoreML encoder (Neural Engine); requires `.mlmodelc` alongside the `.bin` |
 | `LLM_URL` | `http://localhost:8080` | llama.cpp server base URL (`llama-server --port 8080`) |
@@ -284,6 +284,31 @@ The default (`RUST_LOG` unset) shows `info` level across all targets.
 
 Target: **< 1 second** from end of user speech to first bot audio.
 
+### Full latency breakdown
+
+```
+User last word
+  └─ VAD silence wait: VAD_SILENCE_MS (default 500ms)  ← biggest single lever
+       └─ SpeechEnd fires
+            └─ Pipeline spawn lag: ~1ms
+            └─ Speculative prefill: running since SpeechEnd
+            └─ STT: ~150–550ms (model-dependent)
+            └─ LLM PP: ~50–450ms (prefill + first token)
+            └─ TTS IN: ~70–560ms (synthesis of first sentence)
+            └─ FIRST AUDIO ← logged as "E2E (SpeechEnd→first audio): Xms"
+```
+
+Watch the `performance` target to see all stages:
+```sh
+RUST_LOG=performance=info,performance=debug cargo run
+```
+
+### VAD silence threshold
+
+`VAD_SILENCE_MS=500` (default) means the bot waits 500ms of silence after your last
+word before starting the pipeline.  Reduce to `400` for snappier feel; increase to
+`700–800` if the bot cuts you off during natural pauses.
+
 ### Speculative KV-cache warm-up
 
 When the user stops speaking the pipeline launches two tasks in parallel:
@@ -294,9 +319,12 @@ When the user stops speaking the pipeline launches two tasks in parallel:
    main `slot_id`
 
 llama.cpp starts computing KV vectors for the full conversation history immediately.
-When STT finishes (~200–400 ms), the speculative task is aborted and the real request
-is sent with the user turn appended.  llama.cpp matches the cached prefix and only
-prefills the new user turn (typically < 20 tokens) instead of the full history.
+When STT finishes, the pipeline waits up to 80 ms for the speculative request to
+finish cleanly (`max_tokens=1` so it usually completes in ~200 ms for typical histories).
+A clean finish means the slot is released without cleanup delay.  If still running after
+the 80 ms window it is aborted.  Either way, the real request (with the user turn
+appended) finds the KV cache pre-warmed for the full history and only prefills the new
+user turn (typically < 30 tokens) instead of the full context.
 
 If `INJECT_SYSTEM_DATA=true`, `system_state::build()` (active app, battery, time) also
 runs in parallel with STT so it adds zero sequential latency.
