@@ -11,8 +11,8 @@
 #
 # Key llama.cpp options for voicebot:
 #   --parallel 1        Single user — one KV-cache slot, no batching overhead
-#   --cache-type-k q8_0 KV-cache quantisation: saves VRAM, minimal quality loss
-#   --cache-type-v q8_0
+#   --cache-type-k q4_0 KV-cache quantisation: q4_0 halves VRAM vs q8_0, faster
+#   --cache-type-v q4_0   prefill — minimal quality loss for conversational use
 #   --flash-attn on     Flash Attention — faster inference on Apple Silicon
 #   -ngl 99             Offload all layers to Metal GPU
 #   --mlock             Lock model weights in RAM to avoid swap latency
@@ -78,13 +78,12 @@ exec llama-server \
     --ctx-size "$LLM_CTX" \
     --threads "$LLM_THREADS" \
     --n-gpu-layers 99 \
-    --cache-type-k q8_0 \
-    --cache-type-v q8_0 \
+    --cache-type-k q4_0 \
+    --cache-type-v q4_0 \
     --flash-attn on \
     --mlock \
     --parallel 2 \
     --repeat-penalty 1.1 \
     --temp 0.6 \
-    --n-predict 80 \
     --reasoning-budget 0 \
     --verbose

@@ -330,6 +330,42 @@ impl LlamaClient {
         Ok(json["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string())
     }
 
+    /// Fire a speculative KV-cache warm-up request without waiting for tokens.
+    ///
+    /// Sends the current session messages (without the new user turn) so
+    /// llama.cpp starts computing KV vectors while Whisper STT runs in parallel.
+    /// The caller aborts the spawned task as soon as the transcript is ready.
+    pub async fn prefill_warm(&self, messages: Vec<serde_json::Value>) -> Result<()> {
+        let payload = serde_json::json!({
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": 1,
+            "temperature": self.temperature,
+            "stream": true,
+            "cache_prompt": true,
+            "slot_id": self.slot_id,
+        });
+
+        let response = self
+            .client
+            .post(&self.chat_url)
+            .json(&payload)
+            .send()
+            .await
+            .context("Speculative prefill: failed to reach LLM server")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            anyhow::bail!("Speculative prefill error {}", status);
+        }
+
+        // Stream the body to keep the connection alive while the server prefills.
+        // tokio cancels this future when the JoinHandle is aborted by the caller.
+        let mut stream = response.bytes_stream();
+        while stream.next().await.is_some() {}
+        Ok(())
+    }
+
     /// Check if the server is reachable.
     pub async fn health_check(&self, base_url: &str) -> bool {
         let url = format!("{}/health", base_url.trim_end_matches('/'));
