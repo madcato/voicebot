@@ -32,6 +32,10 @@ pub struct Config {
     pub llm_model: String,
     /// KV-cache slot ID (0 for single-user, llama.cpp only)
     pub llm_slot_id: u8,
+    /// Slot used for background calls (summarization, profile extraction).
+    /// -1 = let llama.cpp pick any free slot (default).
+    /// Set to 1 when running llama-server with --parallel 2.
+    pub llm_background_slot_id: i32,
     /// Max tokens per response
     pub llm_max_tokens: u32,
     pub llm_system_prompt: String,
@@ -148,6 +152,10 @@ impl Config {
                 .unwrap_or_else(|_| "0".to_string())
                 .parse()
                 .context("Invalid LLM_SLOT_ID")?,
+            llm_background_slot_id: env::var("LLM_BACKGROUND_SLOT_ID")
+                .unwrap_or_else(|_| "-1".to_string())
+                .parse()
+                .context("Invalid LLM_BACKGROUND_SLOT_ID")?,
             llm_max_tokens: env::var("LLM_MAX_TOKENS")
                 .unwrap_or_else(|_| "400".to_string())
                 .parse()

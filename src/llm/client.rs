@@ -112,10 +112,21 @@ pub struct LlamaClient {
     /// llama.cpp KV-cache slot (0 for single-user). Sent with `cache_prompt=true`
     /// on streaming calls so the server reuses the cached prompt across turns.
     slot_id: u8,
+    /// Slot used for background (non-streaming) calls so they don't evict the
+    /// main conversation's KV cache. -1 = let llama.cpp pick any free slot.
+    /// Set to 1 when llama-server runs with --parallel 2.
+    background_slot_id: i32,
 }
 
 impl LlamaClient {
-    pub fn new(base_url: &str, model: &str, max_tokens: u32, temperature: f32, slot_id: u8) -> Self {
+    pub fn new(
+        base_url: &str,
+        model: &str,
+        max_tokens: u32,
+        temperature: f32,
+        slot_id: u8,
+        background_slot_id: i32,
+    ) -> Self {
         Self {
             client: reqwest::Client::new(),
             chat_url: format!("{}/v1/chat/completions", base_url.trim_end_matches('/')),
@@ -123,6 +134,7 @@ impl LlamaClient {
             max_tokens,
             temperature,
             slot_id,
+            background_slot_id,
         }
     }
 
@@ -254,8 +266,8 @@ impl LlamaClient {
 
     /// One-shot (non-streaming) completion. Used for summarization.
     ///
-    /// Does NOT send `cache_prompt` or `slot_id` — these are background calls
-    /// that must not interfere with the main conversation's KV-cache slot.
+    /// Sends `slot_id: background_slot_id` (default -1 = any free slot) so
+    /// llama.cpp does not evict the main conversation's KV-cache in slot 0.
     pub async fn complete(&self, messages: &[Message]) -> Result<String> {
         let payload = serde_json::json!({
             "model": self.model,
@@ -264,6 +276,7 @@ impl LlamaClient {
             "temperature": 0.3,
             "stream": false,
             "cache_prompt": false,
+            "slot_id": self.background_slot_id,
         });
 
         let response = self
@@ -287,7 +300,7 @@ impl LlamaClient {
     /// One-shot completion with a short token budget. Used for structured
     /// extractions (profile facts, etc.) that produce brief outputs.
     ///
-    /// Does NOT send `cache_prompt` or `slot_id` — must not touch the main slot.
+    /// Sends `slot_id: background_slot_id` so it does not evict the main slot.
     pub async fn complete_short(&self, messages: &[Message]) -> Result<String> {
         let payload = serde_json::json!({
             "model": self.model,
@@ -296,6 +309,7 @@ impl LlamaClient {
             "temperature": 0.1,
             "stream": false,
             "cache_prompt": false,
+            "slot_id": self.background_slot_id,
         });
 
         let response = self
@@ -353,7 +367,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test-model", 512, 0.3, 0);
+        let client = LlamaClient::new(&server.uri(), "test-model", 512, 0.3, 0, -1);
         let result = client.complete(&make_messages()).await.unwrap();
         assert_eq!(result, "This is the summary.");
     }
@@ -369,7 +383,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test-model", 512, 0.3, 0);
+        let client = LlamaClient::new(&server.uri(), "test-model", 512, 0.3, 0, -1);
         let result = client.complete(&make_messages()).await.unwrap();
         assert_eq!(result, "trimmed");
     }
@@ -383,7 +397,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test-model", 512, 0.3, 0);
+        let client = LlamaClient::new(&server.uri(), "test-model", 512, 0.3, 0, -1);
         let result = client.complete(&make_messages()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("500"));
@@ -402,7 +416,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test-model", 256, 0.1, 0);
+        let client = LlamaClient::new(&server.uri(), "test-model", 256, 0.1, 0, -1);
         let result = client.complete_short(&make_messages()).await.unwrap();
         assert!(result.contains("Daniel"));
     }
@@ -428,7 +442,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test-model", 400, 0.7, 0);
+        let client = LlamaClient::new(&server.uri(), "test-model", 400, 0.7, 0, -1);
         let messages = make_messages();
         let mut rx = client.stream(&messages_to_json(&messages), &[]).await.unwrap();
 
@@ -457,7 +471,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test-model", 400, 0.7, 0);
+        let client = LlamaClient::new(&server.uri(), "test-model", 400, 0.7, 0, -1);
         let messages = make_messages();
         let mut rx = client.stream(&messages_to_json(&messages), &[]).await.unwrap();
 
@@ -559,7 +573,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test-model", 400, 0.7, 0);
+        let client = LlamaClient::new(&server.uri(), "test-model", 400, 0.7, 0, -1);
         let mut rx = client.stream(&[], &[]).await.unwrap();
 
         let token = rx.recv().await.expect("should receive a token");
@@ -583,7 +597,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test-model", 512, 0.3, 0);
+        let client = LlamaClient::new(&server.uri(), "test-model", 512, 0.3, 0, -1);
 
         // Build a session with enough history to trigger summarization
         let mut session = super::super::session::LlmSession::new("Eres Jarvis.", 0);

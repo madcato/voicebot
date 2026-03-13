@@ -32,6 +32,7 @@ use crate::db::Database;
 use crate::llm::{LlamaClient, LlmSession, StreamToken};
 use crate::profile::{build_profile_context, extract_facts, ProfileFact};
 use crate::stt::WhisperStt;
+use whisper_rs::install_logging_hooks;
 use crate::tools::{
     format_history, CalendarCreateTool, CalendarGetEventsTool, CurrentTimeTool,
     OpenAppTool, ReadClipboardTool, ReadFileTool, RunAgentAsyncTool, RunShellTool,
@@ -49,6 +50,9 @@ const PRE_ROLL_CHUNKS: usize = 15;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Disable whisper prints into console
+    install_logging_hooks();
+    
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -161,6 +165,7 @@ async fn main() -> Result<()> {
         config.llm_max_tokens,
         config.llm_temperature,
         config.llm_slot_id,
+        config.llm_background_slot_id,
     );
     info!(target: "llm", "LLM endpoint: {}", config.llm_url);
 
@@ -510,6 +515,7 @@ async fn stream_and_tts(
     tts: &Arc<TtsEngine>,
     audio_output: &Arc<AudioOutput>,
     tts_sample_rate: u32,
+    t_llm_start: Instant,
 ) -> (String, Option<(String, String)>, Option<tokio::task::JoinHandle<anyhow::Result<()>>>) {
     let mut sentence_buf = SentenceSplitter::new();
     let mut full_response = String::new();
@@ -531,7 +537,6 @@ async fn stream_and_tts(
         };
     }
 
-    let t_llm = Instant::now();
     let mut first_token_logged = false;
 
     loop {
@@ -555,7 +560,7 @@ async fn stream_and_tts(
         };
 
         if !first_token_logged && !token.is_empty() {
-            debug!(target: "performance", "LLM PP: {}ms", t_llm.elapsed().as_millis());
+            debug!(target: "performance", "LLM PP: {}ms", t_llm_start.elapsed().as_millis());
             first_token_logged = true;
         }
 
@@ -621,7 +626,7 @@ async fn stream_and_tts(
         }
     }
 
-    debug!(target: "performance", "LLM TG: {}ms", t_llm.elapsed().as_millis());
+    debug!(target: "performance", "LLM TG: {}ms", t_llm_start.elapsed().as_millis());
 
     // Return the last playback handle to the caller so it can overlap
     // GPU/DB work (summarization, profile extraction) with tail audio.
@@ -732,13 +737,14 @@ async fn run_pipeline(
         // Tool call loop — allows the model to call multiple tools sequentially
         // before producing its final spoken response (max MAX_TOOL_ITERATIONS).
         'tool_loop: for iter in 0..MAX_TOOL_ITERATIONS {
+            let t_llm_start = Instant::now();
             let token_rx = match llm_client.stream(&messages, &tool_defs).await {
                 Ok(r)  => r,
                 Err(e) => { error!(target: "llm", "LLM stream error: {}", e); break 'pipeline; }
             };
 
             let (llm_text, tool_call, play) =
-                stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate).await;
+                stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, t_llm_start).await;
 
             if cancel.load(Ordering::SeqCst) {
                 if let Some(h) = play { h.abort(); }
@@ -961,6 +967,7 @@ async fn run_text_pipeline(
     let mut llm_text_final = String::new();
 
     'tool_loop: for iter in 0..MAX_TOOL_ITERATIONS {
+        let t_llm_start = Instant::now();
         let token_rx = match llm_client.stream(&messages, &tool_defs).await {
             Ok(r) => r,
             Err(e) => {
@@ -970,7 +977,7 @@ async fn run_text_pipeline(
         };
 
         let (llm_text, tool_call, play) =
-            stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate).await;
+            stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, t_llm_start).await;
 
         if cancel.load(Ordering::SeqCst) {
             if let Some(h) = play { h.abort(); }

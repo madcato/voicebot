@@ -202,6 +202,7 @@ This is a fire-and-read pattern — no JSON protocol, no shared state, no persis
 | `LLM_URL` | `http://localhost:8080` | llama.cpp server base URL (`llama-server --port 8080`) |
 | `LLM_MODEL` | `local-model` | Model name sent in API requests (llama.cpp ignores this field) |
 | `LLM_SLOT_ID` | `0` | llama.cpp KV-cache slot for this session (single-user = 0) |
+| `LLM_BACKGROUND_SLOT_ID` | `-1` | Slot used for background calls (summarization, profile extraction). `-1` = let llama.cpp pick any free slot. Set to `1` when running `llama-server --parallel 2` to isolate background calls from the main conversation's KV-cache. |
 | `LLM_SYSTEM_PROMPT` | — | System prompt for the LLM |
 | `LLM_MAX_TOKENS` | `400` | Max generation tokens per response |
 | `LLM_TEMPERATURE` | `0.7` | LLM sampling temperature |

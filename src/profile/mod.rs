@@ -199,7 +199,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0);
+        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         let facts = extract_facts(&client, "Me llamo Daniel.", "Encantado, Daniel.").await;
 
         assert_eq!(facts.len(), 1);
@@ -225,7 +225,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0);
+        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         let facts = extract_facts(
             &client,
             "Me llamo Daniel, vivo en Madrid y soy ingeniero de software.",
@@ -250,7 +250,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0);
+        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         let facts = extract_facts(&client, "¿Qué hora es?", "Son las 14:00.").await;
         assert!(facts.is_empty());
     }
@@ -268,7 +268,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0);
+        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         let facts = extract_facts(&client, "Vivo en Madrid.", "Entendido.").await;
 
         assert_eq!(facts.len(), 1);
@@ -289,7 +289,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0);
+        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         let facts = extract_facts(&client, "Me encanta programar en Rust.", "Es un lenguaje excelente.").await;
 
         assert_eq!(facts.len(), 1);
@@ -309,7 +309,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0);
+        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         let facts = extract_facts(&client, "Me encanta Rust.", "Es genial.").await;
 
         assert_eq!(facts.len(), 1);
@@ -330,7 +330,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0);
+        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         let facts = extract_facts(&client, "Soy Daniel.", "Hola.").await;
 
         assert_eq!(facts.len(), 1);
@@ -351,7 +351,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0);
+        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         let facts = extract_facts(&client, "Me llamo Daniel.", "Hola.").await;
 
         assert_eq!(facts.len(), 1);
@@ -367,7 +367,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0);
+        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         // Must not panic — errors are swallowed and an empty vec is returned.
         let facts = extract_facts(&client, "Hola.", "Hola.").await;
         assert!(facts.is_empty());
@@ -384,7 +384,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0);
+        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         let facts = extract_facts(&client, "Hola.", "Hola.").await;
         assert!(facts.is_empty(), "non-JSON LLM output must yield empty facts without panic");
     }
@@ -477,7 +477,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0);
+        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
 
         // Step 1: extract facts from the last turn
         let facts = extract_facts(

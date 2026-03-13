@@ -27,7 +27,7 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 # ── Configuration (override via env vars) ────────────────────────────────────
 
 # Path to the GGUF model. Default: look in project models/ directory.
-LLM_MODEL="${LLM_MODEL:-${ROOT_DIR}/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf}"
+LLM_MODEL="${LLM_MODEL:-${ROOT_DIR}/models/Qwen3.5-2B-Q4_K_M.gguf}"
 
 # llama-server bind address and port
 LLM_HOST="${LLM_HOST:-0.0.0.0}"
@@ -82,7 +82,7 @@ exec llama-server \
     --cache-type-v q8_0 \
     --flash-attn on \
     --mlock \
-    --parallel 1 \
+    --parallel 2 \
     --repeat-penalty 1.1 \
     --temp 0.6 \
     --n-predict 80 \
