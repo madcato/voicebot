@@ -276,6 +276,7 @@ async fn main() -> Result<()> {
     info!(target: "audio", "VAD silence threshold: {}ms", config.vad_silence_ms);
     let mut speech_buffer = AudioBuffer::new(source_sample_rate, MAX_SPEECH_BUFFER_SECS);
     let mut pre_roll: VecDeque<Vec<f32>> = VecDeque::with_capacity(PRE_ROLL_CHUNKS + 1);
+    let mut t_speech_start: Option<Instant> = None;
 
     // ── Barge-in state ────────────────────────────────────────────────────────
     let cancel = Arc::new(AtomicBool::new(false));
@@ -385,6 +386,8 @@ async fn main() -> Result<()> {
 
                 match vad.process(&mono) {
                     VadResult::SpeechStart => {
+                        t_speech_start = Some(Instant::now());
+                        info!(target: "performance", "[+0ms] SpeechStart");
                         // ── Barge-in ─────────────────────────────────────────
                         if let Some(h) = pipeline_handle.take() {
                             info!(target: "pipeline", "Barge-in detected — cancelling active pipeline");
@@ -414,7 +417,9 @@ async fn main() -> Result<()> {
                         }
 
                         info!(target: "pipeline", "Speech: {}ms — starting pipeline", duration_ms);
-                        info!(target: "performance", "SpeechEnd fired (speech {}ms)", duration_ms);
+                        let vad_elapsed = t_speech_start.take()
+                            .map(|t| t.elapsed().as_millis()).unwrap_or(0);
+                        info!(target: "performance", "[+{}ms] VAD end ({}ms speech)", vad_elapsed, duration_ms);
 
                         // ── Speaker verification ──────────────────────────────
                         if let Some(ref mut sv) = speaker_verifier {
@@ -519,7 +524,6 @@ async fn stream_and_tts(
     audio_output: &Arc<AudioOutput>,
     tts_sample_rate: u32,
     t_llm_start: Instant,
-    t_speech_end: Instant,
 ) -> (String, Option<(String, String)>, Option<tokio::task::JoinHandle<anyhow::Result<()>>>) {
     let mut sentence_buf = SentenceSplitter::new();
     let mut full_response = String::new();
@@ -541,7 +545,9 @@ async fn stream_and_tts(
         };
     }
 
-    let mut first_token_logged = false;
+    let mut t_prev = t_llm_start;
+    let mut first_sentence = true;
+    let mut first_token_seen = false;
 
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -563,9 +569,10 @@ async fn stream_and_tts(
             _ => String::new(),
         };
 
-        if !first_token_logged && !token.is_empty() {
-            debug!(target: "performance", "LLM PP: {}ms", t_llm_start.elapsed().as_millis());
-            first_token_logged = true;
+        if !first_token_seen && !token.is_empty() {
+            info!(target: "performance", "[+{}ms] LLM first token", t_prev.elapsed().as_millis());
+            t_prev = Instant::now();
+            first_token_seen = true;
         }
 
         full_response.push_str(&token);
@@ -590,11 +597,15 @@ async fn stream_and_tts(
             info!(target: "tts", "TTS: {:?}", sentence);
 
             // ── Start synthesis immediately (runs while previous sentence plays) ──
+            if first_sentence {
+                info!(target: "performance", "[+{}ms] TTS start", t_prev.elapsed().as_millis());
+                t_prev = Instant::now();
+            }
+            let t_synth = Instant::now();
             let tts_c = Arc::clone(tts);
             let sentence_c = sentence.clone();
-            let t_synth = Instant::now();
             let synth_handle = tokio::task::spawn_blocking(move || {
-                tts_c.synthesize(&sentence_c).map(|s| (s, t_synth.elapsed()))
+                tts_c.synthesize(&sentence_c)
             });
 
             // ── Wait for the previous sentence to finish playing ──────────────────
@@ -606,23 +617,24 @@ async fn stream_and_tts(
             }
 
             // ── Collect synthesis result (usually already done) ───────────────────
-            let (samples, synth_elapsed) = match synth_handle.await {
-                Ok(Ok((s, t))) => (s, t),
+            let samples = match synth_handle.await {
+                Ok(Ok(s)) => s,
                 Ok(Err(e)) => { error!(target: "tts", "TTS error: {}", e); continue; }
                 Err(e) => { error!(target: "tts", "TTS task panicked: {}", e); continue; }
             };
-            debug!(target: "performance", "TTS IN: {}ms", synth_elapsed.as_millis());
+            if first_sentence {
+                info!(target: "performance", "[+{}ms] TTS end", t_prev.elapsed().as_millis());
+                t_prev = Instant::now();
+                first_sentence = false;
+            } else {
+                debug!(target: "performance", "TTS IN: {}ms", t_synth.elapsed().as_millis());
+            }
 
             if cancel.load(Ordering::SeqCst) {
                 return (full_response, None, None);
             }
 
             // ── Start playback without awaiting — next sentence can synthesise now ─
-            // Log end-to-end latency from SpeechEnd on the very first sentence only.
-            if play_handle.is_none() {
-                info!(target: "performance", "E2E (SpeechEnd→first audio): {}ms",
-                    t_speech_end.elapsed().as_millis());
-            }
             let out_c = Arc::clone(audio_output);
             let cancel_c = Arc::clone(cancel);
             play_handle = Some(tokio::task::spawn_blocking(move || {
@@ -673,7 +685,7 @@ async fn run_pipeline(
         };
     }
 
-    debug!(target: "performance", "Pipeline spawn lag: {}ms", t_speech_end.elapsed().as_millis());
+    let mut t_prev = t_speech_end;
 
     // ── Speculative KV-cache warm-up — runs in parallel with STT ──────────────
     // Fire a 1-token streaming request with the current session messages so
@@ -695,13 +707,15 @@ async fn run_pipeline(
     };
 
     // ── STT ───────────────────────────────────────────────────────────────────
-    let t_stt = Instant::now();
+    info!(target: "performance", "[+{}ms] STT start", t_prev.elapsed().as_millis());
+    t_prev = Instant::now();
     let transcript = match tokio::task::spawn_blocking(move || stt.transcribe(&audio)).await {
         Ok(Ok(t)) => t,
         Ok(Err(e)) => { error!(target: "stt", "STT error: {}", e); spec_handle.abort(); return; }
         Err(e)     => { error!(target: "stt", "STT task panicked: {}", e); spec_handle.abort(); return; }
     };
-    info!(target: "performance", "STT: {}ms", t_stt.elapsed().as_millis());
+    info!(target: "performance", "[+{}ms] STT end", t_prev.elapsed().as_millis());
+    t_prev = Instant::now();
 
     // Wait briefly for speculative prefill to finish cleanly (max_tokens=1 means
     // it completes in ~200ms for typical histories). A clean finish lets llama.cpp
@@ -782,14 +796,16 @@ async fn run_pipeline(
         // Tool call loop — allows the model to call multiple tools sequentially
         // before producing its final spoken response (max MAX_TOOL_ITERATIONS).
         'tool_loop: for iter in 0..MAX_TOOL_ITERATIONS {
-            let t_llm_start = Instant::now();
+            info!(target: "performance", "[+{}ms] LLM request", t_prev.elapsed().as_millis());
+            t_prev = Instant::now();
+            let t_llm_start = t_prev;
             let token_rx = match llm_client.stream(&messages, &tool_defs).await {
                 Ok(r)  => r,
                 Err(e) => { error!(target: "llm", "LLM stream error: {}", e); break 'pipeline; }
             };
 
             let (llm_text, tool_call, play) =
-                stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, t_llm_start, t_speech_end).await;
+                stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, t_llm_start).await;
 
             if cancel.load(Ordering::SeqCst) {
                 if let Some(h) = play { h.abort(); }
@@ -819,6 +835,7 @@ async fn run_pipeline(
                     }));
 
                     if cancel.load(Ordering::SeqCst) { break 'pipeline; }
+                    t_prev = Instant::now();
                     // Continue to next iteration for the model's follow-up.
                 }
                 None => {
@@ -1022,7 +1039,7 @@ async fn run_text_pipeline(
         };
 
         let (llm_text, tool_call, play) =
-            stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, t_llm_start, t_llm_start).await;
+            stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, t_llm_start).await;
 
         if cancel.load(Ordering::SeqCst) {
             if let Some(h) = play { h.abort(); }
