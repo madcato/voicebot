@@ -4303,6 +4303,7 @@ dependencies = [
  "cpal",
  "dotenvy",
  "futures-util",
+ "hound",
  "kokorox",
  "regex",
  "reqwest 0.12.28",

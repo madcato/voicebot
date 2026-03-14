@@ -80,3 +80,5 @@ wiremock = "0.6"
 temp-env = "0.3"
 # Temporary directories for file I/O tests
 tempfile = "3"
+# WAV file loading for e2e audio fixtures
+hound = "3"

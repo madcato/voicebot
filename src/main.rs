@@ -43,6 +43,9 @@ use crate::tts::{SayTts, SentenceSplitter, TtsEngine};
 #[cfg(feature = "kokoro")]
 use crate::tts::KokoroTts;
 
+#[cfg(test)]
+mod e2e_tests;
+
 const AUDIO_CHANNEL_CAPACITY: usize = 200;
 const MAX_SPEECH_BUFFER_SECS: u32 = 30;
 const MIN_SPEECH_DURATION_MS: u32 = 800;
