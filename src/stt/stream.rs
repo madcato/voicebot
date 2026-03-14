@@ -87,3 +87,19 @@ impl SttStream {
         }
     }
 }
+
+#[cfg(test)]
+impl SttStream {
+    /// Creates a mock SttStream that immediately returns `transcript` for any
+    /// `await_result(seq)` where seq <= 1. No background Whisper task is started.
+    /// Use in integration tests to bypass STT and inject a known transcript.
+    pub(crate) fn mock(transcript: String) -> Arc<Self> {
+        let (audio_tx, _audio_rx) = watch::channel::<(u64, Vec<f32>)>((0, vec![]));
+        let (result_tx, result_rx) = watch::channel::<(u64, String)>((0, String::new()));
+        // Pre-load seq=1 so await_result(1) returns immediately without blocking.
+        let _ = result_tx.send((1, transcript));
+        // result_tx drops here — that's fine because await_result reads the pre-loaded
+        // value (1 >= 1) without calling changed().
+        Arc::new(Self { seq: AtomicU64::new(1), audio_tx, result_rx })
+    }
+}

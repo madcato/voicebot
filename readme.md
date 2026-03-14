@@ -390,6 +390,23 @@ cargo clippy
 cargo run -- --list-devices
 ```
 
+### End-to-end tests
+
+E2E tests exercise the full STT → LLM → TTS → DB pipeline. They are marked `#[ignore]` and must be run explicitly (never on every build):
+
+```bash
+# All E2E tests (require audio output device)
+cargo test e2e -- --ignored --nocapture
+
+# A specific scenario
+cargo test e2e::basic_conversation_mocked_transcript -- --ignored --nocapture
+
+# Real-STT tests (also require WHISPER_MODEL + tests/fixtures/hola.wav)
+cargo test e2e::stt_ -- --ignored --nocapture
+```
+
+See [`e2e.md`](e2e.md) for full documentation: how to record WAV fixtures, required environment variables, and what each test scenario verifies.
+
 ---
 
 ## Roadmap — Feature Analysis
