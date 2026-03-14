@@ -30,6 +30,9 @@ pub struct Config {
     pub llm_url: String,
     /// Model name sent in the `model` field of API requests
     pub llm_model: String,
+    /// LLM backend: "llama" (default, llama.cpp) or "mlx" (mlx-lm).
+    /// Controls whether llama.cpp-specific fields (cache_prompt, slot_id) are sent.
+    pub llm_provider: String,
     /// KV-cache slot ID (0 for single-user, llama.cpp only)
     pub llm_slot_id: u8,
     /// Slot used for background calls (summarization, profile extraction).
@@ -75,11 +78,6 @@ pub struct Config {
     pub daemon_enabled: bool,
     /// Seconds between daemon checks (DAEMON_INTERVAL_SECS, default 300).
     pub daemon_interval_secs: u64,
-
-    // ── System state injection ────────────────────────────────────────────────
-    /// Prepend `[SYSTEM STATE]` (time, active app, battery) to each user turn.
-    /// Enabled via `INJECT_SYSTEM_DATA=true`.
-    pub inject_system_data: bool,
 
     // ── Vision ────────────────────────────────────────────────────────────────
     /// Base URL of the vision model provider (VISION_URL). None = disabled.
@@ -160,6 +158,8 @@ impl Config {
                 .unwrap_or_else(|_| "http://localhost:8080".to_string()),
             llm_model: env::var("LLM_MODEL")
                 .unwrap_or_else(|_| "local-model".to_string()),
+            llm_provider: env::var("LLM_PROVIDER")
+                .unwrap_or_else(|_| "llama".to_string()),
             llm_slot_id: env::var("LLM_SLOT_ID")
                 .unwrap_or_else(|_| "0".to_string())
                 .parse()
@@ -222,11 +222,6 @@ impl Config {
                 .unwrap_or_else(|_| "300".to_string())
                 .parse()
                 .context("Invalid DAEMON_INTERVAL_SECS")?,
-
-            // System state injection
-            inject_system_data: env::var("INJECT_SYSTEM_DATA")
-                .map(|v| v == "1" || v.to_lowercase() == "true")
-                .unwrap_or(false),
 
             // Vision
             vision_url: env::var("VISION_URL").ok(),

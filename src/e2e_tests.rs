@@ -176,7 +176,6 @@ impl E2eHarness {
             Arc::clone(&self.shared_history),
             4096,  // context_tokens — high enough that summarization never triggers
             6,     // summary_keep_turns
-            false, // inject_system_data — keeps tests hermetic
             Instant::now(),
             ambient,
             wake_word.to_string(),

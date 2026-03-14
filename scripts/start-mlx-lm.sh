@@ -10,7 +10,8 @@
 #   MLX_MODEL=mlx-community/Qwen2.5-7B-Instruct-4bit ./scripts/start-mlx-lm.sh
 #
 # After launch, set in .env:
-#   LLM_URL=http://127.0.0.1:8080
+#   LLM_URL=http://127.0.0.1:8000
+#   LLM_PROVIDER=mlx
 
 set -euo pipefail
 
@@ -20,7 +21,7 @@ set -euo pipefail
 
 MODEL="${1:-${MLX_MODEL:-}}"
 HOST="${MLX_HOST:-127.0.0.1}"
-PORT="${MLX_PORT:-8080}"
+PORT="${MLX_PORT:-8000}"
 MAX_TOKENS="${MLX_MAX_TOKENS:-600}"
 TEMPERATURE="${MLX_TEMP:-0.7}"
 
@@ -92,3 +93,6 @@ exec $RUNNER server \
   --max-tokens     "$MAX_TOKENS" \
   --temp           "$TEMPERATURE" \
   --log-level      INFO
+
+# exec $RUNNER benchmark \
+#   --model          "$MODEL"

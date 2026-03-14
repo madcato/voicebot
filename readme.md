@@ -199,9 +199,10 @@ This is a fire-and-read pattern — no JSON protocol, no shared state, no persis
 | `VAD_SILENCE_MS` | `500` | Silence duration (ms) before SpeechEnd fires. Lower = faster response; higher = safer for mid-sentence pauses. Range: 400–1500. This is the largest single contributor to perceived latency after your last word. |
 | `WHISPER_MODEL` | — | Path to `.bin` Whisper model (and `.mlmodelc` for CoreML encoder) |
 | `WHISPER_COREML` | `0` | Set to `1` to use CoreML encoder (Neural Engine); requires `.mlmodelc` alongside the `.bin` |
-| `LLM_URL` | `http://localhost:8080` | llama.cpp server base URL (`llama-server --port 8080`) |
-| `LLM_MODEL` | `local-model` | Model name sent in API requests (llama.cpp ignores this field) |
-| `LLM_SLOT_ID` | `0` | llama.cpp KV-cache slot for this session (single-user = 0) |
+| `LLM_URL` | `http://localhost:8080` | LLM server base URL. Use `http://localhost:8080` for llama.cpp, `http://localhost:8000` for mlx-lm |
+| `LLM_MODEL` | `local-model` | Model name sent in API requests |
+| `LLM_PROVIDER` | `llama` | LLM backend: `llama` (llama.cpp, default) or `mlx` (mlx-lm). Controls whether llama.cpp-specific fields (`cache_prompt`, `slot_id`) are sent |
+| `LLM_SLOT_ID` | `0` | llama.cpp KV-cache slot for this session (single-user = 0; llama provider only) |
 | `LLM_BACKGROUND_SLOT_ID` | `-1` | Slot used for background calls (summarization, profile extraction). `-1` = let llama.cpp pick any free slot. Set to `1` when running `llama-server --parallel 2` to isolate background calls from the main conversation's KV-cache. |
 | `LLM_SYSTEM_PROMPT` | — | System prompt for the LLM |
 | `LLM_MAX_TOKENS` | `400` | Max generation tokens per response |
@@ -346,6 +347,64 @@ Run the server:
 # or
 LLM_MODEL=/path/to/model.gguf ./scripts/start-llm.sh
 ```
+
+### mlx-lm server (`scripts/start-mlx-lm.sh`)
+
+Alternative to llama.cpp using Apple's MLX framework — native Metal GPU acceleration, no GGUF conversion needed. Uses port **8000** by default.
+
+```sh
+# Install mlx-lm
+pip install mlx-lm
+
+# Launch (downloads model on first run)
+./scripts/start-mlx-lm.sh mlx-community/Qwen2.5-7B-Instruct-4bit
+
+# .env settings
+LLM_PROVIDER=mlx
+LLM_URL=http://127.0.0.1:8000
+LLM_MODEL=mlx-community/Qwen2.5-7B-Instruct-4bit
+```
+
+When `LLM_PROVIDER=mlx`, the voicebot omits llama.cpp-specific fields (`cache_prompt`, `slot_id`) from all requests. mlx-lm manages its own prompt cache server-side via `--prompt-cache-size 1`.
+
+Recommended models for voicebot (low latency + Spanish support):
+
+| Model | VRAM | Notes |
+|-------|------|-------|
+| `mlx-community/Qwen2.5-7B-Instruct-4bit` | ~4 GB | Best balance of speed and quality |
+| `mlx-community/Qwen2.5-14B-Instruct-4bit` | ~8 GB | Better quality, still fast on M4 Pro |
+| `mlx-community/Qwen3-8B-4bit` | ~5 GB | Latest architecture; `<think>` blocks auto-stripped |
+
+### Benchmarking providers (`scripts/bench-llama.sh` / `scripts/bench-mlx.sh`)
+
+Compare llama.cpp and mlx-lm under voicebot-realistic workloads:
+
+```sh
+# llama.cpp — requires a GGUF model file
+./scripts/bench-llama.sh ./models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+
+# mlx-lm — accepts a local path or HuggingFace repo (downloads on first run)
+./scripts/bench-mlx.sh mlx-community/Qwen2.5-7B-Instruct-4bit
+
+# Override repetitions/trials
+BENCH_REPS=5   ./scripts/bench-llama.sh ./models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+BENCH_TRIALS=5 ./scripts/bench-mlx.sh   mlx-community/Qwen2.5-7B-Instruct-4bit
+```
+
+Both scripts test three scenarios that reflect actual voicebot usage:
+
+| Scenario | Prompt | Gen | What it measures |
+|----------|--------|-----|-----------------|
+| **cold** | 300 pp | 100 tg | First turn — full system prompt + history needs prefill |
+| **warm** | 40 pp | 100 tg | Subsequent turns — only the new user utterance needs prefill (KV cache hot) |
+| **long** | 800 pp | 120 tg | Long conversation — how throughput degrades at large context |
+
+Key thresholds for real-time feel:
+- **warm pp > 500 t/s** → TTFT < 80ms for a typical user turn
+- **tg > 60 t/s** → 100-token response synthesized in < 1.7s (TTS keeps up)
+
+llama.cpp flags used: `-ngl 99 -ctk q4_0 -ctv q4_0 -fa 1` (matching `start-llm.sh`).
+mlx-lm flags used: `--prefill-step-size 512` (matching `start-mlx-lm.sh`).
 
 ### Background calls
 

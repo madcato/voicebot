@@ -6,7 +6,6 @@ mod db;
 mod llm;
 mod profile;
 mod stt;
-mod system_state;
 mod tools;
 mod tts;
 
@@ -175,8 +174,9 @@ async fn main() -> Result<()> {
         config.llm_temperature,
         config.llm_slot_id,
         config.llm_background_slot_id,
-    );
-    info!(target: "llm", "LLM endpoint: {}", config.llm_url);
+    )
+    .with_provider(&config.llm_provider);
+    info!(target: "llm", "LLM endpoint: {} (provider: {})", config.llm_url, config.llm_provider);
 
     // ── Inference daemon ──────────────────────────────────────────────────────
     if config.daemon_enabled {
@@ -529,7 +529,6 @@ async fn main() -> Result<()> {
                         let shared_history_c   = Arc::clone(&shared_history);
                         let context_tokens     = config.llm_context_tokens;
                         let keep_turns         = config.llm_summary_keep_turns;
-                        let inject_system_data = config.inject_system_data;
 
                         pipeline_handle = Some(tokio::spawn(async move {
                             run_pipeline(
@@ -547,7 +546,6 @@ async fn main() -> Result<()> {
                                 shared_history_c,
                                 context_tokens,
                                 keep_turns,
-                                inject_system_data,
                                 t_speech_end,
                                 ambient,
                                 wake_word,
@@ -768,7 +766,6 @@ async fn run_pipeline(
     shared_history: Arc<RwLock<String>>,
     context_tokens: usize,
     summary_keep_turns: usize,
-    inject_system_data: bool,
     t_speech_end: Instant,
     // If true, discard the utterance unless the transcript contains `wake_word`.
     ambient: bool,
@@ -796,13 +793,6 @@ async fn run_pipeline(
             debug!(target: "llm", "Speculative prefill ended: {e}");
         }
     });
-
-    // ── system_state::build() — also in parallel with STT ─────────────────────
-    let state_handle = if inject_system_data {
-        Some(tokio::spawn(system_state::build()))
-    } else {
-        None
-    };
 
     // ── STT ───────────────────────────────────────────────────────────────────
     // Whisper has been running in the background since SpeechStart.
@@ -890,21 +880,7 @@ async fn run_pipeline(
     'pipeline: {
         let tool_defs = tools.tool_definitions();
 
-        // Build the initial message list. Inject ambient system state as a
-        // prefix to the current user message (ephemeral — not stored in session).
         let mut messages = session_snapshot.all_messages_api();
-        if let Some(h) = state_handle {
-            let state = h.await.unwrap_or_default();
-            if let Some(last_msg) = messages.last_mut() {
-                if last_msg["role"] == "user" {
-                    let original = last_msg["content"].as_str().unwrap_or("").to_string();
-                    last_msg["content"] = serde_json::Value::String(
-                        format!("{state}\n\n{original}")
-                    );
-                }
-            }
-            debug!(target: "pipeline", "System state injected: {}", state);
-        }
 
         // Tool call loop — allows the model to call multiple tools sequentially
         // before producing its final spoken response (max MAX_TOOL_ITERATIONS).

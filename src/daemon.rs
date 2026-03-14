@@ -1,9 +1,9 @@
 /// Inference daemon — Jarvis's background "is there anything worth saying?" loop.
 ///
-/// Every `interval_secs` this daemon collects the current system state,
-/// asks the LLM if there is something genuinely worth telling the user, and —
-/// if the answer is not `NOTHING` — pushes a `ProactiveEvent::InferenceDaemon`
-/// to the proactive channel so `run_proactive_pipeline` can vocalize it.
+/// Every `interval_secs` this daemon asks the LLM if there is something
+/// genuinely worth telling the user, and — if the answer is not `NOTHING` —
+/// pushes a `ProactiveEvent::InferenceDaemon` to the proactive channel so
+/// `run_proactive_pipeline` can vocalize it.
 ///
 /// The LLM call uses `complete_short()` (no slot, no KV-cache eviction).
 use tokio::sync::mpsc;
@@ -11,7 +11,6 @@ use tracing::{debug, info, warn};
 
 use crate::agents::ProactiveEvent;
 use crate::llm::{LlamaClient, LlmSession, Message};
-use crate::system_state;
 
 /// Sentinel the LLM must return when it decides there is nothing to say.
 const NOTHING: &str = "NOTHING";
@@ -48,8 +47,7 @@ impl InferenceDaemon {
                 continue;
             }
 
-            let state = system_state::build().await;
-            debug!(target: "daemon", "Inference daemon tick: {}", state);
+            debug!(target: "daemon", "Inference daemon tick");
 
             let system_prompt = {
                 let s = self.llm_session.lock().unwrap();
@@ -63,7 +61,7 @@ impl InferenceDaemon {
                 },
                 Message {
                     role: "user".to_string(),
-                    content: state.clone(),
+                    content: "check".to_string(),
                 },
             ];
 
@@ -99,16 +97,13 @@ fn build_daemon_system_prompt(assistant_system_prompt: &str) -> String {
         "{assistant_system_prompt}\n\n\
          ---\n\
          MODO: demonio de inferencia proactiva.\n\
-         Recibirás el estado actual del sistema. Tu trabajo es decidir si hay \
-         algo genuinamente importante que comunicar al usuario ahora mismo.\n\n\
+         Tu trabajo es decidir si hay algo genuinamente importante que \
+         comunicar al usuario ahora mismo, basándote en el contexto de la \
+         conversación.\n\n\
          REGLAS ESTRICTAS:\n\
          - Si no hay nada importante, responde exactamente: NOTHING\n\
-         - Solo interviene si algo es urgente o claramente útil:\n\
-           * Batería muy baja (< 15 %) y no está cargando\n\
-           * Un proceso que consume CPU/memoria de forma anómala\n\
-           * Cualquier alerta del sistema que requiera atención inmediata\n\
-         - NO interrumpas por estado normal del sistema\n\
-         - NO menciones la hora salvo que sea relevante (reunión inminente, etc.)\n\
+         - Solo interviene si tienes algo urgente o claramente útil que decir\n\
+         - NO interrumpas sin motivo claro\n\
          - Si decides intervenir, escribe solo el mensaje a pronunciar (1-2 frases \
            naturales, sin saludos, sin markdown)."
     )
@@ -143,9 +138,4 @@ mod tests {
         assert!(result.contains("demonio de inferencia"));
     }
 
-    #[test]
-    fn build_daemon_system_prompt_mentions_battery_threshold() {
-        let result = build_daemon_system_prompt("base");
-        assert!(result.contains("15"));
-    }
 }

@@ -116,6 +116,9 @@ pub struct LlamaClient {
     /// main conversation's KV cache. -1 = let llama.cpp pick any free slot.
     /// Set to 1 when llama-server runs with --parallel 2.
     background_slot_id: i32,
+    /// When true, include llama.cpp-specific fields (`cache_prompt`, `slot_id`)
+    /// in every request. Set to false when using mlx-lm or other backends.
+    llama_extensions: bool,
 }
 
 impl LlamaClient {
@@ -135,7 +138,16 @@ impl LlamaClient {
             temperature,
             slot_id,
             background_slot_id,
+            llama_extensions: true,
         }
+    }
+
+    /// Configure which backend-specific extensions to send.
+    /// `"llama"` → include `cache_prompt` + `slot_id` (llama.cpp).
+    /// Any other value (e.g. `"mlx"`) → omit those fields.
+    pub fn with_provider(mut self, provider: &str) -> Self {
+        self.llama_extensions = provider == "llama";
+        self
     }
 
     /// Stream completion tokens from an OpenAI-compatible endpoint.
@@ -153,11 +165,12 @@ impl LlamaClient {
             "temperature": self.temperature,
             "top_p": 0.95,
             "stream": true,
-            // llama.cpp extensions: reuse the KV-cache across turns for this slot.
-            // Ignored by other OpenAI-compatible servers.
-            "cache_prompt": true,
-            "slot_id": self.slot_id,
         });
+        if self.llama_extensions {
+            // llama.cpp extensions: reuse the KV-cache across turns for this slot.
+            payload["cache_prompt"] = serde_json::json!(true);
+            payload["slot_id"] = serde_json::json!(self.slot_id);
+        }
         if !tools.is_empty() {
             payload["tools"] = serde_json::json!(tools);
             payload["tool_choice"] = serde_json::json!("auto");
@@ -269,15 +282,17 @@ impl LlamaClient {
     /// Sends `slot_id: background_slot_id` (default -1 = any free slot) so
     /// llama.cpp does not evict the main conversation's KV-cache in slot 0.
     pub async fn complete(&self, messages: &[Message]) -> Result<String> {
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "model": self.model,
             "messages": messages,
             "max_tokens": 512,
             "temperature": 0.3,
             "stream": false,
-            "cache_prompt": false,
-            "slot_id": self.background_slot_id,
         });
+        if self.llama_extensions {
+            payload["cache_prompt"] = serde_json::json!(false);
+            payload["slot_id"] = serde_json::json!(self.background_slot_id);
+        }
 
         let response = self
             .client
@@ -302,15 +317,17 @@ impl LlamaClient {
     ///
     /// Sends `slot_id: background_slot_id` so it does not evict the main slot.
     pub async fn complete_short(&self, messages: &[Message]) -> Result<String> {
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "model": self.model,
             "messages": messages,
             "max_tokens": 256,
             "temperature": 0.1,
             "stream": false,
-            "cache_prompt": false,
-            "slot_id": self.background_slot_id,
         });
+        if self.llama_extensions {
+            payload["cache_prompt"] = serde_json::json!(false);
+            payload["slot_id"] = serde_json::json!(self.background_slot_id);
+        }
 
         let response = self
             .client
@@ -336,15 +353,17 @@ impl LlamaClient {
     /// llama.cpp starts computing KV vectors while Whisper STT runs in parallel.
     /// The caller aborts the spawned task as soon as the transcript is ready.
     pub async fn prefill_warm(&self, messages: Vec<serde_json::Value>) -> Result<()> {
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "model": self.model,
             "messages": messages,
             "max_tokens": 1,
             "temperature": self.temperature,
             "stream": true,
-            "cache_prompt": true,
-            "slot_id": self.slot_id,
         });
+        if self.llama_extensions {
+            payload["cache_prompt"] = serde_json::json!(true);
+            payload["slot_id"] = serde_json::json!(self.slot_id);
+        }
 
         let response = self
             .client
