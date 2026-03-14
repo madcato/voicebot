@@ -31,7 +31,7 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::llm::{LlamaClient, LlmSession, StreamToken};
 use crate::profile::{build_profile_context, extract_facts, ProfileFact};
-use crate::stt::WhisperStt;
+use crate::stt::{WhisperStt, SttStream};
 use whisper_rs::install_logging_hooks;
 use crate::tools::{
     format_history, CalendarCreateTool, CalendarGetEventsTool, CurrentTimeTool,
@@ -193,6 +193,9 @@ async fn main() -> Result<()> {
     })
     .await??;
     let stt = Arc::new(stt);
+    // Always-running STT: Whisper starts as soon as the user begins speaking
+    // so the result is ready (or nearly ready) when VAD fires SpeechEnd.
+    let stt_stream = SttStream::new(Arc::clone(&stt));
 
     // ── Speaker verifier ──────────────────────────────────────────────────────
     let mut speaker_verifier: Option<SpeakerVerifier> =
@@ -277,6 +280,10 @@ async fn main() -> Result<()> {
     let mut speech_buffer = AudioBuffer::new(source_sample_rate, MAX_SPEECH_BUFFER_SECS);
     let mut pre_roll: VecDeque<Vec<f32>> = VecDeque::with_capacity(PRE_ROLL_CHUNKS + 1);
     let mut t_speech_start: Option<Instant> = None;
+    // Tracks how many ms of audio were in the buffer the last time we submitted to SttStream.
+    let mut last_stt_submit_ms: u32 = 0;
+    // Sequence number of the last STT submission (updated in Silence to give worker a head start).
+    let mut last_stt_gen: u64 = 0;
 
     // ── Barge-in state ────────────────────────────────────────────────────────
     let cancel = Arc::new(AtomicBool::new(false));
@@ -388,6 +395,8 @@ async fn main() -> Result<()> {
                     VadResult::SpeechStart => {
                         t_speech_start = Some(Instant::now());
                         info!(target: "performance", "[+0ms] SpeechStart");
+                        last_stt_submit_ms = 0;
+                        last_stt_gen = 0;
                         // ── Barge-in ─────────────────────────────────────────
                         if let Some(h) = pipeline_handle.take() {
                             info!(target: "pipeline", "Barge-in detected — cancelling active pipeline");
@@ -399,9 +408,19 @@ async fn main() -> Result<()> {
                             speech_buffer.push(&pre);
                         }
                         speech_buffer.push(&mono);
+
+                        // Kick off the first Whisper run immediately on pre-roll + first frame.
+                        stt_stream.submit(speech_buffer.get_samples());
+                        last_stt_submit_ms = speech_buffer.duration_ms() as u32;
                     }
                     VadResult::Speech => {
                         speech_buffer.push(&mono);
+                        // Submit a new snapshot every 500ms of new audio.
+                        let buf_ms = speech_buffer.duration_ms() as u32;
+                        if buf_ms.saturating_sub(last_stt_submit_ms) >= 500 {
+                            stt_stream.submit(speech_buffer.get_samples());
+                            last_stt_submit_ms = buf_ms;
+                        }
                     }
                     VadResult::SpeechEnd => {
                         let t_speech_end = Instant::now();
@@ -448,8 +467,18 @@ async fn main() -> Result<()> {
 
                         cancel.store(false, Ordering::SeqCst);
 
+                        // Use the seq submitted at the first Silence frame (head start),
+                        // or submit now if Silence never fired (very short VAD countdown).
+                        let min_stt_gen = if last_stt_gen > 0 {
+                            last_stt_gen
+                        } else {
+                            stt_stream.submit(audio)
+                        };
+                        last_stt_submit_ms = 0;
+                        last_stt_gen = 0;
+
                         let cancel_c           = Arc::clone(&cancel);
-                        let stt_c              = Arc::clone(&stt);
+                        let stt_stream_c       = Arc::clone(&stt_stream);
                         let tts_c              = Arc::clone(&tts);
                         let audio_out_c        = Arc::clone(&audio_output);
                         let llm_session_c      = Arc::clone(&llm_session);
@@ -463,9 +492,9 @@ async fn main() -> Result<()> {
 
                         pipeline_handle = Some(tokio::spawn(async move {
                             run_pipeline(
-                                audio,
+                                min_stt_gen,
+                                stt_stream_c,
                                 cancel_c,
-                                stt_c,
                                 tts_c,
                                 audio_out_c,
                                 llm_session_c,
@@ -487,6 +516,14 @@ async fn main() -> Result<()> {
                         pre_roll.push_back(mono);
                         if pre_roll.len() > PRE_ROLL_CHUNKS {
                             pre_roll.pop_front();
+                        }
+                        // On the first silence frame after speech: submit the complete
+                        // audio snapshot immediately so the Whisper worker gets a head
+                        // start during the VAD silence countdown (~500ms).
+                        let buf_ms = speech_buffer.duration_ms() as u32;
+                        if buf_ms >= MIN_SPEECH_DURATION_MS && last_stt_submit_ms < buf_ms {
+                            last_stt_gen = stt_stream.submit(speech_buffer.get_samples());
+                            last_stt_submit_ms = buf_ms;
                         }
                     }
                 }
@@ -659,9 +696,9 @@ const MAX_TOOL_ITERATIONS: usize = 5;
 
 /// Full STT → LLM → (tools →)* TTS pipeline for a single utterance.
 async fn run_pipeline(
-    audio: Vec<f32>,
+    min_stt_gen: u64,
+    stt_stream: Arc<SttStream>,
     cancel: Arc<AtomicBool>,
-    stt: Arc<WhisperStt>,
     tts: Arc<TtsEngine>,
     audio_output: Arc<AudioOutput>,
     llm_session: Arc<Mutex<LlmSession>>,
@@ -707,25 +744,23 @@ async fn run_pipeline(
     };
 
     // ── STT ───────────────────────────────────────────────────────────────────
-    info!(target: "performance", "[+{}ms] STT start", t_prev.elapsed().as_millis());
+    // Whisper has been running in the background since SpeechStart.
+    // We simply wait for the result for the final audio snapshot.
+    info!(target: "performance", "[+{}ms] STT wait", t_prev.elapsed().as_millis());
     t_prev = Instant::now();
-    let transcript = match tokio::task::spawn_blocking(move || stt.transcribe(&audio)).await {
-        Ok(Ok(t)) => t,
-        Ok(Err(e)) => { error!(target: "stt", "STT error: {}", e); spec_handle.abort(); return; }
-        Err(e)     => { error!(target: "stt", "STT task panicked: {}", e); spec_handle.abort(); return; }
-    };
-    info!(target: "performance", "[+{}ms] STT end", t_prev.elapsed().as_millis());
+    let transcript = stt_stream.await_result(min_stt_gen).await;
+    info!(target: "performance", "[+{}ms] STT ready", t_prev.elapsed().as_millis());
     t_prev = Instant::now();
 
-    // Wait briefly for speculative prefill to finish cleanly (max_tokens=1 means
-    // it completes in ~200ms for typical histories). A clean finish lets llama.cpp
-    // release the slot without cleanup delay; abort only if still running after window.
+    // Wait for speculative prefill to finish cleanly if it's nearly done.
+    // Since STT result may arrive fast (streaming), the prefill may still be running;
+    // give it up to 20ms extra before aborting to avoid slot-cleanup delay.
     tokio::select! {
         _ = &mut spec_handle => {
             debug!(target: "llm", "Speculative prefill completed cleanly");
         }
-        _ = tokio::time::sleep(std::time::Duration::from_millis(80)) => {
-            debug!(target: "llm", "Speculative prefill still running after STT — aborting");
+        _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
+            debug!(target: "llm", "Speculative prefill still running — aborting");
             spec_handle.abort();
             let _ = spec_handle.await;
         }
