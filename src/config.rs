@@ -104,6 +104,18 @@ pub struct Config {
     /// Cosine similarity threshold [0..1] (SPEAKER_SIMILARITY_MIN, default 0.45).
     pub speaker_similarity_min: f32,
 
+    // ── Conversation mode (ambient state machine) ─────────────────────────────
+    /// Wake word that triggers a response in Ambient mode (WAKE_WORD, default "jarvis").
+    /// Case-insensitive substring match against the STT transcript.
+    pub wake_word: String,
+    /// Seconds in Ambient mode with no speech before auto-returning to Active
+    /// (AMBIENT_CLEAR_SECS, default 300).
+    pub ambient_clear_secs: u64,
+    /// Consecutive non-enrolled-speaker VAD segments before auto-switching to
+    /// Ambient mode (SPEAKER_AMBIENT_TRIGGER, default 3). Only applies when
+    /// speaker verification is enabled.
+    pub speaker_ambient_trigger: u8,
+
     // ── Persistence ───────────────────────────────────────────────────────────
     pub db_path: String,
 }
@@ -254,6 +266,19 @@ impl Config {
                 .unwrap_or_else(|_| "0.45".to_string())
                 .parse()
                 .context("Invalid SPEAKER_SIMILARITY_MIN")?,
+
+            // Conversation mode
+            wake_word: env::var("WAKE_WORD")
+                .unwrap_or_else(|_| "jarvis".to_string())
+                .to_lowercase(),
+            ambient_clear_secs: env::var("AMBIENT_CLEAR_SECS")
+                .unwrap_or_else(|_| "300".to_string())
+                .parse()
+                .context("Invalid AMBIENT_CLEAR_SECS")?,
+            speaker_ambient_trigger: env::var("SPEAKER_AMBIENT_TRIGGER")
+                .unwrap_or_else(|_| "3".to_string())
+                .parse()
+                .context("Invalid SPEAKER_AMBIENT_TRIGGER")?,
 
             // DB
             db_path: env::var("DB_PATH")

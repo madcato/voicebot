@@ -34,9 +34,10 @@ use crate::profile::{build_profile_context, extract_facts, ProfileFact};
 use crate::stt::{WhisperStt, SttStream};
 use whisper_rs::install_logging_hooks;
 use crate::tools::{
-    format_history, CalendarCreateTool, CalendarGetEventsTool, CurrentTimeTool,
-    OpenAppTool, ReadClipboardTool, ReadFileTool, RunAgentAsyncTool, RunShellTool,
-    SendNotificationTool, SetClipboardTool, TakeScreenshotTool, ToolRegistry,
+    format_history, CalendarCreateTool, CalendarGetEventsTool, ConversationMode,
+    CurrentTimeTool, OpenAppTool, ReadClipboardTool, ReadFileTool, RunAgentAsyncTool,
+    RunShellTool, SendNotificationTool, SetClipboardTool, SetConversationModeTool,
+    TakeScreenshotTool, ToolRegistry,
 };
 use crate::tts::{SayTts, SentenceSplitter, TtsEngine};
 #[cfg(feature = "kokoro")]
@@ -83,6 +84,10 @@ async fn main() -> Result<()> {
     let shared_history: Arc<RwLock<String>> = Arc::new(RwLock::new(String::new()));
     let mut tool_registry = ToolRegistry::new();
 
+    // ── Conversation mode shared state ────────────────────────────────────────
+    // Shared between the VAD loop (reads it) and SetConversationModeTool (writes it).
+    let conv_mode: Arc<Mutex<ConversationMode>> = Arc::new(Mutex::new(ConversationMode::Active));
+
     // Always available
     tool_registry.register(CurrentTimeTool);
     tool_registry.register(CalendarGetEventsTool);
@@ -92,6 +97,7 @@ async fn main() -> Result<()> {
     tool_registry.register(ReadFileTool);
     tool_registry.register(OpenAppTool);
     tool_registry.register(SendNotificationTool);
+    tool_registry.register(SetConversationModeTool::new(Arc::clone(&conv_mode)));
 
     // Shell — enabled via SHELL_ENABLED=1
     if config.shell_enabled {
@@ -285,6 +291,13 @@ async fn main() -> Result<()> {
     // Sequence number of the last STT submission (updated in Silence to give worker a head start).
     let mut last_stt_gen: u64 = 0;
 
+    // ── Ambient state machine ─────────────────────────────────────────────────
+    // Counts consecutive VAD segments where the speaker was NOT the enrolled user.
+    // When it reaches config.speaker_ambient_trigger the bot silently switches to Ambient.
+    let mut non_user_streak: u8 = 0;
+    // Tracks when speech last arrived; used to auto-return from Ambient to Active.
+    let mut last_speech_at: Instant = Instant::now();
+
     // ── Barge-in state ────────────────────────────────────────────────────────
     let cancel = Arc::new(AtomicBool::new(false));
     let mut pipeline_handle: Option<tokio::task::JoinHandle<()>> = None;
@@ -397,6 +410,7 @@ async fn main() -> Result<()> {
                         info!(target: "performance", "[+0ms] SpeechStart");
                         last_stt_submit_ms = 0;
                         last_stt_gen = 0;
+                        last_speech_at = Instant::now();
                         // ── Barge-in ─────────────────────────────────────────
                         if let Some(h) = pipeline_handle.take() {
                             info!(target: "pipeline", "Barge-in detected — cancelling active pipeline");
@@ -440,25 +454,49 @@ async fn main() -> Result<()> {
                             .map(|t| t.elapsed().as_millis()).unwrap_or(0);
                         info!(target: "performance", "[+{}ms] VAD end ({}ms speech)", vad_elapsed, duration_ms);
 
+                        last_speech_at = Instant::now();
+
                         // ── Speaker verification ──────────────────────────────
                         if let Some(ref mut sv) = speaker_verifier {
                             match sv.verify(config.sample_rate, &audio) {
                                 SpeakerVerdict::Enrolled => {
                                     info!(target: "speaker", "Main speaker enrolled — processing utterance");
+                                    non_user_streak = 0;
                                 }
                                 SpeakerVerdict::IsMainSpeaker { similarity } => {
                                     debug!(target: "speaker", "Speaker verified (similarity={similarity:.3})");
+                                    non_user_streak = 0;
                                 }
                                 SpeakerVerdict::OtherSpeaker { similarity } => {
+                                    non_user_streak = non_user_streak.saturating_add(1);
                                     info!(
                                         target: "speaker",
-                                        "Unknown speaker (similarity={similarity:.3}) — discarding"
+                                        "Unknown speaker (similarity={similarity:.3}) — discarding \
+                                         (streak={non_user_streak}/{})",
+                                        config.speaker_ambient_trigger
                                     );
+                                    if non_user_streak >= config.speaker_ambient_trigger {
+                                        let mut mode = conv_mode.lock().unwrap();
+                                        if *mode == ConversationMode::Active {
+                                            *mode = ConversationMode::Ambient;
+                                            info!(
+                                                target: "pipeline",
+                                                "Ambient mode: {} consecutive non-user voices — switching automatically",
+                                                non_user_streak
+                                            );
+                                        }
+                                    }
                                     vad.reset();
                                     continue;
                                 }
                             }
                         }
+
+                        // ── Ambient mode: require wake word in transcript ──────
+                        // We pass the current mode to run_pipeline; it checks
+                        // after STT whether the transcript contains the wake word.
+                        let ambient = *conv_mode.lock().unwrap() == ConversationMode::Ambient;
+                        let wake_word = config.wake_word.clone();
 
                         if let Some(h) = pipeline_handle.take() {
                             cancel.store(true, Ordering::SeqCst);
@@ -508,6 +546,8 @@ async fn main() -> Result<()> {
                                 keep_turns,
                                 inject_system_data,
                                 t_speech_end,
+                                ambient,
+                                wake_word,
                             )
                             .await;
                         }));
@@ -524,6 +564,21 @@ async fn main() -> Result<()> {
                         if buf_ms >= MIN_SPEECH_DURATION_MS && last_stt_submit_ms < buf_ms {
                             last_stt_gen = stt_stream.submit(speech_buffer.get_samples());
                             last_stt_submit_ms = buf_ms;
+                        }
+                        // Auto-return to Active after AMBIENT_CLEAR_SECS of no speech.
+                        {
+                            let mut mode = conv_mode.lock().unwrap();
+                            if *mode == ConversationMode::Ambient
+                                && last_speech_at.elapsed().as_secs() >= config.ambient_clear_secs
+                            {
+                                *mode = ConversationMode::Active;
+                                non_user_streak = 0;
+                                info!(
+                                    target: "pipeline",
+                                    "Ambient mode: {}s of silence elapsed — returning to Active",
+                                    config.ambient_clear_secs
+                                );
+                            }
                         }
                     }
                 }
@@ -712,6 +767,9 @@ async fn run_pipeline(
     summary_keep_turns: usize,
     inject_system_data: bool,
     t_speech_end: Instant,
+    // If true, discard the utterance unless the transcript contains `wake_word`.
+    ambient: bool,
+    wake_word: String,
 ) {
     macro_rules! check_cancel {
         () => {
@@ -771,6 +829,23 @@ async fn run_pipeline(
     if transcript.is_empty() {
         debug!(target: "stt", "Empty transcript, skipping");
         return;
+    }
+
+    // ── Ambient mode: wake word gate ──────────────────────────────────────────
+    // In Ambient mode the bot only responds when the transcript contains the
+    // configured wake word (case-insensitive substring match).
+    if ambient {
+        let lower = transcript.to_lowercase();
+        if lower.contains(&wake_word) {
+            info!(target: "pipeline", "Ambient: wake word '{}' detected — processing", wake_word);
+        } else {
+            debug!(
+                target: "pipeline",
+                "Ambient: no wake word '{}' in transcript — discarding: {:?}",
+                wake_word, transcript
+            );
+            return;
+        }
     }
 
     info!(target: "pipeline", "User: {}", transcript);

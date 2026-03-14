@@ -1,5 +1,6 @@
 pub mod calendar;
 pub mod clipboard;
+pub mod conversation_mode;
 pub mod current_time;
 pub mod open_app;
 pub mod read_file;
@@ -14,6 +15,7 @@ use async_trait::async_trait;
 
 pub use calendar::{CalendarCreateTool, CalendarGetEventsTool};
 pub use clipboard::{ReadClipboardTool, SetClipboardTool};
+pub use conversation_mode::{ConversationMode, SetConversationModeTool};
 pub use current_time::CurrentTimeTool;
 pub use open_app::OpenAppTool;
 pub use read_file::ReadFileTool;
