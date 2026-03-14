@@ -375,7 +375,33 @@ Recommended models for voicebot (low latency + Spanish support):
 | `mlx-community/Qwen2.5-14B-Instruct-4bit` | ~8 GB | Better quality, still fast on M4 Pro |
 | `mlx-community/Qwen3-8B-4bit` | ~5 GB | Latest architecture; `<think>` blocks auto-stripped |
 
-### Benchmarking providers (`scripts/bench-llama.sh` / `scripts/bench-mlx.sh`)
+### Real-server KV-cache benchmark (`scripts/bench-server.py`)
+
+The most realistic benchmark: starts each server, warms its KV cache with a
+multi-turn conversation, then measures **only the final turn** — the hot-cache
+scenario that governs real voicebot latency.
+
+```sh
+python3 scripts/bench-server.py <llama-model.gguf> <mlx-model-or-hf-repo>
+
+# Example
+python3 scripts/bench-server.py \
+  ./models/Qwen2.5-7B-Q4_K_M.gguf \
+  mlx-community/Qwen2.5-7B-Instruct-4bit
+
+# Env overrides
+BENCH_TRIALS=5 BENCH_GEN=100 python3 scripts/bench-server.py ...
+```
+
+The script: starts llama.cpp → warms cache with full prompt (history + question)
+→ measures N trials of pure generation from hot cache → stops llama.cpp →
+repeats with mlx-lm → prints comparison with verdict and KV-cache health warning.
+
+Metrics: **TTFT** (ms, time to first spoken word) and **TG** (t/s, sentence
+completion speed). Both servers are configured to match their production
+`start-*.sh` scripts.
+
+### Cold-inference benchmarks (`scripts/bench-llama.sh` / `scripts/bench-mlx.sh`)
 
 Compare llama.cpp and mlx-lm under voicebot-realistic workloads:
 

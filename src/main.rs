@@ -960,22 +960,22 @@ async fn run_pipeline(
                 maybe_summarize(&llm_session_c, &llm_client_c, &db_c, session_id, context_tokens, summary_keep_turns).await;
             });
         }
-        {
-            let llm_client_c = llm_client.clone();
-            let db_c         = db.clone();
-            let transcript_c = transcript.clone();
-            let response_c   = final_response.clone();
-            tokio::spawn(async move {
-                let facts = extract_facts(&llm_client_c, &transcript_c, &response_c).await;
-                for fact in facts {
-                    if let Err(e) = db_c.upsert_profile_fact(&fact.key, &fact.value, fact.confidence).await {
-                        warn!(target: "profile", "Failed to save profile fact '{}': {}", fact.key, e);
-                    } else {
-                        debug!(target: "profile", "Profile: {} = {} ({:.0}%)", fact.key, fact.value, fact.confidence * 100.0);
-                    }
-                }
-            });
-        }
+        // {
+        //     let llm_client_c = llm_client.clone();
+        //     let db_c         = db.clone();
+        //     let transcript_c = transcript.clone();
+        //     let response_c   = final_response.clone();
+        //     tokio::spawn(async move {
+        //         let facts = extract_facts(&llm_client_c, &transcript_c, &response_c).await;
+        //         for fact in facts {
+        //             if let Err(e) = db_c.upsert_profile_fact(&fact.key, &fact.value, fact.confidence).await {
+        //                 warn!(target: "profile", "Failed to save profile fact '{}': {}", fact.key, e);
+        //             } else {
+        //                 debug!(target: "profile", "Profile: {} = {} ({:.0}%)", fact.key, fact.value, fact.confidence * 100.0);
+        //             }
+        //         }
+        //     });
+        // }
 
         // ── Await last TTS sentence — keeps pipeline_handle alive for barge-in ─
         if let Some(h) = last_play {

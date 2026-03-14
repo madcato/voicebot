@@ -82,7 +82,7 @@ exec llama-server \
     --cache-type-v q4_0 \
     --flash-attn on \
     --mlock \
-    --parallel 2 \
+    --parallel 1 \
     --repeat-penalty 1.1 \
     --temp 0.6 \
     --reasoning-budget 0 \
