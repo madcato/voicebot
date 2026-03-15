@@ -92,6 +92,7 @@ exec $RUNNER server \
   --prefill-step-size  "$PREFILL_STEP" \
   --max-tokens     "$MAX_TOKENS" \
   --temp           "$TEMPERATURE" \
+  --chat-template-args '{"enable_thinking": false}' \
   --log-level      INFO
 
 # exec $RUNNER benchmark \

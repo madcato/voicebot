@@ -170,6 +170,16 @@ impl LlamaClient {
             // llama.cpp extensions: reuse the KV-cache across turns for this slot.
             payload["cache_prompt"] = serde_json::json!(true);
             payload["slot_id"] = serde_json::json!(self.slot_id);
+        } else {
+            // mlx-lm + Qwen3: disable thinking mode so the model responds directly
+            // without <think>…</think> blocks that ThinkFilter would strip entirely.
+            // Some mlx-lm versions read the top-level field; others need it inside
+            // chat_template_kwargs. Send both to cover all versions.
+            payload["enable_thinking"] = serde_json::json!(false);
+            payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
+            // Prevent the model from looping (repeating sentences). mlx-lm uses
+            // `repetition_penalty`; llama.cpp uses --repeat-penalty in the server args.
+            payload["repetition_penalty"] = serde_json::json!(1.1);
         }
         if !tools.is_empty() {
             payload["tools"] = serde_json::json!(tools);
@@ -219,6 +229,7 @@ impl LlamaClient {
 
                     let Some(data) = line.strip_prefix("data: ") else { continue };
 
+
                     if data == "[DONE]" {
                         // Flush any content held back for partial-tag detection.
                         if let Some(tail) = think.flush() {
@@ -249,18 +260,22 @@ impl LlamaClient {
                     }
 
                     // Accumulate tool_calls fragments.
+                    // Guard: mlx-lm always sends `"tool_calls": []` on content chunks;
+                    // only treat it as a tool call when the array is non-empty.
                     if let Some(calls) = json["choices"][0]["delta"]["tool_calls"].as_array() {
-                        if let Some(call) = calls.first() {
-                            if let Some(name) = call["function"]["name"].as_str() {
-                                if !name.is_empty() {
-                                    tool_name = Some(name.to_string());
+                        if !calls.is_empty() {
+                            if let Some(call) = calls.first() {
+                                if let Some(name) = call["function"]["name"].as_str() {
+                                    if !name.is_empty() {
+                                        tool_name = Some(name.to_string());
+                                    }
+                                }
+                                if let Some(frag) = call["function"]["arguments"].as_str() {
+                                    tool_args.push_str(frag);
                                 }
                             }
-                            if let Some(frag) = call["function"]["arguments"].as_str() {
-                                tool_args.push_str(frag);
-                            }
+                            continue; // tool_calls and content are mutually exclusive
                         }
-                        continue; // tool_calls and content are mutually exclusive
                     }
 
                     // Regular content token.
@@ -363,6 +378,9 @@ impl LlamaClient {
         if self.llama_extensions {
             payload["cache_prompt"] = serde_json::json!(true);
             payload["slot_id"] = serde_json::json!(self.slot_id);
+        } else {
+            payload["enable_thinking"] = serde_json::json!(false);
+            payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
         }
 
         let response = self
@@ -383,6 +401,12 @@ impl LlamaClient {
         let mut stream = response.bytes_stream();
         while stream.next().await.is_some() {}
         Ok(())
+    }
+
+    /// Returns true if the backend supports speculative KV-cache prefill.
+    /// Only llama.cpp (`cache_prompt=true` + `slot_id`) benefits from this.
+    pub fn supports_prefill_warm(&self) -> bool {
+        self.llama_extensions
     }
 
     /// Check if the server is reachable.

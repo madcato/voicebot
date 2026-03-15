@@ -12,11 +12,15 @@ mod tts;
 use anyhow::Result;
 use async_channel::bounded;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
+
+/// Monotonically increasing counter for tagging each pipeline run with a unique ID.
+/// Lets us detect if two pipelines are active simultaneously in logs.
+static PIPELINE_RUN_ID: AtomicU64 = AtomicU64::new(0);
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -504,6 +508,13 @@ async fn main() -> Result<()> {
                         if let Some(h) = pipeline_handle.take() {
                             cancel.store(true, Ordering::SeqCst);
                             h.abort();
+                            // The CPAL audio callback runs every ~10ms. Give it at
+                            // least two callback periods to see cancel=true and stop
+                            // the spawn_blocking play_blocking thread (which abort()
+                            // cannot cancel directly). Without this pause, cancel is
+                            // reset to false before the callback fires and the old
+                            // audio keeps playing alongside the new pipeline's TTS.
+                            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                         }
 
                         cancel.store(false, Ordering::SeqCst);
@@ -617,6 +628,7 @@ async fn stream_and_tts(
     audio_output: &Arc<AudioOutput>,
     tts_sample_rate: u32,
     t_llm_start: Instant,
+    pipeline_id: u64,
 ) -> (String, Option<(String, String)>, Option<tokio::task::JoinHandle<anyhow::Result<()>>>) {
     let mut sentence_buf = SentenceSplitter::new();
     let mut full_response = String::new();
@@ -641,6 +653,7 @@ async fn stream_and_tts(
     let mut t_prev = t_llm_start;
     let mut first_sentence = true;
     let mut first_token_seen = false;
+    let mut sentence_idx: u32 = 0;
 
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -687,7 +700,8 @@ async fn stream_and_tts(
                 return (full_response, None, None);
             }
 
-            info!(target: "tts", "TTS: {:?}", sentence);
+            info!(target: "tts", "[pipe={}] TTS sentence {}: {:?}", pipeline_id, sentence_idx, sentence);
+            sentence_idx += 1;
 
             // ── Start synthesis immediately (runs while previous sentence plays) ──
             if first_sentence {
@@ -730,8 +744,12 @@ async fn stream_and_tts(
             // ── Start playback without awaiting — next sentence can synthesise now ─
             let out_c = Arc::clone(audio_output);
             let cancel_c = Arc::clone(cancel);
+            let n_samples = samples.len();
+            debug!(target: "tts", "[pipe={}] play_blocking start: {} samples", pipeline_id, n_samples);
             play_handle = Some(tokio::task::spawn_blocking(move || {
-                out_c.play_blocking(&samples, tts_sample_rate, &cancel_c)
+                let r = out_c.play_blocking(&samples, tts_sample_rate, &cancel_c);
+                debug!(target: "tts", "[pipe={}] play_blocking done: {} samples", pipeline_id, n_samples);
+                r
             }));
         }
 
@@ -771,10 +789,13 @@ async fn run_pipeline(
     ambient: bool,
     wake_word: String,
 ) {
+    let pipeline_id = PIPELINE_RUN_ID.fetch_add(1, Ordering::SeqCst);
+    info!(target: "pipeline", "[pipe={}] run_pipeline START", pipeline_id);
+
     macro_rules! check_cancel {
         () => {
             if cancel.load(Ordering::SeqCst) {
-                debug!(target: "pipeline", "Pipeline cancelled");
+                debug!(target: "pipeline", "[pipe={}] Pipeline cancelled", pipeline_id);
                 return;
             }
         };
@@ -783,14 +804,18 @@ async fn run_pipeline(
     let mut t_prev = t_speech_end;
 
     // ── Speculative KV-cache warm-up — runs in parallel with STT ──────────────
-    // Fire a 1-token streaming request with the current session messages so
-    // llama.cpp starts computing KV vectors while Whisper transcribes audio.
-    // Aborted as soon as STT is done; the partial cache is kept by the server.
-    let spec_msgs = llm_session.lock().unwrap().all_messages_api();
+    // Only for llama.cpp: fire a 1-token streaming request so the server starts
+    // computing KV vectors while Whisper transcribes. mlx-lm manages its own
+    // prefix cache internally and does not benefit from this; sending an extra
+    // request would also lock the GPU and cause a BrokenPipe when aborted.
+    let use_prefill = llm_client.supports_prefill_warm();
+    let spec_msgs = if use_prefill { llm_session.lock().unwrap().all_messages_api() } else { vec![] };
     let spec_client = llm_client.clone();
     let mut spec_handle = tokio::spawn(async move {
-        if let Err(e) = spec_client.prefill_warm(spec_msgs).await {
-            debug!(target: "llm", "Speculative prefill ended: {e}");
+        if use_prefill {
+            if let Err(e) = spec_client.prefill_warm(spec_msgs).await {
+                debug!(target: "llm", "Speculative prefill ended: {e}");
+            }
         }
     });
 
@@ -808,12 +833,14 @@ async fn run_pipeline(
     // give it up to 20ms extra before aborting to avoid slot-cleanup delay.
     tokio::select! {
         _ = &mut spec_handle => {
-            debug!(target: "llm", "Speculative prefill completed cleanly");
+            if use_prefill { debug!(target: "llm", "Speculative prefill completed cleanly"); }
         }
         _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
-            debug!(target: "llm", "Speculative prefill still running — aborting");
-            spec_handle.abort();
-            let _ = spec_handle.await;
+            if use_prefill {
+                debug!(target: "llm", "Speculative prefill still running — aborting");
+                spec_handle.abort();
+                let _ = spec_handle.await;
+            }
         }
     }
 
@@ -894,7 +921,7 @@ async fn run_pipeline(
             };
 
             let (llm_text, tool_call, play) =
-                stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, t_llm_start).await;
+                stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, t_llm_start, pipeline_id).await;
 
             if cancel.load(Ordering::SeqCst) {
                 if let Some(h) = play { h.abort(); }
@@ -937,6 +964,7 @@ async fn run_pipeline(
         }
 
         if final_response.is_empty() {
+            warn!(target: "pipeline", "LLM returned empty response — possible think-only output being stripped by ThinkFilter");
             break 'pipeline;
         }
 
@@ -990,8 +1018,9 @@ async fn run_pipeline(
     // ── Roll back session if cancelled before commit ───────────────────────────
     if !committed && cancel.load(Ordering::SeqCst) {
         llm_session.lock().unwrap().messages = messages_snapshot;
-        info!(target: "pipeline", "Pipeline cancelled — session rolled back");
+        info!(target: "pipeline", "[pipe={}] Pipeline cancelled — session rolled back", pipeline_id);
     }
+    info!(target: "pipeline", "[pipe={}] run_pipeline END", pipeline_id);
 }
 
 /// Summarize old conversation turns if the prompt is approaching the context limit.
@@ -1128,7 +1157,7 @@ async fn run_text_pipeline(
         };
 
         let (llm_text, tool_call, play) =
-            stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, t_llm_start).await;
+            stream_and_tts(token_rx, &cancel, &tts, &audio_output, tts_sample_rate, t_llm_start, 0).await;
 
         if cancel.load(Ordering::SeqCst) {
             if let Some(h) = play { h.abort(); }
