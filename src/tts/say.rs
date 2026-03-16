@@ -13,11 +13,12 @@ use std::process::{Command, Stdio};
 /// Planned replacement: Kokoro TTS via onnxruntime (better quality, offline model).
 pub struct SayTts {
     voice: String,
+    rate: u32,
     sample_rate: u32,
 }
 
 impl SayTts {
-    pub fn new(voice: &str) -> Result<Self> {
+    pub fn new(voice: &str, rate: u32) -> Result<Self> {
         // Validate the `say` binary is available
         Command::new("say")
             .arg("--version")
@@ -26,10 +27,11 @@ impl SayTts {
             .status()
             .context("'say' command not found — this TTS backend requires macOS")?;
 
-        tracing::info!(target: "tts", "SayTts ready: voice={:?} (22050Hz)", voice);
+        tracing::info!(target: "tts", "SayTts ready: voice={:?} rate={}wpm (22050Hz)", voice, rate);
 
         Ok(Self {
             voice: voice.to_string(),
+            rate,
             sample_rate: 22050,
         })
     }
@@ -47,7 +49,7 @@ impl SayTts {
                 &self.voice,
                 "--file-format=WAVE",
                 "--data-format=LEI16",
-                "-r", "215",
+                "-r", &self.rate.to_string(),
                 "-o",
                 tmp_path.to_str().unwrap(),
             ])

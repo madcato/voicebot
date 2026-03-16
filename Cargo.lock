@@ -2322,6 +2322,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10cbe18d879e20a4aea544f8befe38bcf52255eb63d3f23eca2842f3319e4c07"
 dependencies = [
  "bitflags 2.11.0",
+ "block2",
  "libc",
  "objc2",
  "objc2-core-audio",
@@ -2336,7 +2337,11 @@ version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bfc1d11521c211a7ebe17739fc806719da41f56c6b3f949d9861b459188ce910"
 dependencies = [
+ "bitflags 2.11.0",
+ "block2",
  "objc2",
+ "objc2-audio-toolbox",
+ "objc2-core-audio-types",
  "objc2-foundation",
 ]
 
@@ -4299,12 +4304,16 @@ dependencies = [
  "async-channel",
  "async-trait",
  "base64 0.22.1",
+ "block2",
  "chrono",
  "cpal",
  "dotenvy",
  "futures-util",
  "hound",
  "kokorox",
+ "objc2",
+ "objc2-avf-audio",
+ "objc2-foundation",
  "regex",
  "reqwest 0.12.28",
  "rubato",

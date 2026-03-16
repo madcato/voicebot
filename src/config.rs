@@ -45,10 +45,18 @@ pub struct Config {
     pub llm_temperature: f32,
 
     // ── TTS ──────────────────────────────────────────────────────────────────
-    /// TTS backend: "say" (default, macOS) or "kokoro" (--features kokoro)
+    /// TTS backend: "say" (default, macOS), "avspeech" (native AVSpeechSynthesizer,
+    /// --features avspeech), or "kokoro" (--features kokoro).
     pub tts_provider: String,
     /// macOS `say` voice name (SAY_VOICE). List with: say -v ?
     pub say_voice: String,
+    /// macOS `say` speaking rate in words per minute (SAY_RATE, default 215).
+    pub say_rate: u32,
+    /// AVSpeechSynthesizer voice display name (AVSPEECH_VOICE, default "Jorge (Enhanced)").
+    pub avspeech_voice: String,
+    /// AVSpeechSynthesizer normalized speech rate 0.0–1.0 (AVSPEECH_RATE, default 0.55).
+    /// AVSpeechUtteranceDefaultSpeechRate (0.5) ≈ 180 wpm; 0.55 ≈ 215 wpm.
+    pub avspeech_rate: f32,
     /// Path to kokoro-v1.0.onnx model file (KOKORO_MODEL)
     pub kokoro_model: String,
     /// Path to voices-v1.0.bin embeddings file (KOKORO_VOICES)
@@ -187,7 +195,17 @@ impl Config {
             tts_provider: env::var("TTS_PROVIDER")
                 .unwrap_or_else(|_| "say".to_string()),
             say_voice: env::var("SAY_VOICE")
-                .unwrap_or_else(|_| "Marisol (Enhanced)".to_string()),
+                .unwrap_or_else(|_| "Jorge (Enhanced)".to_string()),
+            say_rate: env::var("SAY_RATE")
+                .unwrap_or_else(|_| "215".to_string())
+                .parse()
+                .context("Invalid SAY_RATE")?,
+            avspeech_voice: env::var("AVSPEECH_VOICE")
+                .unwrap_or_else(|_| "Jorge (Enhanced)".to_string()),
+            avspeech_rate: env::var("AVSPEECH_RATE")
+                .unwrap_or_else(|_| "0.55".to_string())
+                .parse()
+                .context("Invalid AVSPEECH_RATE")?,
             kokoro_model: env::var("KOKORO_MODEL")
                 .unwrap_or_else(|_| "models/kokoro-v1.0.onnx".to_string()),
             kokoro_voices: env::var("KOKORO_VOICES")
