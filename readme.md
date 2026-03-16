@@ -200,6 +200,7 @@ This is a fire-and-read pattern — no JSON protocol, no shared state, no persis
 | `WHISPER_MODEL` | — | Path to `.bin` Whisper model (and `.mlmodelc` for CoreML encoder) |
 | `WHISPER_COREML` | `0` | Set to `1` to use CoreML encoder (Neural Engine); requires `.mlmodelc` alongside the `.bin` |
 | `LLM_URL` | `http://localhost:8080` | LLM server base URL. Use `http://localhost:8080` for llama.cpp, `http://localhost:8000` for mlx-lm |
+| `LLM_API_KEY` | _(empty)_ | Bearer token sent as `Authorization: Bearer <key>` on all `/v1/chat/completions` calls. Leave unset for local servers that require no auth |
 | `LLM_MODEL` | `local-model` | Model name sent in API requests |
 | `LLM_PROVIDER` | `llama` | LLM backend: `llama` (llama.cpp, default) or `mlx` (mlx-lm). Controls whether llama.cpp-specific fields (`cache_prompt`, `slot_id`) are sent |
 | `LLM_SLOT_ID` | `0` | llama.cpp KV-cache slot for this session (single-user = 0; llama provider only) |
@@ -212,7 +213,7 @@ This is a fire-and-read pattern — no JSON protocol, no shared state, no persis
 | `AGENT_URL` | — | Remote agent base URL (OpenAI-compatible). Unset = agent tools disabled |
 | `AGENT_MODEL` | `local-model` | Model name sent to agent server |
 | `AGENT_MAX_TOKENS` | `2048` | Max tokens for agent responses |
-| `TTS_PROVIDER` | `say` | TTS backend: `say` (macOS subprocess, default), `avspeech` (native AVSpeechSynthesizer, requires `--features avspeech`), or `kokoro` (requires `--features kokoro`) |
+| `TTS_PROVIDER` | `avspeech` | TTS backend: `avspeech` (native AVSpeechSynthesizer, requires `--features avspeech`, default), `say` (macOS subprocess), or `kokoro` (requires `--features kokoro`) |
 | `SAY_VOICE` | `Jorge (Enhanced)` | macOS voice name (used when `TTS_PROVIDER=say`). List voices: `say -v ?` |
 | `SAY_RATE` | `215` | Speaking rate in words per minute (used when `TTS_PROVIDER=say`) |
 | `AVSPEECH_VOICE` | `Jorge (Enhanced)` | Voice display name for AVSpeechSynthesizer (used when `TTS_PROVIDER=avspeech`). List voices: `say -v ?` |
@@ -1452,7 +1453,7 @@ For Spanish phonemisation: `KOKORO_LANGUAGE=es`. Note that the base model is pri
 ### Architecture
 
 - `TtsEngine` enum with variants `Say(SayTts)` and `Kokoro(KokoroTts)`, compiled conditionally with `#[cfg(feature = "kokoro")]`
-- `TTS_PROVIDER=say` (default) — no extra build flags needed, no espeak-ng dependency
+- `TTS_PROVIDER=avspeech` (default) — no extra build flags needed, no espeak-ng dependency
 - `TTS_PROVIDER=kokoro` + `--features kokoro` — enables Kokoro; fails with a clear message at runtime if the feature flag is missing
 - The rest of the pipeline (`stream_and_tts`, `run_pipeline`, `run_proactive_pipeline`) is backend-agnostic
 

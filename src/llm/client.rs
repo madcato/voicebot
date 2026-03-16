@@ -119,6 +119,8 @@ pub struct LlamaClient {
     /// When true, include llama.cpp-specific fields (`cache_prompt`, `slot_id`)
     /// in every request. Set to false when using mlx-lm or other backends.
     llama_extensions: bool,
+    /// Bearer token sent in `Authorization` header. Empty = no auth header.
+    api_key: String,
 }
 
 impl LlamaClient {
@@ -139,6 +141,24 @@ impl LlamaClient {
             slot_id,
             background_slot_id,
             llama_extensions: true,
+            api_key: String::new(),
+        }
+    }
+
+    /// Set the API key sent as `Authorization: Bearer <key>`.
+    pub fn with_api_key(mut self, key: &str) -> Self {
+        self.api_key = key.to_string();
+        self
+    }
+
+    /// Returns a POST request builder for the chat completions URL,
+    /// with the `Authorization` header set if an API key is configured.
+    fn post_chat(&self) -> reqwest::RequestBuilder {
+        let req = self.client.post(&self.chat_url);
+        if self.api_key.is_empty() {
+            req
+        } else {
+            req.bearer_auth(&self.api_key)
         }
     }
 
@@ -187,8 +207,7 @@ impl LlamaClient {
         }
 
         let response = self
-            .client
-            .post(&self.chat_url)
+            .post_chat()
             .json(&payload)
             .send()
             .await
@@ -310,8 +329,7 @@ impl LlamaClient {
         }
 
         let response = self
-            .client
-            .post(&self.chat_url)
+            .post_chat()
             .json(&payload)
             .send()
             .await
@@ -345,8 +363,7 @@ impl LlamaClient {
         }
 
         let response = self
-            .client
-            .post(&self.chat_url)
+            .post_chat()
             .json(&payload)
             .send()
             .await
@@ -384,8 +401,7 @@ impl LlamaClient {
         }
 
         let response = self
-            .client
-            .post(&self.chat_url)
+            .post_chat()
             .json(&payload)
             .send()
             .await
