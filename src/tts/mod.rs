@@ -3,22 +3,30 @@ pub mod say;
 pub mod sentence;
 #[cfg(feature = "kokoro")]
 pub mod kokoro;
+#[cfg(feature = "avspeech")]
+pub mod avspeech;
 
 pub use say::SayTts;
 pub use sentence::SentenceSplitter;
 #[cfg(feature = "kokoro")]
 pub use kokoro::KokoroTts;
+#[cfg(feature = "avspeech")]
+pub use avspeech::AvSpeechTts;
 
 /// Unified TTS backend.
 ///
 /// Select at startup via `TTS_PROVIDER` env var:
-/// - `"say"` (default) — macOS `say` subprocess, configured by `SAY_VOICE`
-/// - `"kokoro"` — Kokoro ONNX model; requires `--features kokoro` and espeak-ng
+/// - `"say"` (default) — macOS `say` subprocess, configured by `SAY_VOICE` / `SAY_RATE`
+/// - `"avspeech"` — Native macOS `AVSpeechSynthesizer`; requires `--features avspeech`.
+///   Configured by `AVSPEECH_VOICE` / `AVSPEECH_RATE`.
+/// - `"kokoro"` — Kokoro ONNX model; requires `--features kokoro` and espeak-ng.
 ///
-/// Both variants expose the same `synthesize` / `sample_rate` interface so the
+/// All variants expose the same `synthesize` / `sample_rate` interface so the
 /// rest of the pipeline is backend-agnostic.
 pub enum TtsEngine {
     Say(SayTts),
+    #[cfg(feature = "avspeech")]
+    AvSpeech(AvSpeechTts),
     #[cfg(feature = "kokoro")]
     Kokoro(KokoroTts),
     /// Test-only variant: captures synthesized text instead of producing audio.
@@ -31,6 +39,8 @@ impl TtsEngine {
     pub fn synthesize(&self, text: &str) -> anyhow::Result<Vec<f32>> {
         match self {
             Self::Say(t) => t.synthesize(text),
+            #[cfg(feature = "avspeech")]
+            Self::AvSpeech(t) => t.synthesize(text),
             #[cfg(feature = "kokoro")]
             Self::Kokoro(t) => t.synthesize(text),
             #[cfg(test)]
@@ -41,6 +51,8 @@ impl TtsEngine {
     pub fn sample_rate(&self) -> u32 {
         match self {
             Self::Say(t) => t.sample_rate(),
+            #[cfg(feature = "avspeech")]
+            Self::AvSpeech(t) => t.sample_rate(),
             #[cfg(feature = "kokoro")]
             Self::Kokoro(t) => t.sample_rate(),
             #[cfg(test)]

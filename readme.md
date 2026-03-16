@@ -212,8 +212,11 @@ This is a fire-and-read pattern — no JSON protocol, no shared state, no persis
 | `AGENT_URL` | — | Remote agent base URL (OpenAI-compatible). Unset = agent tools disabled |
 | `AGENT_MODEL` | `local-model` | Model name sent to agent server |
 | `AGENT_MAX_TOKENS` | `2048` | Max tokens for agent responses |
-| `TTS_PROVIDER` | `say` | TTS backend: `say` (macOS, default) or `kokoro` (requires `--features kokoro`) |
-| `SAY_VOICE` | `Marisol (Enhanced)` | macOS voice name (used when `TTS_PROVIDER=say`). List voices: `say -v ?` |
+| `TTS_PROVIDER` | `say` | TTS backend: `say` (macOS subprocess, default), `avspeech` (native AVSpeechSynthesizer, requires `--features avspeech`), or `kokoro` (requires `--features kokoro`) |
+| `SAY_VOICE` | `Jorge (Enhanced)` | macOS voice name (used when `TTS_PROVIDER=say`). List voices: `say -v ?` |
+| `SAY_RATE` | `215` | Speaking rate in words per minute (used when `TTS_PROVIDER=say`) |
+| `AVSPEECH_VOICE` | `Jorge (Enhanced)` | Voice display name for AVSpeechSynthesizer (used when `TTS_PROVIDER=avspeech`). List voices: `say -v ?` |
+| `AVSPEECH_RATE` | `0.55` | Normalized speech rate 0.0–1.0 for AVSpeechSynthesizer (`0.5` = default ≈ 180 wpm, `0.55` ≈ 215 wpm) |
 | `KOKORO_MODEL` | `models/kokoro-v1.0.onnx` | Path to Kokoro ONNX model file |
 | `KOKORO_VOICES` | `models/voices-v1.0.bin` | Path to Kokoro voice embeddings file |
 | `KOKORO_VOICE` | `af_bella` | Kokoro voice style name (see available voices via `get_available_voices`) |

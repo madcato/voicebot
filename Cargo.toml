@@ -69,9 +69,23 @@ kokorox = { version = "0.1", optional = true }
 # Requires: models/speaker_embedding.onnx (sherpa-onnx speaker-id model)
 sherpa-rs = { version = "0.6.8", optional = true }
 
+# TTS — macOS AVSpeechSynthesizer native bindings (optional, enable with: cargo build --features avspeech)
+# Uses objc2 for safe ObjC FFI into AVFAudio framework.
+objc2 = { version = "0.6", optional = true }
+block2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray"], optional = true }
+objc2-avf-audio = { version = "0.3.1", features = [
+    "AVSpeechSynthesis",   # AVSpeechSynthesizer, AVSpeechUtterance, AVSpeechSynthesisVoice
+    "AVAudioBuffer",       # AVAudioBuffer + AVAudioPCMBuffer
+    "AVAudioFormat",       # AVAudioFormat.sampleRate()
+    "AVAudioTypes",        # AVAudioFrameCount
+    "block2",              # DynBlock callback type for writeUtterance:toBufferCallback:
+], optional = true }
+
 [features]
 kokoro = ["dep:kokorox"]
 speaker = ["dep:sherpa-rs"]
+avspeech = ["dep:objc2", "dep:block2", "dep:objc2-foundation", "dep:objc2-avf-audio"]
 
 [dev-dependencies]
 # Mock HTTP server for LLM client integration tests

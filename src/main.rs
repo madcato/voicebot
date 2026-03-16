@@ -45,6 +45,8 @@ use crate::tools::{
 use crate::tts::{SayTts, SentenceSplitter, TtsEngine};
 #[cfg(feature = "kokoro")]
 use crate::tts::KokoroTts;
+#[cfg(feature = "avspeech")]
+use crate::tts::AvSpeechTts;
 
 #[cfg(test)]
 mod e2e_tests;
@@ -242,6 +244,20 @@ async fn main() -> Result<()> {
 
     // ── TTS ───────────────────────────────────────────────────────────────────
     let tts: TtsEngine = match config.tts_provider.as_str() {
+        #[cfg(feature = "avspeech")]
+        "avspeech" => {
+            info!(target: "tts", "TTS provider: AVSpeechSynthesizer (voice={}, rate={:.2})", config.avspeech_voice, config.avspeech_rate);
+            let voice = config.avspeech_voice.clone();
+            let rate = config.avspeech_rate;
+            let t = tokio::task::spawn_blocking(move || AvSpeechTts::new(&voice, rate)).await??;
+            TtsEngine::AvSpeech(t)
+        }
+        #[cfg(not(feature = "avspeech"))]
+        "avspeech" => {
+            anyhow::bail!(
+                "TTS_PROVIDER=avspeech requires the 'avspeech' feature: cargo run --features avspeech"
+            );
+        }
         #[cfg(feature = "kokoro")]
         "kokoro" => {
             info!(target: "tts", "TTS provider: Kokoro (voice={}, lang={})", config.kokoro_voice, config.kokoro_language);
@@ -261,9 +277,10 @@ async fn main() -> Result<()> {
             );
         }
         _ => {
-            info!(target: "tts", "TTS provider: say (voice={})", config.say_voice);
+            info!(target: "tts", "TTS provider: say (voice={}, rate={}wpm)", config.say_voice, config.say_rate);
             let say_voice = config.say_voice.clone();
-            let s = tokio::task::spawn_blocking(move || SayTts::new(&say_voice)).await??;
+            let say_rate = config.say_rate;
+            let s = tokio::task::spawn_blocking(move || SayTts::new(&say_voice, say_rate)).await??;
             TtsEngine::Say(s)
         }
     };
