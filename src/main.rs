@@ -608,19 +608,27 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Await a pending playback handle, logging any error. No-op if `None`.
+async fn drain_play(handle: &mut Option<tokio::task::JoinHandle<anyhow::Result<()>>>) {
+    if let Some(h) = handle.take() {
+        match h.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => error!(target: "audio", "Playback error: {}", e),
+            Err(e)     => error!(target: "audio", "Playback task panicked: {}", e),
+        }
+    }
+}
+
 /// Stream LLM tokens into TTS, sentence by sentence.
 ///
 /// Returns `(full_response, tool_call, last_play)`.
 /// - `tool_call`: if the LLM emitted a tool call, its text was NOT sent to TTS.
-/// - `last_play`: the still-running playback task for the last sentence, or
-///   `None` if already finished (cancelled / tool-call path). The caller is
-///   responsible for awaiting or aborting it — this allows the caller to do
-///   CPU/GPU work (DB writes, summarization) concurrently with the tail audio.
+/// - `last_play`: the still-running playback task for the last sentence. The caller
+///   should await or abort it — this lets CPU/GPU work (DB, summarization) overlap
+///   with the tail audio.
 ///
-/// Synthesis and playback are overlapped: as soon as sentence N's text is
-/// ready its synthesis starts in a blocking task, while sentence N-1 is still
-/// playing. By the time N-1 finishes (typically 1–3 s), N is already
-/// synthesised, so the gap between sentences is near zero.
+/// Synthesis and playback are overlapped: synthesis of sentence N starts while
+/// sentence N-1 is still playing, so the gap between sentences is near zero.
 async fn stream_and_tts(
     mut token_rx: mpsc::Receiver<StreamToken>,
     cancel: &Arc<AtomicBool>,
@@ -632,48 +640,27 @@ async fn stream_and_tts(
 ) -> (String, Option<(String, String)>, Option<tokio::task::JoinHandle<anyhow::Result<()>>>) {
     let mut sentence_buf = SentenceSplitter::new();
     let mut full_response = String::new();
-
-    // Playback task for the sentence that is currently playing.
-    // We hold it here so the next sentence's synthesis can run in parallel.
     let mut play_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
-
-    // Drain a finished play_handle, logging any error.
-    macro_rules! await_play {
-        ($h:expr) => {
-            if let Some(h) = $h.take() {
-                match h.await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => error!(target: "audio", "Playback error: {}", e),
-                    Err(e) => error!(target: "audio", "Playback task panicked: {}", e),
-                }
-            }
-        };
-    }
-
     let mut t_prev = t_llm_start;
-    let mut first_sentence = true;
     let mut first_token_seen = false;
+    let mut first_sentence = true;
     let mut sentence_idx: u32 = 0;
 
     loop {
-        if cancel.load(Ordering::SeqCst) {
+        if cancel.load(Ordering::Relaxed) {
             if let Some(h) = play_handle { h.abort(); }
             return (full_response, None, None);
         }
 
         let event = token_rx.recv().await;
 
-        // ── Tool call ──────────────────────────────────────────────────────────
         if let Some(StreamToken::ToolCall { name, args }) = &event {
-            await_play!(play_handle);
+            drain_play(&mut play_handle).await;
             return (full_response, Some((name.clone(), args.clone())), None);
         }
 
         let is_done = event.is_none();
-        let token = match event {
-            Some(StreamToken::Content(s)) => s,
-            _ => String::new(),
-        };
+        let token = if let Some(StreamToken::Content(s)) = event { s } else { String::new() };
 
         if !first_token_seen && !token.is_empty() {
             info!(target: "performance", "[+{}ms] LLM first token", t_prev.elapsed().as_millis());
@@ -683,19 +670,15 @@ async fn stream_and_tts(
 
         full_response.push_str(&token);
 
-        let sentences_to_play: Vec<String> = if is_done {
-            let mut v = Vec::new();
-            if let Some(s) = sentence_buf.push(&token) { v.push(s); }
-            if let Some(s) = sentence_buf.flush()      { v.push(s); }
-            v
-        } else if let Some(s) = sentence_buf.push(&token) {
-            vec![s]
-        } else {
-            vec![]
-        };
+        // Collect sentences: at most one from the mid-stream boundary, plus a flush
+        // of any remainder when the stream ends.
+        let sentences: Vec<String> = sentence_buf.push(&token)
+            .into_iter()
+            .chain(if is_done { sentence_buf.flush() } else { None })
+            .collect();
 
-        for sentence in sentences_to_play {
-            if cancel.load(Ordering::SeqCst) {
+        for sentence in sentences {
+            if cancel.load(Ordering::Relaxed) {
                 if let Some(h) = play_handle { h.abort(); }
                 return (full_response, None, None);
             }
@@ -703,32 +686,29 @@ async fn stream_and_tts(
             info!(target: "tts", "[pipe={}] TTS sentence {}: {:?}", pipeline_id, sentence_idx, sentence);
             sentence_idx += 1;
 
-            // ── Start synthesis immediately (runs while previous sentence plays) ──
             if first_sentence {
                 info!(target: "performance", "[+{}ms] TTS start", t_prev.elapsed().as_millis());
                 t_prev = Instant::now();
             }
             let t_synth = Instant::now();
+
+            // Start synthesis while the previous sentence is still playing.
             let tts_c = Arc::clone(tts);
-            let sentence_c = sentence.clone();
-            let synth_handle = tokio::task::spawn_blocking(move || {
-                tts_c.synthesize(&sentence_c)
-            });
+            let synth_handle = tokio::task::spawn_blocking(move || tts_c.synthesize(&sentence));
 
-            // ── Wait for the previous sentence to finish playing ──────────────────
-            await_play!(play_handle);
+            drain_play(&mut play_handle).await;
 
-            if cancel.load(Ordering::SeqCst) {
+            if cancel.load(Ordering::Relaxed) {
                 synth_handle.abort();
                 return (full_response, None, None);
             }
 
-            // ── Collect synthesis result (usually already done) ───────────────────
             let samples = match synth_handle.await {
                 Ok(Ok(s)) => s,
                 Ok(Err(e)) => { error!(target: "tts", "TTS error: {}", e); continue; }
-                Err(e) => { error!(target: "tts", "TTS task panicked: {}", e); continue; }
+                Err(e)     => { error!(target: "tts", "TTS task panicked: {}", e); continue; }
             };
+
             if first_sentence {
                 info!(target: "performance", "[+{}ms] TTS end", t_prev.elapsed().as_millis());
                 t_prev = Instant::now();
@@ -737,11 +717,10 @@ async fn stream_and_tts(
                 debug!(target: "performance", "TTS IN: {}ms", t_synth.elapsed().as_millis());
             }
 
-            if cancel.load(Ordering::SeqCst) {
+            if cancel.load(Ordering::Relaxed) {
                 return (full_response, None, None);
             }
 
-            // ── Start playback without awaiting — next sentence can synthesise now ─
             let out_c = Arc::clone(audio_output);
             let cancel_c = Arc::clone(cancel);
             let n_samples = samples.len();
@@ -759,9 +738,6 @@ async fn stream_and_tts(
     }
 
     debug!(target: "performance", "LLM TG: {}ms", t_llm_start.elapsed().as_millis());
-
-    // Return the last playback handle to the caller so it can overlap
-    // GPU/DB work (summarization, profile extraction) with tail audio.
     (full_response, None, play_handle)
 }
 

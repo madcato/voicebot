@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-bench-server.py — Real-server KV-cache benchmark: llama.cpp vs mlx-lm
+bench-server.py — Real-server KV-cache benchmark: llama.cpp vs mlx-lm vs omlx
 
 Starts each server, warms its KV cache with a multi-turn conversation history,
 then measures only the final user turn — the hot-cache scenario that matters
@@ -11,13 +11,20 @@ Metrics
   TG    token generation throughput (t/s) from first → last token.
 
 Usage
+  # Two-way comparison (llama.cpp vs mlx-lm)
   python3 scripts/bench-server.py <llama-model.gguf> <mlx-model-or-hf-repo>
+
+  # Three-way comparison (adds omlx)
+  python3 scripts/bench-server.py <llama-model.gguf> <mlx-model-or-hf-repo> <omlx-model-dir>
+
   python3 scripts/bench-server.py ./models/Qwen2.5-7B-Q4_K_M.gguf \\
-                                  mlx-community/Qwen2.5-7B-Instruct-4bit
+                                  mlx-community/Qwen2.5-7B-Instruct-4bit \\
+                                  ~/models
 
 Env vars
   LLAMA_PORT=8080      llama.cpp server port
   MLX_PORT=8000        mlx-lm server port
+  OMLX_PORT=8001       omlx server port
   BENCH_TRIALS=3       measurement trials per provider
   BENCH_GEN=80         tokens to generate per trial
 """
@@ -68,6 +75,7 @@ NEW_QUESTION = "¿Y cuál es la ciudad más poblada de Australia entonces?"
 
 LLAMA_PORT = int(os.environ.get("LLAMA_PORT",    "8080"))
 MLX_PORT   = int(os.environ.get("MLX_PORT",      "8000"))
+OMLX_PORT  = int(os.environ.get("OMLX_PORT",     "8001"))
 TRIALS     = int(os.environ.get("BENCH_TRIALS",  "3"))
 GEN_TOKENS = int(os.environ.get("BENCH_GEN",     "80"))
 
@@ -135,16 +143,16 @@ def warmup(host, port, model_id, llama_cache):
     the server goes straight to generation from the cached KV state.
     """
     payload = {
-        "model":       model_id,
-        "messages":    _build_messages(NEW_QUESTION),
-        "max_tokens":  1,
-        "temperature": 0.0,
-        "stream":      False,
+        "model":                model_id,
+        "messages":             _build_messages(NEW_QUESTION),
+        "max_tokens":           1,
+        "temperature":          0.0,
+        "stream":               False,
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     if llama_cache:
-        payload["cache_prompt"]        = True
-        payload["slot_id"]             = 0
-        payload["chat_template_kwargs"] = {"enable_thinking": False}
+        payload["cache_prompt"] = True
+        payload["slot_id"]      = 0
 
     list(_post(host, port, payload, stream=False))  # discard output
 
@@ -158,19 +166,20 @@ def measure(host, port, model_id, llama_cache):
     Returns (ttft_ms, tg_tps, n_tokens) or raises on failure.
     """
     payload = {
-        "model":       model_id,
-        "messages":    _build_messages(NEW_QUESTION),
-        "max_tokens":  GEN_TOKENS,
-        "temperature": 0.1,
-        "stream":      True,
+        "model":                model_id,
+        "messages":             _build_messages(NEW_QUESTION),
+        "max_tokens":           GEN_TOKENS,
+        "temperature":          0.1,
+        "stream":               True,
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     if llama_cache:
-        payload["cache_prompt"]        = True
-        payload["slot_id"]             = 0
-        payload["chat_template_kwargs"] = {"enable_thinking": False}
+        payload["cache_prompt"] = True
+        payload["slot_id"]      = 0
 
     t_start  = time.perf_counter()
     t_first  = None
+    t_last   = None
     n_tokens = 0
 
     for line in _post(host, port, payload, stream=True):
@@ -185,18 +194,18 @@ def measure(host, port, model_id, llama_cache):
             continue
         content = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content") or ""
         if content:
+            now = time.perf_counter()
             if t_first is None:
-                t_first = time.perf_counter()
-            n_tokens += 1
-
-    t_end = time.perf_counter()
+                t_first = now
+            t_last   = now
+            n_tokens += len(content.split())  # word-level proxy when tokens batch
 
     if t_first is None or n_tokens == 0:
         raise RuntimeError("No content tokens received")
 
     ttft_ms = (t_first - t_start) * 1000
-    tg_secs = t_end - t_first
-    tg_tps  = n_tokens / tg_secs if tg_secs > 0.001 else 0.0
+    tg_secs = (t_last - t_first) if t_last and t_last > t_first else None
+    tg_tps  = n_tokens / tg_secs if tg_secs and tg_secs > 0.001 else float("nan")
 
     return ttft_ms, tg_tps, n_tokens
 
@@ -270,12 +279,31 @@ def start_mlx(model):
         "--port",              str(MLX_PORT),
         "--prompt-cache-size", "1",
         "--prefill-step-size", "512",
+        "--chat-template-args", "{\"enable_thinking\": false}", \
         "--log-level",         "ERROR",
     ]
 
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         _wait_ready("127.0.0.1", MLX_PORT, "/v1/models", timeout=300)
+    except TimeoutError:
+        proc.terminate()
+        raise
+    return proc
+
+
+def start_omlx(model_dir):
+    if not shutil.which("omlx"):
+        raise RuntimeError("omlx not found — install from https://github.com/jundot/omlx")
+    cmd = [
+        "omlx", "serve",
+        "--model-dir", model_dir,
+        "--host",      "127.0.0.1",
+        "--port",      str(OMLX_PORT),
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        _wait_ready("127.0.0.1", OMLX_PORT, "/v1/models", timeout=180)
     except TimeoutError:
         proc.terminate()
         raise
@@ -294,7 +322,7 @@ def stop_server(proc):
 # ── Benchmark runner ──────────────────────────────────────────────────────────
 
 def run_benchmark(label, host, port, llama_cache, model):
-    model_id = model # _get_model_id(host, port)
+    model_id = model
     print(f"    Model id: {model_id}")
 
     print(f"    Warming KV cache ({len(HISTORY)} turns + new question)...",
@@ -331,26 +359,101 @@ def summarise(results):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def _run_provider(label, step, total, start_fn, host, port, llama_cache, model, stop_label, stats, W):
+    print(f"\n{'─' * W}")
+    print(f"  [{step}/{total}] {label}  (port {port})")
+    print(f"{'─' * W}")
+    proc = None
+    try:
+        print(f"  Starting {stop_label} ... ", end="", flush=True)
+        proc = start_fn()
+        print("ready")
+        raw = run_benchmark(label, host, port, llama_cache=llama_cache, model=model)
+        stats[label] = summarise(raw)
+    except Exception as e:
+        print(f"\n  ERROR: {e}")
+    finally:
+        stop_server(proc)
+        print(f"  {stop_label} stopped.")
+
+
+def _print_comparison(stats, providers, W):
+    available = [(n, stats[n]) for n in providers if stats.get(n)]
+    if len(available) < 2:
+        return
+
+    TTFT_OK = 120  # ms threshold — below this TTFT feels instant
+
+    # Find overall TTFT and TG winners
+    ttft_winner = min(available, key=lambda x: x[1]["ttft"])[0]
+    tg_winner   = max(available, key=lambda x: x[1]["tg"])[0]
+
+    best_ttft = min(s["ttft"] for _, s in available)
+    best_tg   = max(s["tg"]   for _, s in available)
+
+    print()
+    print(f"  {'─' * (W - 2)}")
+    print(f"  TTFT  →  {ttft_winner} wins")
+    print(f"  TG    →  {tg_winner} wins")
+
+    # Per-provider comparison vs winner
+    print()
+    for name, s in available:
+        ttft_x = s["ttft"] / best_ttft
+        tg_x   = best_tg   / s["tg"] if s["tg"] > 0 else float("inf")
+        marker = " ← best" if name == ttft_winner else f"  ({ttft_x:.2f}× slower TTFT)"
+        print(f"  {name:<12}  TTFT {s['ttft']:>6.0f} ms{marker}")
+
+    # Recommendation
+    print()
+    all_fast = all(s["ttft"] < TTFT_OK for _, s in available)
+    if all_fast:
+        print(f"  All providers respond under {TTFT_OK} ms — TTFT is not the bottleneck.")
+        print(f"  Higher TG wins: recommend {tg_winner}.")
+    else:
+        slow = [n for n, s in available if s["ttft"] >= TTFT_OK]
+        fast = [n for n, s in available if s["ttft"] <  TTFT_OK]
+        if fast:
+            print(f"  Under {TTFT_OK} ms threshold: {', '.join(fast)}")
+            print(f"  Above threshold (feels sluggish): {', '.join(slow)}")
+        print(f"  Recommend: {ttft_winner} for lowest latency.")
+
+    # KV-cache health warnings
+    print()
+    for name, s in available:
+        if s["ttft"] > 800:
+            print(f"  WARNING  {name} TTFT={s['ttft']:.0f} ms — KV cache may not be working.")
+
+
 def main():
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 4):
         print(__doc__)
         sys.exit(1)
 
     llama_model = sys.argv[1]
     mlx_model   = sys.argv[2]
+    omlx_dir    = sys.argv[3] if len(sys.argv) == 4 else None
 
     if not os.path.isfile(llama_model):
         sys.exit(f"Error: llama model not found: {llama_model}")
     if not shutil.which("llama-server"):
         sys.exit("Error: llama-server not found — brew install llama.cpp")
+    if omlx_dir and not os.path.isdir(omlx_dir):
+        sys.exit(f"Error: omlx model directory not found: {omlx_dir}")
+
+    providers = ["llama.cpp", "mlx-lm"] + (["omlx"] if omlx_dir else [])
+    total = len(providers)
 
     W = 64
     print()
     print("═" * W)
-    print("  Real-Server KV-Cache Benchmark — llama.cpp vs mlx-lm")
+    title = "Real-Server KV-Cache Benchmark — " + " vs ".join(providers)
+    print(f"  {title}")
     print("═" * W)
     print(f"  llama model : {os.path.basename(llama_model)}")
     print(f"  mlx model   : {mlx_model}")
+    if omlx_dir:
+        print(f"  omlx dir    : {omlx_dir}")
     print(f"  Scenario    : {len(HISTORY)} turn history → warm KV cache → new question")
     print(f"  New question: \"{NEW_QUESTION}\"")
     print(f"  Generate    : {GEN_TOKENS} tokens   Trials: {TRIALS}")
@@ -358,39 +461,29 @@ def main():
     stats = {}
 
     # ── llama.cpp ─────────────────────────────────────────────────────────────
-    print(f"\n{'─' * W}")
-    print(f"  [1/2] llama.cpp  (port {LLAMA_PORT})")
-    print(f"{'─' * W}")
-    proc = None
-    try:
-        print("  Starting llama-server ... ", end="", flush=True)
-        proc = start_llama(llama_model)
-        print("ready")
-        raw = run_benchmark("llama.cpp", "127.0.0.1", LLAMA_PORT, llama_cache=True, model=llama_model)
-        stats["llama.cpp"] = summarise(raw)
-    except Exception as e:
-        print(f"\n  ERROR: {e}")
-    finally:
-        stop_server(proc)
-        print("  llama-server stopped.")
+    _run_provider(
+        "llama.cpp", 1, total,
+        lambda: start_llama(llama_model),
+        "127.0.0.1", LLAMA_PORT, llama_cache=True, model=llama_model,
+        stop_label="llama-server", stats=stats, W=W,
+    )
 
     # ── mlx-lm ───────────────────────────────────────────────────────────────
-    print(f"\n{'─' * W}")
-    print(f"  [2/2] mlx-lm  (port {MLX_PORT})")
-    print(f"{'─' * W}")
-    proc = None
-    try:
-        print("  Starting mlx-lm server (may download model) ... ",
-              end="", flush=True)
-        proc = start_mlx(mlx_model)
-        print("ready")
-        raw = run_benchmark("mlx-lm", "127.0.0.1", MLX_PORT, llama_cache=False, model=mlx_model)
-        stats["mlx-lm"] = summarise(raw)
-    except Exception as e:
-        print(f"\n  ERROR: {e}")
-    finally:
-        stop_server(proc)
-        print("  mlx-lm server stopped.")
+    _run_provider(
+        "mlx-lm", 2, total,
+        lambda: start_mlx(mlx_model),
+        "127.0.0.1", MLX_PORT, llama_cache=False, model=mlx_model,
+        stop_label="mlx-lm server", stats=stats, W=W,
+    )
+
+    # ── omlx (optional) ──────────────────────────────────────────────────────
+    if omlx_dir:
+        _run_provider(
+            "omlx", 3, total,
+            lambda: start_omlx(omlx_dir),
+            "127.0.0.1", OMLX_PORT, llama_cache=False, model=mlx_model,
+            stop_label="omlx server", stats=stats, W=W,
+        )
 
     # ── Results table ─────────────────────────────────────────────────────────
     print()
@@ -401,7 +494,7 @@ def main():
     print(f"  {'Provider':<12}  {'TTFT (ms)':>14}  {'TG (t/s)':>12}  {'tokens':>6}")
     print(f"  {'─'*12}  {'─'*14}  {'─'*12}  {'─'*6}")
 
-    for name in ("llama.cpp", "mlx-lm"):
+    for name in providers:
         s = stats.get(name)
         if s:
             print(f"  {name:<12}  "
@@ -411,56 +504,7 @@ def main():
         else:
             print(f"  {name:<12}  {'FAILED':>14}  {'—':>12}  {'—':>6}")
 
-    # ── Comparison ────────────────────────────────────────────────────────────
-    ll = stats.get("llama.cpp")
-    ml = stats.get("mlx-lm")
-
-    if not (ll and ml):
-        print()
-        return
-
-    ttft_winner = "llama.cpp" if ll["ttft"] < ml["ttft"] else "mlx-lm"
-    tg_winner   = "llama.cpp" if ll["tg"]   > ml["tg"]   else "mlx-lm"
-
-    ttft_ratio  = max(ll["ttft"], ml["ttft"]) / min(ll["ttft"], ml["ttft"])
-    tg_ratio    = max(ll["tg"],   ml["tg"])   / min(ll["tg"],   ml["tg"])
-
-    print()
-    print(f"  {'─' * (W - 2)}")
-    print(f"  TTFT  →  {ttft_winner} wins  ({ttft_ratio:.2f}× faster first token)")
-    print(f"  TG    →  {tg_winner} wins  ({tg_ratio:.2f}× faster generation)")
-
-    # Recommendation
-    print()
-    TTFT_OK = 120  # ms — below this both feel instant; TG becomes the tiebreaker
-
-    ll_ok = ll["ttft"] < TTFT_OK
-    ml_ok = ml["ttft"] < TTFT_OK
-
-    if ll_ok and ml_ok:
-        print(f"  Both providers respond under {TTFT_OK} ms — TTFT is not the bottleneck.")
-        print(f"  Higher TG wins: recommend {tg_winner} for faster sentence completion.")
-    elif ttft_winner == "llama.cpp":
-        print(f"  llama.cpp is {ttft_ratio:.1f}× faster to first token.")
-        if ll["ttft"] < TTFT_OK:
-            print(f"  It hits the real-time threshold ({TTFT_OK} ms); mlx-lm does not.")
-        print("  KV-cache slot reuse (cache_prompt=true) is giving llama.cpp the edge.")
-        print("  Recommend: llama.cpp")
-    else:
-        print(f"  mlx-lm is {ttft_ratio:.1f}× faster to first token.")
-        if ml["ttft"] < TTFT_OK:
-            print(f"  It hits the real-time threshold ({TTFT_OK} ms); llama.cpp does not.")
-        print("  mlx-lm prefix cache is matching (or beating) llama.cpp slot reuse.")
-        print("  Recommend: mlx-lm")
-
-    # KV-cache health check
-    print()
-    if ll["ttft"] > 800:
-        print("  ⚠  llama.cpp TTFT is very high — KV cache may not be working.")
-        print("     Check that cache_prompt=true is accepted and --parallel 1 is set.")
-    if ml["ttft"] > 800:
-        print("  ⚠  mlx-lm TTFT is very high — prefix cache may not be hitting.")
-        print("     Ensure --prompt-cache-size 1 is set and the prompt prefix is stable.")
+    _print_comparison(stats, providers, W)
 
     print()
     print("═" * W)
