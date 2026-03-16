@@ -28,6 +28,8 @@ pub struct Config {
     // ── LLM ──────────────────────────────────────────────────────────────────
     /// LLM server base URL (OpenAI-compatible)
     pub llm_url: String,
+    /// API key sent as `Authorization: Bearer <key>`. Empty = no auth header.
+    pub llm_api_key: String,
     /// Model name sent in the `model` field of API requests
     pub llm_model: String,
     /// LLM backend: "llama" (default, llama.cpp) or "mlx" (mlx-lm).
@@ -164,6 +166,7 @@ impl Config {
             // LLM
             llm_url: env::var("LLM_URL")
                 .unwrap_or_else(|_| "http://localhost:8080".to_string()),
+            llm_api_key: env::var("LLM_API_KEY").unwrap_or_default(),
             llm_model: env::var("LLM_MODEL")
                 .unwrap_or_else(|_| "local-model".to_string()),
             llm_provider: env::var("LLM_PROVIDER")

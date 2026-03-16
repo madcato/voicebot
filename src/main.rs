@@ -181,7 +181,8 @@ async fn main() -> Result<()> {
         config.llm_slot_id,
         config.llm_background_slot_id,
     )
-    .with_provider(&config.llm_provider);
+    .with_provider(&config.llm_provider)
+    .with_api_key(&config.llm_api_key);
     info!(target: "llm", "LLM endpoint: {} (provider: {})", config.llm_url, config.llm_provider);
 
     // ── Inference daemon ──────────────────────────────────────────────────────
