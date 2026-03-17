@@ -41,6 +41,7 @@ pub fn build_profile_context(facts: &[ProfileFact]) -> String {
 ///
 /// Returns a (possibly empty) list of discovered facts. Runs in a background
 /// task — errors are logged but do not affect the conversation.
+#[allow(dead_code)]
 pub async fn extract_facts(
     client: &LlamaClient,
     user_text: &str,
@@ -73,6 +74,7 @@ pub async fn extract_facts(
 
 // ── JSON parsing ──────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct RawFact {
     key: String,
@@ -81,10 +83,12 @@ struct RawFact {
     confidence: f64,
 }
 
+#[allow(dead_code)]
 fn default_confidence() -> f64 {
     0.8
 }
 
+#[allow(dead_code)]
 fn parse_facts(raw: &str) -> Vec<ProfileFact> {
     // Strip markdown code fences if the LLM wrapped the JSON
     let json_str = strip_code_fence(raw.trim());
@@ -108,6 +112,7 @@ fn parse_facts(raw: &str) -> Vec<ProfileFact> {
     }
 }
 
+#[allow(dead_code)]
 fn normalize_key(key: &str) -> String {
     key.trim()
         .to_lowercase()
@@ -117,6 +122,7 @@ fn normalize_key(key: &str) -> String {
         .collect()
 }
 
+#[allow(dead_code)]
 fn strip_code_fence(s: &str) -> &str {
     // Handle ```json ... ``` or ``` ... ```
     let s = s.trim_start_matches("```json").trim_start_matches("```");

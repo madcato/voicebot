@@ -55,6 +55,7 @@ impl ToolRegistry {
         self.tools.insert(tool.name().to_string(), Box::new(tool));
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
@@ -82,6 +83,7 @@ impl ToolRegistry {
     /// Content inside `<tool_call>…</tool_call>` is split on the first `:`;
     /// everything before is the tool name, everything after (trimmed) is args.
     /// Tools that take no arguments may omit the colon entirely.
+    #[allow(dead_code)]
     pub fn parse_tool_call(&self, text: &str) -> Option<(String, String)> {
         let start = text.find("<tool_call>")?;
         let after = &text[start + "<tool_call>".len()..];

@@ -82,6 +82,7 @@ async fn call_agent(command: String, query: String) -> String {
 /// Synchronous variant. Not registered in the voice pipeline (use RunAgentAsyncTool
 /// instead so the voicebot never blocks waiting for the agent). Kept for testing
 /// and future use.
+#[allow(dead_code)]
 pub struct RunAgentTool {
     command: String,
     timeout_secs: u64,
@@ -89,6 +90,7 @@ pub struct RunAgentTool {
 }
 
 impl RunAgentTool {
+    #[allow(dead_code)]
     pub fn new(command: &str, timeout_secs: u64, history: Arc<RwLock<String>>) -> Self {
         Self {
             command: command.to_string(),
@@ -273,7 +275,7 @@ pub enum AcpOutbound {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AcpSessionUpdate {
     ToolStart { tool: String },
-    ToolComplete { tool: String, result: Option<String> },
+    ToolComplete { tool: String, #[allow(dead_code)] result: Option<String> },
     AgentThought { text: String },
     AgentMessage { text: String },
 }
@@ -289,17 +291,21 @@ pub enum AcpInbound {
         session_id: String,
     },
     SessionUpdate {
+        #[allow(dead_code)]
         session_id: String,
         update: AcpSessionUpdate,
     },
     PermissionRequest {
+        #[allow(dead_code)]
         session_id: String,
         description: String,
         options: Vec<String>,
     },
     PromptResponse {
+        #[allow(dead_code)]
         session_id: String,
         output: String,
+        #[allow(dead_code)]
         stop_reason: String,
     },
     #[serde(other)]
@@ -316,6 +322,7 @@ pub enum AcpInbound {
 pub struct HermesAcpWriter {
     pub session_id: Option<String>,
     stdin: ChildStdin,
+    #[allow(dead_code)]
     child: Child,
 }
 
@@ -407,6 +414,7 @@ impl HermesAcpWriter {
     }
 
     /// Kill the subprocess.
+    #[allow(dead_code)]
     pub async fn kill(&mut self) {
         let _ = self.child.kill().await;
     }

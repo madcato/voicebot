@@ -226,6 +226,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn close_session(&self, session_id: Uuid) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         sqlx::query("UPDATE sessions SET closed_at = ?, is_active = 0 WHERE id = ?")
@@ -261,6 +262,7 @@ impl Database {
     ///
     /// An existing fact is only overwritten when the new confidence is strictly
     /// higher — this prevents low-quality inferences from degrading confirmed facts.
+    #[allow(dead_code)]
     pub async fn upsert_profile_fact(
         &self,
         key: &str,
@@ -286,6 +288,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn list_sessions(&self) -> Result<Vec<(Uuid, DateTime<Utc>)>> {
         let rows = sqlx::query("SELECT id, created_at FROM sessions ORDER BY created_at DESC")
             .fetch_all(&self.pool)

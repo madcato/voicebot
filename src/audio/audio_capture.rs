@@ -3,7 +3,7 @@ use async_channel::Sender;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, StreamConfig};
 use std::sync::Arc;
-use tracing::{debug, error, info, warn, trace};
+use tracing::{error, info, warn, trace};
 
 /// Raw audio data from the microphone
 #[derive(Debug, Clone)]
@@ -150,6 +150,7 @@ impl AudioCapture {
         self.config.sample_rate
     }
 
+    #[allow(dead_code)]
     pub fn channels(&self) -> u16 {
         self.config.channels
     }

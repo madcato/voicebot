@@ -17,6 +17,7 @@ use std::process::{Command, Stdio};
 ///
 /// NOTE: piper-rs 0.1.9 is currently broken (ort 2.0.0-rc.9 API mismatch).
 /// This subprocess approach is equivalent and works reliably.
+#[allow(dead_code)]
 pub struct PiperTts {
     /// Path to the .onnx model file
     model_onnx: PathBuf,
@@ -24,6 +25,7 @@ pub struct PiperTts {
     piper_bin: String,
 }
 
+#[allow(dead_code)]
 impl PiperTts {
     /// Create a new PiperTts from a `.onnx.json` config path.
     /// The `.onnx` file must be in the same directory with the same base name.
