@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::env;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Config {
     // ── Audio input ──────────────────────────────────────────────────────────
     /// Microphone sample rate (default 16000 — required by Silero VAD)

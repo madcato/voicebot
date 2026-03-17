@@ -33,7 +33,7 @@ use crate::audio::vad::{VadResult, VoiceActivityDetector};
 use crate::config::Config;
 use crate::db::Database;
 use crate::llm::{LlamaClient, LlmSession, StreamToken};
-use crate::profile::{build_profile_context, extract_facts, ProfileFact};
+use crate::profile::{build_profile_context, ProfileFact};
 use crate::stt::{WhisperStt, SttStream};
 use whisper_rs::install_logging_hooks;
 use crate::tools::{
@@ -492,7 +492,6 @@ async fn main() -> Result<()> {
                     VadResult::SpeechStart => {
                         t_speech_start = Some(Instant::now());
                         info!(target: "performance", "[+0ms] SpeechStart");
-                        last_stt_submit_ms = 0;
                         last_stt_gen = 0;
                         last_speech_at = Instant::now();
                         // ── Barge-in ─────────────────────────────────────────
@@ -984,7 +983,7 @@ async fn run_pipeline(
     check_cancel!();
 
     // ── LLM streaming + tool call loop ────────────────────────────────────────
-    let mut session_snapshot = session_for_llm;
+    let session_snapshot = session_for_llm;
     let mut final_response = String::new();
     // Last playback handle returned by stream_and_tts (last sentence still playing).
     // Awaited after committing DB/session so GPU work overlaps with tail audio.

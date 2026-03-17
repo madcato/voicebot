@@ -38,6 +38,7 @@ impl AudioBuffer {
     }
 
     /// Get buffer length in samples
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.buffer.len()
     }
@@ -47,6 +48,7 @@ impl AudioBuffer {
         ((self.buffer.len() as f32 / self.sample_rate as f32) * 1000.0) as u32
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty()
     }

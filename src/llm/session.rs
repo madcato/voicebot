@@ -17,6 +17,7 @@ impl Message {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self { role: "assistant".into(), content: content.into() }
     }
+    #[allow(dead_code)]
     pub fn tool(content: impl Into<String>) -> Self {
         Self { role: "tool".into(), content: content.into() }
     }
@@ -35,6 +36,7 @@ pub struct LlmSession {
     summary: Option<String>,
     /// Conversation turns: user, assistant, and transient tool messages.
     pub messages: Vec<Message>,
+    #[allow(dead_code)]
     pub slot_id: u8,
 }
 
@@ -45,6 +47,7 @@ impl LlmSession {
     }
 
     /// Create a fresh session.
+    #[allow(dead_code)]
     pub fn new(system_prompt: &str, slot_id: u8) -> Self {
         Self {
             original_system_prompt: system_prompt.to_string(),
@@ -122,6 +125,7 @@ impl LlmSession {
     /// assistant message and the result as a tool message, so the next LLM
     /// call sees the full exchange and continues from there.
     /// Tool messages are NOT persisted to DB and NOT counted for summarization.
+    #[allow(dead_code)]
     pub fn add_tool_result(&mut self, tool_call_text: &str, result: &str) {
         self.messages.push(Message::assistant(tool_call_text));
         self.messages.push(Message::tool(result));

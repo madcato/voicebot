@@ -1,17 +1,20 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "speaker")]
 use tracing::{info, warn};
 
 #[cfg(feature = "speaker")]
 use sherpa_rs::speaker_id::{EmbeddingExtractor, ExtractorConfig};
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum SpeakerVerdict {
     IsMainSpeaker { similarity: f32 },
     OtherSpeaker { similarity: f32 },
     Enrolled,
 }
 
+#[allow(dead_code)]
 pub struct SpeakerVerifier {
     #[cfg(feature = "speaker")]
     extractor: EmbeddingExtractor,
@@ -97,6 +100,7 @@ impl SpeakerVerifier {
         }
     }
 
+    #[allow(dead_code)]
     fn load_embedding(path: &Path) -> Option<Vec<f32>> {
         let bytes = std::fs::read(path).ok()?;
         if bytes.len() % 4 != 0 {
@@ -110,6 +114,7 @@ impl SpeakerVerifier {
         )
     }
 
+    #[allow(dead_code)]
     fn save_embedding(path: &Path, embedding: &[f32]) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -120,6 +125,7 @@ impl SpeakerVerifier {
     }
 }
 
+#[allow(dead_code)]
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();

@@ -18,14 +18,14 @@ impl AudioOutput {
         let device = if let Some(name) = device_name {
             host.output_devices()
                 .context("Failed to enumerate output devices")?
-                .find(|d| d.name().map(|n| n.contains(name)).unwrap_or(false))
+                .find(|d| d.description().map(|desc| desc.name().contains(name)).unwrap_or(false))
                 .with_context(|| format!("Output device '{}' not found", name))?
         } else {
             host.default_output_device()
                 .context("No output device available")?
         };
 
-        info!(target: "audio", "Output device: {}", device.name().unwrap_or_default());
+        info!(target: "audio", "Output device: {}", device.description().map(|d| d.name().to_string()).unwrap_or_default());
 
         let supported = device
             .default_output_config()

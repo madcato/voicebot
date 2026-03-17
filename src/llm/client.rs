@@ -426,6 +426,7 @@ impl LlamaClient {
     }
 
     /// Check if the server is reachable.
+    #[allow(dead_code)]
     pub async fn health_check(&self, base_url: &str) -> bool {
         let url = format!("{}/health", base_url.trim_end_matches('/'));
         self.client.get(&url).send().await.map(|r| r.status().is_success()).unwrap_or(false)

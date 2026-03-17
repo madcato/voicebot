@@ -27,6 +27,7 @@ pub struct AudioTransformer {
     chunk_size: usize,
 }
 
+#[allow(dead_code)]
 impl AudioTransformer {
     pub fn new(config: &Config, source_sample_rate: u32, source_channels: u16) -> Result<Self> {
         let chunk_size = config.samples_per_chunk();
