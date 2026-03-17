@@ -76,12 +76,17 @@ pub struct Config {
     pub llm_summary_keep_turns: usize,
 
     // ── Agent delegation ──────────────────────────────────────────────────────
-    /// CLI command used to invoke the agent (e.g. "hermes"). May include arguments.
-    /// None = agent tools disabled. The voicebot writes the task to stdin and reads
-    /// the result from stdout.
+    /// CLI command used to invoke the agent (e.g. "hermes chat"). May include arguments.
+    /// None = agent tools disabled. Used in "cli" mode only.
     pub agent_command: Option<String>,
     /// Hard timeout in seconds for synchronous agent calls (AGENT_TIMEOUT_SECS).
     pub agent_timeout_secs: u64,
+    /// Agent communication mode: "cli" (default, fire-and-forget subprocess) or
+    /// "acp" (persistent ACP JSON-RPC stdio process with bidirectional communication).
+    pub agent_mode: String,
+    /// Command to start the ACP process (AGENT_ACP_COMMAND, default "hermes acp").
+    /// Only used when agent_mode = "acp".
+    pub agent_acp_command: String,
 
     // ── Inference daemon ──────────────────────────────────────────────────────
     /// Enable the background "is there anything worth saying?" loop.
@@ -234,6 +239,9 @@ impl Config {
                 .unwrap_or_else(|_| "120".to_string())
                 .parse()
                 .context("Invalid AGENT_TIMEOUT_SECS")?,
+            agent_mode: env::var("AGENT_MODE").unwrap_or_else(|_| "cli".to_string()),
+            agent_acp_command: env::var("AGENT_ACP_COMMAND")
+                .unwrap_or_else(|_| "hermes acp".to_string()),
 
             // Inference daemon
             daemon_enabled: env::var("DAEMON_ENABLED")

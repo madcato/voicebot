@@ -258,8 +258,10 @@ Most configuration is done via environment variables (or `.env` file):
 | `SAY_RATE` | `215` | Words per minute |
 | `KOKORO_MODEL` | `./models/kokoro-v1.0.onnx` | Kokoro ONNX model path |
 | **Agent Integration** || |
-| `AGENT_COMMAND` | `hermes` | CLI command for agent subprocess |
-| `AGENT_TIMEOUT_SECS` | `120` | Timeout for async tasks |
+| `AGENT_COMMAND` | `hermes chat` | CLI command for agent subprocess (CLI mode) |
+| `AGENT_TIMEOUT_SECS` | `120` | Timeout for synchronous CLI agent calls |
+| `AGENT_MODE` | `cli` | `cli` = fire-and-forget subprocess; `acp` = persistent ACP bidirectional mode |
+| `AGENT_ACP_COMMAND` | `hermes acp` | Command to start the ACP process (ACP mode only) |
 
 See [.env.example](.env.example) for complete environment variable reference.
 

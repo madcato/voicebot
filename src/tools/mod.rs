@@ -19,7 +19,10 @@ pub use conversation_mode::{ConversationMode, SetConversationModeTool};
 pub use current_time::CurrentTimeTool;
 pub use open_app::OpenAppTool;
 pub use read_file::ReadFileTool;
-pub use run_agent::{format_history, RunAgentAsyncTool, RunAgentTool};
+pub use run_agent::{
+    format_history, RunAgentAsyncTool,
+    AcpInbound, ActiveAcpTask, AgentStatusTool, CancelAgentTool, HermesAcpWriter, RunAgentAcpTool,
+};
 pub use run_shell::RunShellTool;
 pub use send_notification::SendNotificationTool;
 pub use take_screenshot::TakeScreenshotTool;

@@ -37,8 +37,9 @@ use crate::profile::{build_profile_context, extract_facts, ProfileFact};
 use crate::stt::{WhisperStt, SttStream};
 use whisper_rs::install_logging_hooks;
 use crate::tools::{
-    format_history, CalendarCreateTool, CalendarGetEventsTool, ConversationMode,
-    CurrentTimeTool, OpenAppTool, ReadClipboardTool, ReadFileTool, RunAgentAsyncTool,
+    format_history, AcpInbound, ActiveAcpTask, AgentStatusTool, CalendarCreateTool,
+    CalendarGetEventsTool, CancelAgentTool, ConversationMode, CurrentTimeTool, HermesAcpWriter,
+    OpenAppTool, ReadClipboardTool, ReadFileTool, RunAgentAcpTool, RunAgentAsyncTool,
     RunShellTool, SendNotificationTool, SetClipboardTool, SetConversationModeTool,
     TakeScreenshotTool, ToolRegistry,
 };
@@ -123,9 +124,30 @@ async fn main() -> Result<()> {
         ));
     }
 
-    // External agent delegation — enabled when AGENT_COMMAND is set
-    if let Some(ref agent_command) = config.agent_command {
-        info!(target: "voicebot", "Agent delegation enabled: {}", agent_command);
+    // External agent delegation
+    if config.agent_mode == "acp" {
+        info!(target: "voicebot", "Agent ACP mode enabled: {}", config.agent_acp_command);
+        let acp_writer: Arc<tokio::sync::Mutex<Option<HermesAcpWriter>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+        let acp_inbound: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<AcpInbound>>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+        let active_task: Arc<tokio::sync::Mutex<Option<ActiveAcpTask>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+        tool_registry.register(RunAgentAcpTool::new(
+            Arc::clone(&acp_writer),
+            Arc::clone(&acp_inbound),
+            Arc::clone(&active_task),
+            &config.agent_acp_command,
+            shared_history.clone(),
+            proactive_tx.clone(),
+        ));
+        tool_registry.register(CancelAgentTool::new(
+            Arc::clone(&active_task),
+            Arc::clone(&acp_writer),
+        ));
+        tool_registry.register(AgentStatusTool::new(Arc::clone(&active_task)));
+    } else if let Some(ref agent_command) = config.agent_command {
+        info!(target: "voicebot", "Agent delegation enabled (CLI): {}", agent_command);
         tool_registry.register(RunAgentAsyncTool::new(
             agent_command,
             shared_history.clone(),
@@ -329,6 +351,9 @@ async fn main() -> Result<()> {
     // Agent results that arrived while the voicebot was busy — processed in order when idle.
     let mut pending_agent_results: std::collections::VecDeque<(String, String)> =
         std::collections::VecDeque::new();
+    // ACP permission gate: when Some, the next STT result is routed to this
+    // sender as the user's yes/no answer rather than starting the LLM pipeline.
+    let mut pending_agent_question: Option<tokio::sync::oneshot::Sender<String>> = None;
 
     info!(target: "voicebot", "Ready. Speak to interact...");
 
@@ -413,6 +438,40 @@ async fn main() -> Result<()> {
                             }
                             ProactiveEvent::InferenceDaemon { .. } => {
                                 // Daemon events ignored in the queue-based pipeline.
+                            }
+                            ProactiveEvent::AgentQuestion { question, options, response_tx } => {
+                                // Barge-in: cancel active pipeline so Jarvis can speak the question.
+                                if let Some(h) = pipeline_handle.take() {
+                                    cancel.store(true, Ordering::SeqCst);
+                                    h.abort();
+                                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                                }
+                                cancel.store(false, Ordering::SeqCst);
+                                // Store the pending responder — the next user utterance routes here.
+                                pending_agent_question = Some(response_tx);
+                                // Speak the question.
+                                let opts_str = options.join(" / ");
+                                let prompt = format!(
+                                    "[Sistema: el agente ACP necesita permiso para realizar una acción.]\n\
+                                     Acción solicitada: {question}\n\
+                                     Opciones: {opts_str}\n\
+                                     Pregunta al usuario de forma natural si desea permitirlo (sí/no)."
+                                );
+                                let cancel_c      = Arc::clone(&cancel);
+                                let tts_c         = Arc::clone(&tts);
+                                let audio_out_c   = Arc::clone(&audio_output);
+                                let llm_session_c = Arc::clone(&llm_session);
+                                let llm_client_c  = llm_client.clone();
+                                let db_c          = db.clone();
+                                let tools_c       = Arc::clone(&tools);
+                                pipeline_handle = Some(tokio::spawn(async move {
+                                    run_text_pipeline(
+                                        prompt, cancel_c, tts_c, audio_out_c,
+                                        llm_session_c, llm_client_c, db_c, session_id,
+                                        tts_sample_rate, tools_c,
+                                    )
+                                    .await;
+                                }));
                             }
                         }
                         continue;
@@ -546,6 +605,20 @@ async fn main() -> Result<()> {
                         };
                         last_stt_submit_ms = 0;
                         last_stt_gen = 0;
+
+                        // ── ACP permission gate ───────────────────────────────
+                        // If a permission question is pending, route this STT
+                        // result back to the agent instead of the LLM pipeline.
+                        if let Some(resp_tx) = pending_agent_question.take() {
+                            let stt_c = Arc::clone(&stt_stream);
+                            tokio::spawn(async move {
+                                let answer = stt_c.await_result(min_stt_gen).await;
+                                let outcome = map_answer_to_outcome(&answer);
+                                info!(target: "acp", "Permission answer: {:?} → {}", answer, outcome);
+                                let _ = resp_tx.send(outcome);
+                            });
+                            continue;
+                        }
 
                         let cancel_c           = Arc::clone(&cancel);
                         let stt_stream_c       = Arc::clone(&stt_stream);
@@ -761,6 +834,26 @@ async fn stream_and_tts(
 
 /// Maximum number of sequential tool calls allowed per user turn.
 const MAX_TOOL_ITERATIONS: usize = 5;
+
+/// Map a spoken yes/no transcript to an ACP permission outcome string.
+fn map_answer_to_outcome(transcript: &str) -> String {
+    let t = transcript.to_lowercase();
+    if t.contains("sí")
+        || t.contains("si")
+        || t.contains("yes")
+        || t.contains("claro")
+        || t.contains("dale")
+        || t.contains("ok")
+        || t.contains("adelante")
+        || t.contains("permite")
+        || t.contains("permiso")
+        || t.contains("autorizo")
+    {
+        "allow_once".to_string()
+    } else {
+        "reject_once".to_string()
+    }
+}
 
 /// Full STT → LLM → (tools →)* TTS pipeline for a single utterance.
 async fn run_pipeline(
