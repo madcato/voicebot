@@ -137,6 +137,7 @@ mod tests {
         assert!(p["properties"]["text"].is_object());
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn set_clipboard_extracts_text_from_json() {
         // We can't assert the clipboard value in CI, but we can assert no panic/error
@@ -155,6 +156,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn read_clipboard_returns_non_empty_string() {
         // pbpaste is always available on macOS; result may be empty string or content

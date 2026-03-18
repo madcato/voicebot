@@ -240,6 +240,7 @@ mod tests {
 
     // ── run() with custom prompt ──────────────────────────────────────────────
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn run_extracts_custom_prompt_from_args() {
         // We can't easily mock screencapture, so we test that the JSON parsing
@@ -252,6 +253,7 @@ mod tests {
         assert!(!result.is_empty());
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn run_uses_default_prompt_when_args_empty() {
         let t = tool("http://127.0.0.1:19997");

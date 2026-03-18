@@ -102,6 +102,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn quotes_in_message_are_escaped() {
         // Verify no panic/crash when message contains quotes (AppleScript injection guard)
@@ -112,12 +113,14 @@ mod tests {
         assert!(!result.is_empty());
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn raw_string_fallback_used_as_message() {
         let result = SendNotificationTool.run("Hola mundo").await;
         assert!(!result.is_empty());
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn missing_title_defaults_to_jarvis() {
         // No title in JSON — should default to "Jarvis" without crashing
