@@ -47,15 +47,9 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 # Base64 encoding (screenshot → vision model)
 base64 = "0.22"
 
-# STT — whisper.cpp embedded (CoreML Neural Engine on Apple Silicon)
-# CoreML replaces the encoder with a compiled .mlmodelc model, using the
-# Neural Engine + GPU together. The .mlmodelc must sit alongside the .bin file:
-#   models/ggml-<name>-encoder.mlmodelc
-# Convert with: xcrun coremltools or the whisper.cpp script (convert-whisper-to-coreml.py)
-# whisper-rs = { version = "0.15", features = ["coreml"] }
-whisper-rs = { version = "0.15", features = ["coreml", "metal"] }
-# Or metal
-# whisper-rs = { version = "0.15", features = ["metal"] }
+# STT — whisper.cpp embedded
+# On Linux: plain CPU backend
+whisper-rs = { version = "0.15" }
 
 # Sentence boundary detection for TTS streaming
 regex = "1"
@@ -86,6 +80,11 @@ objc2-avf-audio = { version = "0.3.1", features = [
 kokoro = ["dep:kokorox"]
 speaker = ["dep:sherpa-rs"]
 avspeech = ["dep:objc2", "dep:block2", "dep:objc2-foundation", "dep:objc2-avf-audio"]
+
+# On macOS: enable CoreML (Neural Engine) + Metal GPU acceleration for whisper
+# CoreML requires models/ggml-<name>-encoder.mlmodelc alongside the .bin file
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.15", features = ["coreml", "metal"] }
 
 [dev-dependencies]
 # Mock HTTP server for LLM client integration tests
