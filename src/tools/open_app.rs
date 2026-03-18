@@ -94,6 +94,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn nonexistent_app_returns_error_message() {
         let result = OpenAppTool.run(r#"{"name": "NonexistentApp12345"}"#).await;
@@ -105,6 +106,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn raw_string_fallback_works() {
         // When args is not JSON, treat the whole string as the app name
