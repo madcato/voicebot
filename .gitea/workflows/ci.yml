@@ -38,5 +38,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
       - name: Run tests
         run: cargo test --all-targets --all-features --verbose
