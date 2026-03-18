@@ -380,7 +380,7 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 
 Built with:
 - **Rust** — Systems programming language
-- ** whisper-rs** — Whisper.cpp bindings for Rust
+- **whisper-rs** — Whisper.cpp bindings for Rust
 - **llama.cpp / mlx-lm**— Local LLM inference
 - **CPAL** — Cross-platform audio I/O
 - **Tokio** — Asynchronous runtime
