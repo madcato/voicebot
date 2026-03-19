@@ -1,5 +1,7 @@
 /target
 /models
 
+.env
+
 data/voicebot.db
 data/speaker.emb
