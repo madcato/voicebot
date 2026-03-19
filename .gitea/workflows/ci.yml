@@ -39,7 +39,36 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libclang-dev cmake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libclang-dev \
+            cmake \
+            espeak-ng
 
-      - name: Run tests
+      - name: Cache Whisper model
+        uses: actions/cache@v4
+        with:
+          path: models/ggml-base.bin
+          key: whisper-ggml-base-v1
+
+      - name: Download Whisper base model
+        run: |
+          mkdir -p models
+          if [ ! -f models/ggml-base.bin ]; then
+            curl -L -o models/ggml-base.bin \
+              https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+          fi
+
+      - name: Run unit and pipeline e2e tests
         run: cargo test --all-targets --features kokoro,speaker --verbose
+
+      - name: Run STT e2e tests (Whisper model required)
+        env:
+          WHISPER_MODEL: models/ggml-base.bin
+        run: |
+          cargo test --features kokoro,speaker \
+            e2e::stt_transcribes_wav_file \
+            e2e::full_pipeline_wav_to_db \
+            -- --ignored --nocapture
