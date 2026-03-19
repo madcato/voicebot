@@ -27,14 +27,14 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 # ── Configuration (override via env vars) ────────────────────────────────────
 
 # Path to the GGUF model. Default: look in project models/ directory.
-LLM_MODEL="${LLM_MODEL:-${ROOT_DIR}/models/Qwen3.5-2B-Q4_K_M.gguf}"
+LLM_MODEL="${LLM_MODEL:-${ROOT_DIR}/models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf}"
 
 # llama-server bind address and port
 LLM_HOST="${LLM_HOST:-0.0.0.0}"
 LLM_PORT="${LLM_PORT:-8080}"
 
 # Context size in tokens
-LLM_CTX="${LLM_CTX:-32768}"
+LLM_CTX="${LLM_CTX:-12288}"
 
 # Number of CPU threads (leave 2 free for audio pipeline)
 LLM_THREADS="${LLM_THREADS:-$(( $(sysctl -n hw.logicalcpu 2>/dev/null || echo 8) - 2 ))}"
@@ -81,9 +81,16 @@ exec llama-server \
     --cache-type-k q4_0 \
     --cache-type-v q4_0 \
     --flash-attn on \
+    --spec-type ngram-mod \
+    --draft-max 12 \
     --mlock \
-    --parallel 1 \
+    -b 2048 \
+    --ubatch-size 2048 \
+    --parallel 16 \
     --repeat-penalty 1.1 \
     --temp 0.6 \
+    --top-p 0.95 \
+    --min-p 0.07 \
     --reasoning-budget 0 \
+    --reasoning-format none \
     --verbose
