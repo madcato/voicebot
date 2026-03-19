@@ -105,9 +105,7 @@ impl E2eHarness {
         let (mock_tts, captured) = MockTts::new();
         let tts = Arc::new(TtsEngine::Mock(mock_tts));
 
-        let audio_output = Arc::new(
-            AudioOutput::new(None).expect("e2e tests require an audio output device"),
-        );
+        let audio_output = Arc::new(AudioOutput::null());
 
         let db_dir = tempfile::TempDir::new().unwrap();
         let db_path = db_dir.path().join("test.db");
@@ -205,7 +203,6 @@ impl E2eHarness {
 
 /// Basic conversation: mock transcript → mock LLM → TTS captures text → DB stores turn.
 #[tokio::test]
-#[ignore = "manual e2e: requires an audio output device"]
 async fn basic_conversation_mocked_transcript() {
     let h = E2eHarness::new().await;
     h.mock_llm_response("Son las diez y media.").await;
@@ -231,7 +228,6 @@ async fn basic_conversation_mocked_transcript() {
 
 /// Barge-in: empty transcript is silently discarded (no LLM call, no DB write).
 #[tokio::test]
-#[ignore = "manual e2e: requires an audio output device"]
 async fn empty_transcript_is_discarded() {
     let h = E2eHarness::new().await;
     // No mock mounted — any HTTP call would cause a connection error, making the
@@ -245,7 +241,6 @@ async fn empty_transcript_is_discarded() {
 
 /// Ambient mode — utterance without wake word: pipeline discards after STT.
 #[tokio::test]
-#[ignore = "manual e2e: requires an audio output device"]
 async fn ambient_mode_discards_utterance_without_wake_word() {
     let h = E2eHarness::new().await;
     // No mock needed — the pipeline should return before reaching the LLM.
@@ -265,7 +260,6 @@ async fn ambient_mode_discards_utterance_without_wake_word() {
 
 /// Ambient mode — utterance WITH wake word: pipeline continues normally.
 #[tokio::test]
-#[ignore = "manual e2e: requires an audio output device"]
 async fn ambient_mode_responds_when_wake_word_present() {
     let h = E2eHarness::new().await;
     h.mock_llm_response("Claro, son las once.").await;
@@ -283,7 +277,6 @@ async fn ambient_mode_responds_when_wake_word_present() {
 
 /// Multi-sentence response: each sentence is synthesized separately.
 #[tokio::test]
-#[ignore = "manual e2e: requires an audio output device"]
 async fn multi_sentence_response_splits_into_sentences() {
     let h = E2eHarness::new().await;
     h.mock_llm_response("Primera frase. Segunda frase. Tercera frase.").await;
@@ -300,7 +293,6 @@ async fn multi_sentence_response_splits_into_sentences() {
 
 /// Session persistence: multiple turns accumulate in the DB.
 #[tokio::test]
-#[ignore = "manual e2e: requires an audio output device"]
 async fn db_persists_multiple_turns() {
     let h = E2eHarness::new().await;
     h.mock_llm_response("Primera respuesta.").await;
@@ -320,9 +312,10 @@ async fn db_persists_multiple_turns() {
 // See e2e.md for how to record fixture files.
 
 /// Load a WAV file, transcribe with Whisper, assert transcript is non-empty.
-/// Requires: WHISPER_MODEL env var and tests/fixtures/hola.wav
+/// Requires: WHISPER_MODEL env var pointing to a GGML model file.
+/// In CI this is set to models/ggml-base.bin (downloaded by the CI step).
 #[tokio::test]
-#[ignore = "manual e2e: requires Whisper model + tests/fixtures/hola.wav"]
+#[ignore = "requires Whisper model (set WHISPER_MODEL env var)"]
 async fn stt_transcribes_wav_file() {
     let model_path = std::env::var("WHISPER_MODEL")
         .unwrap_or_else(|_| "models/ggml-large-v3-turbo.bin".to_string());
@@ -332,9 +325,9 @@ async fn stt_transcribes_wav_file() {
         return;
     }
 
-    let wav_path = "tests/fixtures/hola.wav";
+    let wav_path = "tests/fixtures/es_short_greeting.wav";
     if !std::path::Path::new(wav_path).exists() {
-        eprintln!("SKIP: fixture not found at {wav_path} — see e2e.md to create it");
+        eprintln!("SKIP: fixture not found at {wav_path}");
         return;
     }
 
@@ -355,13 +348,14 @@ async fn stt_transcribes_wav_file() {
 }
 
 /// Full pipeline with real STT: WAV → Whisper → mock LLM → TTS capture → DB.
-/// Requires: WHISPER_MODEL env var and tests/fixtures/hola.wav
+/// Requires: WHISPER_MODEL env var pointing to a GGML model file.
+/// In CI this is set to models/ggml-base.bin (downloaded by the CI step).
 #[tokio::test]
-#[ignore = "manual e2e: requires Whisper model + tests/fixtures/hola.wav + audio device"]
+#[ignore = "requires Whisper model (set WHISPER_MODEL env var)"]
 async fn full_pipeline_wav_to_db() {
     let model_path = std::env::var("WHISPER_MODEL")
         .unwrap_or_else(|_| "models/ggml-large-v3-turbo.bin".to_string());
-    let wav_path = "tests/fixtures/hola.wav";
+    let wav_path = "tests/fixtures/es_long_intro.wav";
 
     if !std::path::Path::new(&model_path).exists() {
         eprintln!("SKIP: Whisper model not found");

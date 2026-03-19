@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tracing::{info, debug};
 
 pub struct AudioOutput {
-    device: Device,
+    /// `None` in the null/headless variant — `play_blocking` returns immediately.
+    device: Option<Device>,
     config: StreamConfig,
 }
 
@@ -47,7 +48,22 @@ impl AudioOutput {
             buffer_size: cpal::BufferSize::Default,
         };
 
-        Ok(Self { device, config })
+        Ok(Self { device: Some(device), config })
+    }
+
+    /// Null/headless audio output — `play_blocking` discards all audio immediately.
+    ///
+    /// Used in tests and CI environments where no sound device is available.
+    #[cfg(test)]
+    pub fn null() -> Self {
+        Self {
+            device: None,
+            config: StreamConfig {
+                channels: 1,
+                sample_rate: 22050,
+                buffer_size: cpal::BufferSize::Default,
+            },
+        }
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -94,7 +110,14 @@ impl AudioOutput {
     /// device. Resamples and expands channels as needed. Blocks the calling
     /// thread until the speaker has finished playing every sample, or until
     /// `cancel` is set to `true` (barge-in / interruption).
+    ///
+    /// If this is a null/headless output (no device), returns immediately
+    /// without producing any audio.
     pub fn play_blocking(&self, samples: &[f32], source_rate: u32, cancel: &Arc<AtomicBool>) -> Result<()> {
+        let Some(device) = &self.device else {
+            return Ok(());
+        };
+
         let prepared =
             Self::prepare(samples, source_rate, self.sample_rate(), self.channels())?;
 
@@ -126,8 +149,7 @@ impl AudioOutput {
         let done_cb = Arc::clone(&done);
         let cancel_cb = Arc::clone(cancel);
 
-        let stream = self
-            .device
+        let stream = device
             .build_output_stream(
                 &self.config,
                 move |data: &mut [f32], _| {
