@@ -80,26 +80,235 @@ async fn call_agent(command: String, query: String) -> String {
     }
 }
 
-// ── RunAgentTool (synchronous — kept for reference, not registered) ───────────
+// ── RunAgentTool ──────────────────────────────────────────────────────────────
 
-/// Synchronous variant. Not registered in the voice pipeline (use RunAgentAsyncTool
-/// instead so the voicebot never blocks waiting for the agent). Kept for testing
-/// and future use.
-#[allow(dead_code)]
+/// Unified agent delegation tool.
+///
+/// Supports two modes (selected by the `mode` field):
+/// - `"cli"` — spawns the agent as a one-shot CLI subprocess (fire-and-forget).
+/// - `"acp"` — maintains a persistent ACP subprocess via JSON-RPC over stdio.
+///
+/// Additionally handles two inline commands that require no subprocess:
+/// - `run_agent: cancel` — cancels the currently running ACP task.
+/// - `run_agent: status` — reports whether the ACP agent is busy.
+///
+/// This single tool replaces the previous `RunAgentAsyncTool`, `RunAgentAcpTool`,
+/// `CancelAgentTool`, and `AgentStatusTool`.
 pub struct RunAgentTool {
-    command: String,
-    timeout_secs: u64,
+    /// CLI executable (and optional args) — used in `"cli"` mode.
+    command: Option<String>,
+    /// Persistent ACP process write-side — lazily initialized on first use.
+    acp_writer: Arc<Mutex<Option<HermesAcpWriter>>>,
+    /// Inbound message channel from the ACP process.
+    acp_inbound: Arc<Mutex<Option<mpsc::Receiver<AcpInbound>>>>,
+    /// Currently executing ACP task, if any.
+    active_task: Arc<Mutex<Option<ActiveAcpTask>>>,
+    /// Formatted conversation history shared with the agent for context.
     history: Arc<RwLock<String>>,
+    /// Channel for delivering agent results back to the main pipeline.
+    proactive_tx: mpsc::Sender<ProactiveEvent>,
+    /// `"cli"` or `"acp"`.
+    mode: String,
+    /// ACP subprocess command — used in `"acp"` mode.
+    acp_command: String,
 }
 
 impl RunAgentTool {
-    #[allow(dead_code)]
-    pub fn new(command: &str, timeout_secs: u64, history: Arc<RwLock<String>>) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        command: Option<String>,
+        acp_writer: Arc<Mutex<Option<HermesAcpWriter>>>,
+        acp_inbound: Arc<Mutex<Option<mpsc::Receiver<AcpInbound>>>>,
+        active_task: Arc<Mutex<Option<ActiveAcpTask>>>,
+        history: Arc<RwLock<String>>,
+        proactive_tx: mpsc::Sender<ProactiveEvent>,
+        mode: String,
+        acp_command: String,
+    ) -> Self {
         Self {
-            command: command.to_string(),
-            timeout_secs,
+            command,
+            acp_writer,
+            acp_inbound,
+            active_task,
             history,
+            proactive_tx,
+            mode,
+            acp_command,
         }
+    }
+
+    /// Cancel the in-flight ACP task, if any.
+    async fn cancel(&self) -> String {
+        let mut guard = self.active_task.lock().await;
+        if let Some(task) = guard.take() {
+            let _ = task.cancel_tx.send(());
+            let mut w_guard = self.acp_writer.lock().await;
+            if let Some(w) = w_guard.as_mut() {
+                let _ = w
+                    .send(&AcpOutbound::Cancel { session_id: task.session_id })
+                    .await;
+            }
+            "[Tarea del agente cancelada.]".to_string()
+        } else {
+            "[No hay ninguna tarea del agente en progreso.]".to_string()
+        }
+    }
+
+    /// Report whether the ACP agent is currently busy.
+    async fn status(&self) -> String {
+        let guard = self.active_task.lock().await;
+        if guard.is_some() {
+            "[El agente está trabajando en una tarea.]".to_string()
+        } else {
+            "[El agente no tiene ninguna tarea activa.]".to_string()
+        }
+    }
+
+    /// CLI mode: spawn agent as one-shot subprocess, deliver result proactively.
+    async fn run_cli(&self, task: String) -> String {
+        let command = match &self.command {
+            Some(c) => c.clone(),
+            None => return "Error: CLI agent command not configured.".to_string(),
+        };
+        let query = self.history.read().map(|h| h.clone()).unwrap_or_else(|_| task.clone());
+        let proactive_tx = self.proactive_tx.clone();
+
+        tokio::spawn(async move {
+            info!("RunAgentTool(cli): task started: {:?}", task);
+            let result = call_agent(command, query).await;
+            info!("RunAgentTool(cli): task complete ({} chars): {:?}", result.len(), result);
+            let _ = proactive_tx.send(ProactiveEvent::AgentResult { task, result }).await;
+        });
+
+        "[Tarea delegada al agente. El resultado llegará en breve.]".to_string()
+    }
+
+    /// ACP mode: send task to persistent ACP subprocess, deliver result proactively.
+    async fn run_acp(&self, task: String) -> String {
+        // Refuse if another task is already running.
+        {
+            let guard = self.active_task.lock().await;
+            if guard.is_some() {
+                return "[El agente ya tiene una tarea en progreso. Usa 'run_agent: cancel' para cancelarla primero.]"
+                    .to_string();
+            }
+        }
+
+        let query = self.history.read().map(|h| h.clone()).unwrap_or_else(|_| task.clone());
+        let task_c = task.clone();
+        let acp_writer = Arc::clone(&self.acp_writer);
+        let acp_inbound = Arc::clone(&self.acp_inbound);
+        let active_task = Arc::clone(&self.active_task);
+        let proactive_tx = self.proactive_tx.clone();
+        let acp_command = self.acp_command.clone();
+
+        tokio::spawn(async move {
+            // ── Lazily initialize the ACP process ────────────────────────────
+            let session_id = {
+                let mut w_guard = acp_writer.lock().await;
+                if w_guard.is_none() {
+                    match HermesAcpWriter::spawn(&acp_command).await {
+                        Ok((mut writer, mut rx)) => {
+                            let cwd = std::env::current_dir()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string();
+                            match writer.initialize(&mut rx, &cwd).await {
+                                Ok(sid) => {
+                                    *w_guard = Some(writer);
+                                    let mut rx_guard = acp_inbound.lock().await;
+                                    *rx_guard = Some(rx);
+                                    sid
+                                }
+                                Err(e) => {
+                                    let _ = proactive_tx
+                                        .send(ProactiveEvent::AgentResult {
+                                            task: task_c,
+                                            result: format!("ACP init error: {e}"),
+                                        })
+                                        .await;
+                                    return;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = proactive_tx
+                                .send(ProactiveEvent::AgentResult {
+                                    task: task_c,
+                                    result: format!("ACP spawn error: {e}"),
+                                })
+                                .await;
+                            return;
+                        }
+                    }
+                } else {
+                    w_guard.as_ref().unwrap().session_id.clone().unwrap_or_default()
+                }
+            };
+
+            // ── Send prompt ───────────────────────────────────────────────────
+            {
+                let mut guard = acp_writer.lock().await;
+                if let Some(w) = guard.as_mut() {
+                    if let Err(e) = w
+                        .send(&AcpOutbound::Prompt {
+                            session_id: session_id.clone(),
+                            prompt: vec![AcpTextBlock::text(&query)],
+                        })
+                        .await
+                    {
+                        let _ = proactive_tx
+                            .send(ProactiveEvent::AgentResult {
+                                task: task_c,
+                                result: format!("ACP send error: {e}"),
+                            })
+                            .await;
+                        return;
+                    }
+                }
+            }
+
+            // ── Register active task ──────────────────────────────────────────
+            let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+            {
+                let mut at = active_task.lock().await;
+                *at = Some(ActiveAcpTask { session_id: session_id.clone(), cancel_tx });
+            }
+
+            // ── Collect responses ─────────────────────────────────────────────
+            // Take the inbound rx out of the Arc<Mutex<Option<...>>> for the
+            // duration of this call. We put it back after collect finishes so
+            // future tasks can reuse it.
+            let mut taken_rx = {
+                let mut rx_guard = acp_inbound.lock().await;
+                rx_guard.take()
+            };
+            let result = if let Some(rx) = taken_rx.as_mut() {
+                collect_acp_response(
+                    Arc::clone(&acp_writer),
+                    rx,
+                    proactive_tx.clone(),
+                    session_id,
+                    cancel_rx,
+                )
+                .await
+            } else {
+                "ACP: inbound channel not initialized.".to_string()
+            };
+            // Return the rx for reuse.
+            {
+                let mut rx_guard = acp_inbound.lock().await;
+                *rx_guard = taken_rx;
+            }
+
+            { active_task.lock().await.take(); }
+
+            let _ = proactive_tx
+                .send(ProactiveEvent::AgentResult { task: task_c, result })
+                .await;
+        });
+
+        "[Tarea ACP delegada al agente. El resultado llegará en breve.]".to_string()
     }
 }
 
@@ -110,14 +319,22 @@ impl Tool for RunAgentTool {
     }
 
     fn description(&self) -> &str {
-        "Delegates a task to the external agent and waits for the result (< 30s)."
+        "Delega una tarea al agente externo (Hermes). El agente tiene acceso a \
+         herramientas de computadora, archivos, web, calendario y razonamiento extendido. \
+         El resultado se anuncia de forma proactiva cuando el agente termina. \
+         Para cancelar una tarea en curso usa run_agent con task='cancel'. \
+         Para consultar el estado usa task='status'."
     }
 
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "task": { "type": "string", "description": "Task to delegate" }
+                "task": {
+                    "type": "string",
+                    "description": "Descripción breve de la tarea a delegar, o 'cancel' para \
+                                    cancelar la tarea en curso, o 'status' para consultar el estado."
+                }
             },
             "required": ["task"]
         })
@@ -128,95 +345,20 @@ impl Tool for RunAgentTool {
         if task.is_empty() {
             return "Error: run_agent requires a task description.".to_string();
         }
-        let query = self.history.read().map(|h| h.clone()).unwrap_or_else(|_| task.clone());
-        let command = self.command.clone();
-        let timeout = std::time::Duration::from_secs(self.timeout_secs);
-        match tokio::time::timeout(timeout, call_agent(command, query)).await {
-            Ok(result) => result,
-            Err(_) => {
-                warn!("RunAgentTool: task timed out after {}s", self.timeout_secs);
-                format!("Agent timed out after {}s.", self.timeout_secs)
-            }
+
+        // Inline commands — no subprocess needed.
+        let lower = task.trim().to_lowercase();
+        if lower.starts_with("cancel") {
+            return self.cancel().await;
         }
-    }
-}
-
-// ── RunAgentAsyncTool (fire-and-forget) ───────────────────────────────────────
-
-/// Asynchronous agent tool: spawns the agent CLI in the background, passing the
-/// full conversation history via `-q`, and returns an acknowledgment immediately.
-///
-/// The agent receives complete context (all prior turns + the current request as
-/// the last [User] line) so it can respond coherently without additional prompting.
-/// The result is delivered via the proactive channel when the process exits.
-pub struct RunAgentAsyncTool {
-    command: String,
-    /// Shared formatted conversation history, updated by main after each user turn.
-    history: Arc<RwLock<String>>,
-    proactive_tx: tokio::sync::mpsc::Sender<ProactiveEvent>,
-}
-
-impl RunAgentAsyncTool {
-    pub fn new(
-        command: &str,
-        history: Arc<RwLock<String>>,
-        proactive_tx: tokio::sync::mpsc::Sender<ProactiveEvent>,
-    ) -> Self {
-        Self {
-            command: command.to_string(),
-            history,
-            proactive_tx,
-        }
-    }
-}
-
-#[async_trait]
-impl Tool for RunAgentAsyncTool {
-    fn name(&self) -> &str {
-        "run_agent_async"
-    }
-
-    fn description(&self) -> &str {
-        "Delegates a task to the external agent in the background and returns immediately. \
-         The agent has full conversation context. The result will be announced proactively \
-         when the agent finishes. Use for any task requiring computer control, file access, \
-         web search, calendar, or extended reasoning."
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "task": {
-                    "type": "string",
-                    "description": "Brief label for this task (used in the completion announcement)"
-                }
-            },
-            "required": ["task"]
-        })
-    }
-
-    async fn run(&self, args: &str) -> String {
-        let task = parse_task(args);
-        if task.is_empty() {
-            return "Error: run_agent_async requires a task description.".to_string();
+        if lower.starts_with("status") {
+            return self.status().await;
         }
 
-        // The query sent to the agent is the full conversation history.
-        // history already ends with the current [User] turn (updated by main
-        // immediately after add_user_turn, before the LLM generates this call).
-        let query = self.history.read().map(|h| h.clone()).unwrap_or_else(|_| task.clone());
-        let command = self.command.clone();
-        let proactive_tx = self.proactive_tx.clone();
-
-        tokio::spawn(async move {
-            info!("RunAgentAsyncTool: task started: {:?}", task);
-            let result = call_agent(command, query).await;
-            info!("RunAgentAsyncTool: task complete ({} chars): {:?}", result.len(), result);
-            let _ = proactive_tx.send(ProactiveEvent::AgentResult { task, result }).await;
-        });
-
-        "[Tarea delegada al agente. El resultado llegará en breve.]".to_string()
+        match self.mode.as_str() {
+            "acp" => self.run_acp(task).await,
+            _ => self.run_cli(task).await,
+        }
     }
 }
 
@@ -525,284 +667,6 @@ async fn collect_acp_response(
     }
 }
 
-// ── RunAgentAcpTool ───────────────────────────────────────────────────────────
-
-/// ACP-mode agent tool. Maintains a persistent `hermes acp` subprocess and
-/// communicates via JSON-RPC over stdio.
-///
-/// Supports:
-/// - Streaming progress (tool calls, agent messages)
-/// - Bidirectional communication (permission requests → user yes/no)
-/// - Cancellation via `CancelAgentTool`
-pub struct RunAgentAcpTool {
-    acp_writer: Arc<Mutex<Option<HermesAcpWriter>>>,
-    acp_inbound: Arc<Mutex<Option<mpsc::Receiver<AcpInbound>>>>,
-    active_task: Arc<Mutex<Option<ActiveAcpTask>>>,
-    acp_command: String,
-    history: Arc<RwLock<String>>,
-    proactive_tx: mpsc::Sender<ProactiveEvent>,
-}
-
-impl RunAgentAcpTool {
-    pub fn new(
-        acp_writer: Arc<Mutex<Option<HermesAcpWriter>>>,
-        acp_inbound: Arc<Mutex<Option<mpsc::Receiver<AcpInbound>>>>,
-        active_task: Arc<Mutex<Option<ActiveAcpTask>>>,
-        acp_command: &str,
-        history: Arc<RwLock<String>>,
-        proactive_tx: mpsc::Sender<ProactiveEvent>,
-    ) -> Self {
-        Self {
-            acp_writer,
-            acp_inbound,
-            active_task,
-            acp_command: acp_command.to_string(),
-            history,
-            proactive_tx,
-        }
-    }
-}
-
-#[async_trait]
-impl Tool for RunAgentAcpTool {
-    fn name(&self) -> &str {
-        "run_agent_acp"
-    }
-
-    fn description(&self) -> &str {
-        "Delegates a task to the Hermes ACP agent. The agent runs in the background and \
-         can request permission for actions (you will be asked). Use cancel_agent to \
-         stop a running task. The result is announced proactively when the agent finishes. \
-         Use for any task requiring computer control, file access, web search, calendar, \
-         or extended reasoning."
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "task": {
-                    "type": "string",
-                    "description": "Brief label for this task (shown in the completion announcement)"
-                }
-            },
-            "required": ["task"]
-        })
-    }
-
-    async fn run(&self, args: &str) -> String {
-        let task = parse_task(args);
-        if task.is_empty() {
-            return "Error: run_agent_acp requires a task description.".to_string();
-        }
-
-        // Refuse if another task is already running.
-        {
-            let guard = self.active_task.lock().await;
-            if guard.is_some() {
-                return "[El agente ya tiene una tarea en progreso. Usa cancel_agent para cancelarla primero.]"
-                    .to_string();
-            }
-        }
-
-        let query = self.history.read().map(|h| h.clone()).unwrap_or_else(|_| task.clone());
-        let task_c = task.clone();
-        let acp_writer = Arc::clone(&self.acp_writer);
-        let acp_inbound = Arc::clone(&self.acp_inbound);
-        let active_task = Arc::clone(&self.active_task);
-        let proactive_tx = self.proactive_tx.clone();
-        let acp_command = self.acp_command.clone();
-
-        tokio::spawn(async move {
-            // ── Lazily initialize the ACP process ────────────────────────────
-            let session_id = {
-                let mut w_guard = acp_writer.lock().await;
-                if w_guard.is_none() {
-                    match HermesAcpWriter::spawn(&acp_command).await {
-                        Ok((mut writer, mut rx)) => {
-                            let cwd = std::env::current_dir()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .to_string();
-                            match writer.initialize(&mut rx, &cwd).await {
-                                Ok(sid) => {
-                                    *w_guard = Some(writer);
-                                    let mut rx_guard = acp_inbound.lock().await;
-                                    *rx_guard = Some(rx);
-                                    sid
-                                }
-                                Err(e) => {
-                                    let _ = proactive_tx
-                                        .send(ProactiveEvent::AgentResult {
-                                            task: task_c,
-                                            result: format!("ACP init error: {e}"),
-                                        })
-                                        .await;
-                                    return;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            let _ = proactive_tx
-                                .send(ProactiveEvent::AgentResult {
-                                    task: task_c,
-                                    result: format!("ACP spawn error: {e}"),
-                                })
-                                .await;
-                            return;
-                        }
-                    }
-                } else {
-                    w_guard.as_ref().unwrap().session_id.clone().unwrap_or_default()
-                }
-            };
-
-            // ── Send prompt ───────────────────────────────────────────────────
-            {
-                let mut guard = acp_writer.lock().await;
-                if let Some(w) = guard.as_mut() {
-                    if let Err(e) = w
-                        .send(&AcpOutbound::Prompt {
-                            session_id: session_id.clone(),
-                            prompt: vec![AcpTextBlock::text(&query)],
-                        })
-                        .await
-                    {
-                        let _ = proactive_tx
-                            .send(ProactiveEvent::AgentResult {
-                                task: task_c,
-                                result: format!("ACP send error: {e}"),
-                            })
-                            .await;
-                        return;
-                    }
-                }
-            }
-
-            // ── Register active task ──────────────────────────────────────────
-            let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
-            {
-                let mut at = active_task.lock().await;
-                *at = Some(ActiveAcpTask { session_id: session_id.clone(), cancel_tx });
-            }
-
-            // ── Collect responses ─────────────────────────────────────────────
-            // Take the inbound rx out of the Arc<Mutex<Option<...>>> for the
-            // duration of this call. We put it back after collect finishes so
-            // future tasks can reuse it.
-            let mut taken_rx = {
-                let mut rx_guard = acp_inbound.lock().await;
-                rx_guard.take()
-            };
-            let result = if let Some(rx) = taken_rx.as_mut() {
-                collect_acp_response(
-                    Arc::clone(&acp_writer),
-                    rx,
-                    proactive_tx.clone(),
-                    session_id,
-                    cancel_rx,
-                )
-                .await
-            } else {
-                "ACP: inbound channel not initialized.".to_string()
-            };
-            // Return the rx for reuse.
-            {
-                let mut rx_guard = acp_inbound.lock().await;
-                *rx_guard = taken_rx;
-            }
-
-            { active_task.lock().await.take(); }
-
-            let _ = proactive_tx
-                .send(ProactiveEvent::AgentResult { task: task_c, result })
-                .await;
-        });
-
-        "[Tarea ACP delegada al agente. El resultado llegará en breve.]".to_string()
-    }
-}
-
-// ── CancelAgentTool ───────────────────────────────────────────────────────────
-
-/// Cancels the in-flight ACP task, if any.
-pub struct CancelAgentTool {
-    active_task: Arc<Mutex<Option<ActiveAcpTask>>>,
-    acp_writer: Arc<Mutex<Option<HermesAcpWriter>>>,
-}
-
-impl CancelAgentTool {
-    pub fn new(
-        active_task: Arc<Mutex<Option<ActiveAcpTask>>>,
-        acp_writer: Arc<Mutex<Option<HermesAcpWriter>>>,
-    ) -> Self {
-        Self { active_task, acp_writer }
-    }
-}
-
-#[async_trait]
-impl Tool for CancelAgentTool {
-    fn name(&self) -> &str {
-        "cancel_agent"
-    }
-
-    fn description(&self) -> &str {
-        "Cancels the agent task currently in progress. \
-         Use when the user says to stop or cancel the running agent task."
-    }
-
-    async fn run(&self, _args: &str) -> String {
-        let mut guard = self.active_task.lock().await;
-        if let Some(task) = guard.take() {
-            // Signal the collect loop to cancel.
-            let _ = task.cancel_tx.send(());
-            // Also send the ACP cancel message directly.
-            let mut w_guard = self.acp_writer.lock().await;
-            if let Some(w) = w_guard.as_mut() {
-                let _ = w
-                    .send(&AcpOutbound::Cancel { session_id: task.session_id })
-                    .await;
-            }
-            "[Tarea del agente cancelada.]".to_string()
-        } else {
-            "[No hay ninguna tarea del agente en progreso.]".to_string()
-        }
-    }
-}
-
-// ── AgentStatusTool ───────────────────────────────────────────────────────────
-
-/// Reports whether the ACP agent is currently working on a task.
-pub struct AgentStatusTool {
-    active_task: Arc<Mutex<Option<ActiveAcpTask>>>,
-}
-
-impl AgentStatusTool {
-    pub fn new(active_task: Arc<Mutex<Option<ActiveAcpTask>>>) -> Self {
-        Self { active_task }
-    }
-}
-
-#[async_trait]
-impl Tool for AgentStatusTool {
-    fn name(&self) -> &str {
-        "agent_status"
-    }
-
-    fn description(&self) -> &str {
-        "Returns whether the ACP agent is currently working on a task."
-    }
-
-    async fn run(&self, _args: &str) -> String {
-        let guard = self.active_task.lock().await;
-        if guard.is_some() {
-            "[El agente está trabajando en una tarea.]".to_string()
-        } else {
-            "[El agente no tiene ninguna tarea activa.]".to_string()
-        }
-    }
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -817,6 +681,36 @@ mod tests {
 
     fn history_with(s: &str) -> Arc<RwLock<String>> {
         Arc::new(RwLock::new(s.to_string()))
+    }
+
+    fn cli_tool(command: &str, history: Arc<RwLock<String>>, tx: mpsc::Sender<ProactiveEvent>) -> RunAgentTool {
+        RunAgentTool::new(
+            Some(command.to_string()),
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(None)),
+            history,
+            tx,
+            "cli".to_string(),
+            String::new(),
+        )
+    }
+
+    fn cancel_tool(
+        active_task: Arc<Mutex<Option<ActiveAcpTask>>>,
+        acp_writer: Arc<Mutex<Option<HermesAcpWriter>>>,
+        tx: mpsc::Sender<ProactiveEvent>,
+    ) -> RunAgentTool {
+        RunAgentTool::new(
+            None,
+            acp_writer,
+            Arc::new(Mutex::new(None)),
+            active_task,
+            empty_history(),
+            tx,
+            "acp".to_string(),
+            String::new(),
+        )
     }
 
     // ── format_history ────────────────────────────────────────────────────────
@@ -893,51 +787,30 @@ mod tests {
         assert_eq!(format_history(&msgs), expected);
     }
 
-    // ── RunAgentTool (sync) ───────────────────────────────────────────────────
+    // ── RunAgentTool — name / description ─────────────────────────────────────
 
     #[test]
-    fn sync_name_and_description() {
-        let tool = RunAgentTool::new("echo", 30, empty_history());
+    fn tool_name_and_description() {
+        let (tx, _rx) = mpsc::channel::<ProactiveEvent>(8);
+        let tool = cli_tool("echo", empty_history(), tx);
         assert_eq!(tool.name(), "run_agent");
         assert!(!tool.description().is_empty());
     }
 
+    // ── RunAgentTool — CLI mode ───────────────────────────────────────────────
+
     #[tokio::test]
-    async fn sync_empty_args_returns_error() {
-        let tool = RunAgentTool::new("echo", 30, empty_history());
+    async fn cli_empty_args_returns_error() {
+        let (tx, _rx) = mpsc::channel::<ProactiveEvent>(8);
+        let tool = cli_tool("echo", empty_history(), tx);
         let result = tool.run("").await;
         assert!(result.to_lowercase().contains("error"), "got: {result:?}");
     }
 
     #[tokio::test]
-    async fn sync_handles_nonexistent_command() {
-        let tool = RunAgentTool::new("__nonexistent__", 10, empty_history());
-        let result = tool.run(r#"{"task": "task"}"#).await;
-        assert!(result.to_lowercase().contains("error"), "got: {result:?}");
-    }
-
-    // ── RunAgentAsyncTool ─────────────────────────────────────────────────────
-
-    #[test]
-    fn async_name_and_description() {
+    async fn cli_returns_acknowledgment_immediately() {
         let (tx, _rx) = mpsc::channel::<ProactiveEvent>(8);
-        let tool = RunAgentAsyncTool::new("echo", empty_history(), tx);
-        assert_eq!(tool.name(), "run_agent_async");
-        assert!(!tool.description().is_empty());
-    }
-
-    #[tokio::test]
-    async fn async_empty_args_returns_error() {
-        let (tx, _rx) = mpsc::channel::<ProactiveEvent>(8);
-        let tool = RunAgentAsyncTool::new("echo", empty_history(), tx);
-        let result = tool.run("").await;
-        assert!(result.to_lowercase().contains("error"), "got: {result:?}");
-    }
-
-    #[tokio::test]
-    async fn async_returns_acknowledgment_immediately() {
-        let (tx, _rx) = mpsc::channel::<ProactiveEvent>(8);
-        let tool = RunAgentAsyncTool::new("sleep 2", empty_history(), tx);
+        let tool = cli_tool("sleep 2", empty_history(), tx);
         let start = std::time::Instant::now();
         let result = tool.run(r#"{"task": "slow task"}"#).await;
         assert!(start.elapsed().as_millis() < 200, "should return immediately");
@@ -945,10 +818,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_delivers_result_to_proactive_channel() {
+    async fn cli_delivers_result_to_proactive_channel() {
         let (tx, mut rx) = mpsc::channel::<ProactiveEvent>(8);
-        // echo ignores -q flag and prints its other args; we just need any output
-        let tool = RunAgentAsyncTool::new("echo agent_done", empty_history(), tx);
+        let tool = cli_tool("echo agent_done", empty_history(), tx);
         tool.run(r#"{"task": "some task"}"#).await;
 
         let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
@@ -966,13 +838,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_passes_history_in_query() {
-        // Use `cat` with -q to verify the history is passed:
-        // the query is "-q {history}", but cat reads stdin... this doesn't work with -q.
-        // Instead, verify via the history content reaching the proactive event label.
+    async fn cli_passes_history_in_query() {
         let (tx, mut rx) = mpsc::channel::<ProactiveEvent>(8);
         let hist = history_with("[User]: busca noticias\n[Jarvis]: delegando");
-        let tool = RunAgentAsyncTool::new("echo done", hist, tx);
+        let tool = cli_tool("echo done", hist, tx);
         tool.run(r#"{"task": "busca noticias"}"#).await;
 
         let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
@@ -989,9 +858,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_delivers_error_on_launch_failure() {
+    async fn cli_delivers_error_on_launch_failure() {
         let (tx, mut rx) = mpsc::channel::<ProactiveEvent>(8);
-        let tool = RunAgentAsyncTool::new("__nonexistent__", empty_history(), tx);
+        let tool = cli_tool("__nonexistent__", empty_history(), tx);
         tool.run(r#"{"task": "task"}"#).await;
 
         let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
@@ -1005,6 +874,43 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    // ── RunAgentTool — cancel / status inline commands ────────────────────────
+
+    #[tokio::test]
+    async fn cancel_returns_no_task_when_idle() {
+        let (tx, _rx) = mpsc::channel::<ProactiveEvent>(8);
+        let active_task = Arc::new(Mutex::new(None));
+        let acp_writer = Arc::new(Mutex::new(None));
+        let tool = cancel_tool(active_task, acp_writer, tx);
+        let result = tool.run(r#"{"task": "cancel"}"#).await;
+        assert!(result.contains("No hay"), "got: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn cancel_fires_cancel_channel() {
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        let active_task = Arc::new(Mutex::new(Some(ActiveAcpTask {
+            session_id: "s1".to_string(),
+            cancel_tx,
+        })));
+        let acp_writer: Arc<Mutex<Option<HermesAcpWriter>>> = Arc::new(Mutex::new(None));
+        let (tx, _rx) = mpsc::channel::<ProactiveEvent>(8);
+        let tool = cancel_tool(active_task, acp_writer, tx);
+        let result = tool.run(r#"{"task": "cancel"}"#).await;
+        assert!(result.contains("cancelada"), "got: {result:?}");
+        assert!(cancel_rx.try_recv().is_ok(), "cancel channel should have fired");
+    }
+
+    #[tokio::test]
+    async fn status_returns_idle_when_no_task() {
+        let (tx, _rx) = mpsc::channel::<ProactiveEvent>(8);
+        let active_task = Arc::new(Mutex::new(None));
+        let acp_writer = Arc::new(Mutex::new(None));
+        let tool = cancel_tool(active_task, acp_writer, tx);
+        let result = tool.run(r#"{"task": "status"}"#).await;
+        assert!(result.contains("no tiene"), "got: {result:?}");
     }
 
     // ── ACP message serialization ─────────────────────────────────────────────
@@ -1093,40 +999,5 @@ mod tests {
         let json = r#"{"type":"some_future_message","foo":"bar"}"#;
         let msg: AcpInbound = serde_json::from_str(json).unwrap();
         assert!(matches!(msg, AcpInbound::Unknown), "expected Unknown variant");
-    }
-
-    // ── CancelAgentTool ───────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn cancel_returns_no_task_when_idle() {
-        let active_task = Arc::new(Mutex::new(None));
-        let acp_writer = Arc::new(Mutex::new(None));
-        let tool = CancelAgentTool::new(Arc::clone(&active_task), Arc::clone(&acp_writer));
-        let result = tool.run("").await;
-        assert!(result.contains("No hay"), "got: {result:?}");
-    }
-
-    #[tokio::test]
-    async fn cancel_fires_cancel_channel() {
-        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
-        let active_task = Arc::new(Mutex::new(Some(ActiveAcpTask {
-            session_id: "s1".to_string(),
-            cancel_tx,
-        })));
-        let acp_writer: Arc<Mutex<Option<HermesAcpWriter>>> = Arc::new(Mutex::new(None));
-        let tool = CancelAgentTool::new(Arc::clone(&active_task), Arc::clone(&acp_writer));
-        let result = tool.run("").await;
-        assert!(result.contains("cancelada"), "got: {result:?}");
-        assert!(cancel_rx.try_recv().is_ok(), "cancel channel should have fired");
-    }
-
-    // ── AgentStatusTool ───────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn status_returns_idle_when_no_task() {
-        let active_task = Arc::new(Mutex::new(None));
-        let tool = AgentStatusTool::new(active_task);
-        let result = tool.run("").await;
-        assert!(result.contains("no tiene"), "got: {result:?}");
     }
 }

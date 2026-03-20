@@ -37,10 +37,8 @@ use crate::profile::{build_profile_context, ProfileFact};
 use crate::stt::{WhisperStt, SttStream};
 use whisper_rs::install_logging_hooks;
 use crate::tools::{
-    format_history, AcpInbound, ActiveAcpTask, AgentStatusTool, CalendarCreateTool,
-    CalendarGetEventsTool, CancelAgentTool, ConversationMode, CurrentTimeTool, HermesAcpWriter,
-    OpenAppTool, ReadClipboardTool, ReadFileTool, RunAgentAcpTool, RunAgentAsyncTool,
-    RunShellTool, SendNotificationTool, SetClipboardTool, SetConversationModeTool,
+    format_history, AcpInbound, ActiveAcpTask, ConversationMode, CurrentTimeTool, HermesAcpWriter,
+    OpenAppTool, ReadClipboardTool, RunAgentTool, SetClipboardTool, SetConversationModeTool,
     TakeScreenshotTool, ToolRegistry,
 };
 use crate::tts::{SayTts, SentenceSplitter, TtsEngine};
@@ -99,20 +97,10 @@ async fn main() -> Result<()> {
 
     // Always available
     tool_registry.register(CurrentTimeTool);
-    tool_registry.register(CalendarGetEventsTool);
-    tool_registry.register(CalendarCreateTool);
     tool_registry.register(ReadClipboardTool);
     tool_registry.register(SetClipboardTool);
-    tool_registry.register(ReadFileTool);
     tool_registry.register(OpenAppTool);
-    tool_registry.register(SendNotificationTool);
     tool_registry.register(SetConversationModeTool::new(Arc::clone(&conv_mode)));
-
-    // Shell — enabled via SHELL_ENABLED=1
-    if config.shell_enabled {
-        info!(target: "voicebot", "Shell tool enabled (timeout={}s)", config.shell_timeout_secs);
-        tool_registry.register(RunShellTool::new(config.shell_timeout_secs));
-    }
 
     // Vision (screenshot) — enabled when VISION_URL is set
     if let Some(ref vision_url) = config.vision_url {
@@ -124,34 +112,32 @@ async fn main() -> Result<()> {
         ));
     }
 
-    // External agent delegation
-    if config.agent_mode == "acp" {
-        info!(target: "voicebot", "Agent ACP mode enabled: {}", config.agent_acp_command);
-        let acp_writer: Arc<tokio::sync::Mutex<Option<HermesAcpWriter>>> =
-            Arc::new(tokio::sync::Mutex::new(None));
-        let acp_inbound: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<AcpInbound>>>> =
-            Arc::new(tokio::sync::Mutex::new(None));
-        let active_task: Arc<tokio::sync::Mutex<Option<ActiveAcpTask>>> =
-            Arc::new(tokio::sync::Mutex::new(None));
-        tool_registry.register(RunAgentAcpTool::new(
+    // External agent delegation — unified RunAgentTool (CLI or ACP mode)
+    let acp_writer: Arc<tokio::sync::Mutex<Option<HermesAcpWriter>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+    let acp_inbound: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<AcpInbound>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+    let active_task: Arc<tokio::sync::Mutex<Option<ActiveAcpTask>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
+    if config.agent_mode == "acp" || config.agent_command.is_some() {
+        let mode = config.agent_mode.clone();
+        let agent_cmd = config.agent_command.clone();
+        let acp_cmd = config.agent_acp_command.clone();
+        info!(
+            target: "voicebot",
+            "Agent delegation enabled (mode={})",
+            mode
+        );
+        tool_registry.register(RunAgentTool::new(
+            agent_cmd,
             Arc::clone(&acp_writer),
             Arc::clone(&acp_inbound),
             Arc::clone(&active_task),
-            &config.agent_acp_command,
             shared_history.clone(),
             proactive_tx.clone(),
-        ));
-        tool_registry.register(CancelAgentTool::new(
-            Arc::clone(&active_task),
-            Arc::clone(&acp_writer),
-        ));
-        tool_registry.register(AgentStatusTool::new(Arc::clone(&active_task)));
-    } else if let Some(ref agent_command) = config.agent_command {
-        info!(target: "voicebot", "Agent delegation enabled (CLI): {}", agent_command);
-        tool_registry.register(RunAgentAsyncTool::new(
-            agent_command,
-            shared_history.clone(),
-            proactive_tx.clone(),
+            mode,
+            acp_cmd,
         ));
     }
 
