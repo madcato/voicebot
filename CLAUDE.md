@@ -40,7 +40,7 @@ Microphone
   → LLM client (llama.cpp HTTP, streaming SSE, cache_prompt=true)
       tokens streamed as they arrive
   → SentenceSplitter (buffer until punctuation boundary)
-  → TTS (macOS `say`, subprocess)
+  → TTS (macOS sfspeech or `say`, subprocess, or kokoro)
       synthesizes sentence by sentence
   → AudioOutput (CPAL speaker)
 ```
@@ -115,11 +115,4 @@ The following were part of the S2S approach and will be replaced:
 - Generate synthetic audio (sine waves / silence) for VAD and buffer tests
 - Mock LLM/TTS via trait objects for pipeline integration tests
 - Whisper tests require model file; skip in CI if not present (`#[ignore]`)
-- `say` TTS tests require macOS with voices installed
-
-### Reference project
-`/Users/danielvela/projects/ai/butler` — the working Python equivalent.
-Key files to reference:
-- `llm/zosia/stateful-llm-server.py` — stateful LLM session + llama.cpp KV-cache pattern
-- `text-to-speech/main.py` — sentence splitting + Piper streaming pattern
-- `speech-to-text/singleuser/main.py` — faster-whisper + VAD integration pattern
+- `say` TTS tests require macOS with voices installed, kokoro for Linux CI
