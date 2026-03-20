@@ -363,9 +363,7 @@ async fn main() -> Result<()> {
         let time_str = now.format("%H:%M").to_string();
         let notification = format!(
             "[Sistema: el voicebot acaba de arrancar. Son las {time_str}.\n\
-             Saluda al usuario de forma natural y muy concisa.\n\
-             Si conoces su nombre (aparece en el perfil de usuario), úsalo.\n\
-             Si no lo conoces, preséntate y pregúntale su nombre.]"
+             Saluda al usuario de forma natural y muy concisa.]"
         );
         let cancel_c      = Arc::clone(&cancel);
         let tts_c         = Arc::clone(&tts);

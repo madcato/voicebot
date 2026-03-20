@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn build_daemon_system_prompt_includes_base_prompt() {
-        let base = "Eres Jarvis, el asistente de Daniel.";
+        let base = "Eres Jarvis, el asistente.";
         let result = build_daemon_system_prompt(base);
         assert!(result.contains(base));
         assert!(result.contains("NOTHING"));
