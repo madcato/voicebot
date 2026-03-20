@@ -9,23 +9,26 @@ use tracing::{debug, info, warn};
 
 use super::Tool;
 use crate::agents::ProactiveEvent;
-use crate::llm::Message;
 
 // ── History formatting ────────────────────────────────────────────────────────
 
 /// Format conversation messages as a human-readable chat history for the agent.
-/// Only user and assistant turns are included; system and tool messages are omitted.
+/// Only user and assistant turns with text content are included; system,
+/// tool-call, and tool-result messages are omitted.
 ///
 /// The result is passed as the `-q` argument to the agent CLI so it has full
 /// conversational context when processing the delegation request.
-pub fn format_history(messages: &[Message]) -> String {
+pub fn format_history(messages: &[serde_json::Value]) -> String {
     messages
         .iter()
-        .filter(|m| m.role == "user" || m.role == "assistant")
-        .map(|m| match m.role.as_str() {
-            "user" => format!("[User]: {}", m.content),
-            "assistant" => format!("[Jarvis]: {}", m.content),
-            _ => unreachable!(),
+        .filter_map(|m| {
+            let role = m["role"].as_str()?;
+            let content = m["content"].as_str()?; // skips null-content tool_call messages
+            match role {
+                "user" => Some(format!("[User]: {content}")),
+                "assistant" => Some(format!("[Jarvis]: {content}")),
+                _ => None,
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -825,22 +828,25 @@ mod tests {
 
     #[test]
     fn format_history_single_user_turn() {
-        let msgs = vec![Message::user("hola")];
+        let msgs = vec![serde_json::json!({"role": "user", "content": "hola"})];
         assert_eq!(format_history(&msgs), "[User]: hola");
     }
 
     #[test]
     fn format_history_user_and_assistant() {
-        let msgs = vec![Message::user("hola"), Message::assistant("hola Daniel")];
+        let msgs = vec![
+            serde_json::json!({"role": "user", "content": "hola"}),
+            serde_json::json!({"role": "assistant", "content": "hola Daniel"}),
+        ];
         assert_eq!(format_history(&msgs), "[User]: hola\n[Jarvis]: hola Daniel");
     }
 
     #[test]
     fn format_history_skips_system_messages() {
         let msgs = vec![
-            Message::system("Eres Jarvis"),
-            Message::user("hola"),
-            Message::assistant("hola"),
+            serde_json::json!({"role": "system", "content": "Eres Jarvis"}),
+            serde_json::json!({"role": "user", "content": "hola"}),
+            serde_json::json!({"role": "assistant", "content": "hola"}),
         ];
         let result = format_history(&msgs);
         assert!(!result.contains("Eres Jarvis"), "system message should be excluded");
@@ -850,9 +856,9 @@ mod tests {
     #[test]
     fn format_history_skips_tool_messages() {
         let msgs = vec![
-            Message::user("qué hora es"),
-            Message::tool("14:30"),
-            Message::assistant("Son las 14:30"),
+            serde_json::json!({"role": "user", "content": "qué hora es"}),
+            serde_json::json!({"role": "tool", "tool_call_id": "c1", "content": "14:30"}),
+            serde_json::json!({"role": "assistant", "content": "Son las 14:30"}),
         ];
         let result = format_history(&msgs);
         assert!(!result.contains("14:30\n"), "bare tool result should be excluded");
@@ -860,12 +866,28 @@ mod tests {
     }
 
     #[test]
+    fn format_history_skips_tool_call_assistant_messages() {
+        let msgs = vec![
+            serde_json::json!({"role": "user", "content": "Activa el modo ambiente"}),
+            serde_json::json!({"role": "assistant", "content": serde_json::Value::Null,
+                "tool_calls": [{"id": "c1", "type": "function",
+                    "function": {"name": "set_conversation_mode", "arguments": "{\"mode\":\"ambient\"}"}}]}),
+            serde_json::json!({"role": "tool", "tool_call_id": "c1", "content": "Ambient mode activated."}),
+            serde_json::json!({"role": "assistant", "content": "Modo ambiente activado."}),
+        ];
+        let result = format_history(&msgs);
+        assert!(!result.contains("Ambient mode activated."), "tool result should be excluded");
+        assert!(result.contains("[Jarvis]: Modo ambiente activado."));
+        assert!(result.contains("[User]: Activa el modo ambiente"));
+    }
+
+    #[test]
     fn format_history_multiple_turns() {
         let msgs = vec![
-            Message::user("primera"),
-            Message::assistant("respuesta uno"),
-            Message::user("segunda"),
-            Message::assistant("respuesta dos"),
+            serde_json::json!({"role": "user", "content": "primera"}),
+            serde_json::json!({"role": "assistant", "content": "respuesta uno"}),
+            serde_json::json!({"role": "user", "content": "segunda"}),
+            serde_json::json!({"role": "assistant", "content": "respuesta dos"}),
         ];
         let expected = "[User]: primera\n[Jarvis]: respuesta uno\n[User]: segunda\n[Jarvis]: respuesta dos";
         assert_eq!(format_history(&msgs), expected);

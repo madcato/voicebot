@@ -25,17 +25,19 @@ impl Message {
 
 /// Conversation state for an OpenAI-compatible chat endpoint.
 ///
-/// Stores messages as a `Vec<Message>` (user + assistant turns).
-/// Tool call/result exchanges live in `messages` during a turn but are
-/// not persisted to the DB — they are implementation details.
+/// Stores messages as `Vec<serde_json::Value>` (OpenAI JSON format) so that
+/// tool-call exchanges (assistant messages with `tool_calls` + tool result
+/// messages) can be persisted verbatim alongside regular user/assistant turns.
+/// This ensures the LLM sees prior tool calls in its context window and does not
+/// learn to respond verbally without calling tools.
 #[derive(Clone)]
 pub struct LlmSession {
     /// Base system prompt (never modified after construction).
     original_system_prompt: String,
     /// Current conversation summary, injected into the system message when present.
     summary: Option<String>,
-    /// Conversation turns: user, assistant, and transient tool messages.
-    pub messages: Vec<Message>,
+    /// Conversation turns in OpenAI JSON format (user, assistant, tool messages).
+    pub messages: Vec<serde_json::Value>,
     #[allow(dead_code)]
     pub slot_id: u8,
 }
@@ -84,51 +86,65 @@ impl LlmSession {
     }
 
     /// Build the full message list as JSON values for an API call.
-    ///
-    /// Identical to `all_messages()` but returns serde_json::Value so callers
-    /// can append tool-call / tool-result messages with arbitrary fields
-    /// (tool_calls, tool_call_id, null content) that Message does not model.
     pub fn all_messages_api(&self) -> Vec<serde_json::Value> {
-        self.all_messages()
-            .into_iter()
-            .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
-            .collect()
+        let system_content = self.system_content();
+        let mut msgs = vec![serde_json::json!({"role": "system", "content": system_content})];
+        msgs.extend(self.messages.clone());
+        msgs
     }
 
     /// Build the full message list for an API call: system first, then conversation.
+    ///
+    /// Returns `Vec<Message>` for callers that need the legacy struct format.
+    /// Tool-call messages (null content) are skipped since `Message` cannot
+    /// represent them — they are only relevant to the OpenAI API format.
     pub fn all_messages(&self) -> Vec<Message> {
-        let system_content = match &self.summary {
-            None => self.original_system_prompt.clone(),
-            Some(s) => format!(
-                "{}\n\n[CONVERSATION SUMMARY]\n{}",
-                self.original_system_prompt, s
-            ),
-        };
-        let mut msgs = vec![Message::system(system_content)];
-        msgs.extend(self.messages.clone());
+        let mut msgs = vec![Message::system(self.system_content())];
+        for m in &self.messages {
+            if let (Some(role), Some(content)) = (m["role"].as_str(), m["content"].as_str()) {
+                msgs.push(Message { role: role.to_string(), content: content.to_string() });
+            }
+        }
         msgs
     }
 
     /// Append a user turn.
     pub fn add_user_turn(&mut self, text: &str) {
-        self.messages.push(Message::user(text));
+        self.messages.push(serde_json::json!({"role": "user", "content": text}));
     }
 
     /// Append the assistant's final response for this turn.
     pub fn add_assistant_turn(&mut self, text: &str) {
-        self.messages.push(Message::assistant(text));
+        self.messages.push(serde_json::json!({"role": "assistant", "content": text}));
     }
 
-    /// Inject a tool call + result into the message list.
+    /// Persist tool call exchanges from a completed pipeline turn.
     ///
-    /// Called when the LLM emitted a tool call. Adds the tool call as an
-    /// assistant message and the result as a tool message, so the next LLM
-    /// call sees the full exchange and continues from there.
-    /// Tool messages are NOT persisted to DB and NOT counted for summarization.
+    /// `exchanges` contains the tool-call assistant messages and tool-result
+    /// messages that were built during the turn's tool loop. Storing them in the
+    /// session ensures future LLM calls see that tool calls were made here,
+    /// preventing the model from learning to respond verbally without calling tools.
+    pub fn add_tool_exchange(&mut self, exchanges: Vec<serde_json::Value>) {
+        self.messages.extend(exchanges);
+    }
+
+    /// Inject a tool call + result into the message list (OpenAI format).
     #[allow(dead_code)]
-    pub fn add_tool_result(&mut self, tool_call_text: &str, result: &str) {
-        self.messages.push(Message::assistant(tool_call_text));
-        self.messages.push(Message::tool(result));
+    pub fn add_tool_result(&mut self, tool_call_id: &str, name: &str, args: &str, result: &str) {
+        self.messages.push(serde_json::json!({
+            "role": "assistant",
+            "content": serde_json::Value::Null,
+            "tool_calls": [{
+                "id": tool_call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": args}
+            }]
+        }));
+        self.messages.push(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": result
+        }));
     }
 
     // ── Summarization ──────────────────────────────────────────────────────────
@@ -140,7 +156,10 @@ impl LlmSession {
         if self.messages.len() < 4 {
             return false;
         }
-        let total_chars: usize = self.messages.iter().map(|m| m.content.len()).sum::<usize>()
+        let total_chars: usize = self.messages.iter().map(|m| {
+            m["content"].as_str().map_or(0, str::len)
+                + m.get("tool_calls").map_or(0, |tc| tc.to_string().len())
+        }).sum::<usize>()
             + self.original_system_prompt.len()
             + self.summary.as_deref().map_or(0, str::len);
         let approx_tokens = total_chars * 10 / 35;
@@ -163,10 +182,14 @@ impl LlmSession {
 
         let mut conversation = String::new();
         for msg in &self.messages[..summarize_count] {
-            conversation.push_str(&msg.role);
-            conversation.push_str(": ");
-            conversation.push_str(&msg.content);
-            conversation.push_str("\n\n");
+            if let (Some(role), Some(content)) = (msg["role"].as_str(), msg["content"].as_str()) {
+                if role == "user" || role == "assistant" {
+                    conversation.push_str(role);
+                    conversation.push_str(": ");
+                    conversation.push_str(content);
+                    conversation.push_str("\n\n");
+                }
+            }
         }
 
         Some(vec![
@@ -184,6 +207,18 @@ impl LlmSession {
         let keep_start = self.messages.len().saturating_sub(keep_n);
         self.messages = self.messages[keep_start..].to_vec();
         self.summary = Some(summary.to_string());
+    }
+
+    // ── Private helpers ────────────────────────────────────────────────────────
+
+    fn system_content(&self) -> String {
+        match &self.summary {
+            None => self.original_system_prompt.clone(),
+            Some(s) => format!(
+                "{}\n\n[CONVERSATION SUMMARY]\n{}",
+                self.original_system_prompt, s
+            ),
+        }
     }
 }
 
@@ -280,10 +315,10 @@ mod tests {
         s.apply_summary("Summary of old turns.", 4);
         // Only the last 4 messages remain.
         assert_eq!(s.messages.len(), 4);
-        assert!(s.messages[0].content.contains("User message 3"));
-        assert!(s.messages[1].content.contains("Assistant response 3"));
-        assert!(s.messages[2].content.contains("User message 4"));
-        assert!(s.messages[3].content.contains("Assistant response 4"));
+        assert_eq!(s.messages[0]["content"], "User message 3");
+        assert_eq!(s.messages[1]["content"], "Assistant response 3");
+        assert_eq!(s.messages[2]["content"], "User message 4");
+        assert_eq!(s.messages[3]["content"], "Assistant response 4");
     }
 
     #[test]
@@ -328,6 +363,35 @@ mod tests {
         let msgs = s.all_messages();
         assert_eq!(msgs.len(), 1 + 4); // system + 4 kept messages
         assert_eq!(msgs[0].role, "system");
+    }
+
+    // ── all_messages_api ──────────────────────────────────────────────────────
+
+    #[test]
+    fn all_messages_api_includes_tool_exchanges() {
+        let mut s = LlmSession::new("System.", 0);
+        s.add_user_turn("Activa el modo ambiente");
+        s.add_tool_exchange(vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": serde_json::Value::Null,
+                "tool_calls": [{"id": "call_1", "type": "function",
+                    "function": {"name": "set_conversation_mode", "arguments": "{\"mode\":\"ambient\"}"}}]
+            }),
+            serde_json::json!({"role": "tool", "tool_call_id": "call_1", "content": "Ambient mode activated."}),
+        ]);
+        s.add_assistant_turn("Modo ambiente activado, señor.");
+
+        let api_msgs = s.all_messages_api();
+        // system + user + tool_call_assistant + tool_result + assistant = 5
+        assert_eq!(api_msgs.len(), 5);
+        assert_eq!(api_msgs[0]["role"], "system");
+        assert_eq!(api_msgs[1]["role"], "user");
+        assert_eq!(api_msgs[2]["role"], "assistant");
+        assert!(api_msgs[2]["tool_calls"].is_array());
+        assert_eq!(api_msgs[3]["role"], "tool");
+        assert_eq!(api_msgs[4]["role"], "assistant");
+        assert_eq!(api_msgs[4]["content"], "Modo ambiente activado, señor.");
     }
 
     // ── from_history ──────────────────────────────────────────────────────────

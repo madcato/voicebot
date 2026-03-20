@@ -667,17 +667,17 @@ async fn main() -> Result<()> {
                             last_stt_gen = stt_stream.submit(speech_buffer.get_samples());
                             last_stt_submit_ms = buf_ms;
                         }
-                        // Auto-return to Active after AMBIENT_CLEAR_SECS of no speech.
+                        // Auto-return to Ambient after AMBIENT_CLEAR_SECS of no speech.
                         {
                             let mut mode = conv_mode.lock().unwrap();
-                            if *mode == ConversationMode::Ambient
+                            if *mode == ConversationMode::Active
                                 && last_speech_at.elapsed().as_secs() >= config.ambient_clear_secs
                             {
-                                *mode = ConversationMode::Active;
+                                *mode = ConversationMode::Ambient;
                                 non_user_streak = 0;
                                 info!(
                                     target: "pipeline",
-                                    "Ambient mode: {}s of silence elapsed — returning to Active",
+                                    "Ambient mode: {}s of silence elapsed — returning to Ambient",
                                     config.ambient_clear_secs
                                 );
                             }
@@ -994,6 +994,8 @@ async fn run_pipeline(
         let tool_defs = tools.tool_definitions();
 
         let mut messages = session_snapshot.all_messages_api();
+        // Track where the snapshot ends so we can extract the tool exchange later.
+        let base_msg_len = messages.len();
 
         // Tool call loop — allows the model to call multiple tools sequentially
         // before producing its final spoken response (max MAX_TOOL_ITERATIONS).
@@ -1061,7 +1063,17 @@ async fn run_pipeline(
         if let Err(e) = db.save_message(session_id, "Assistant", &final_response).await {
             warn!(target: "db", "Failed to save assistant message: {}", e);
         }
-        llm_session.lock().unwrap().add_assistant_turn(&final_response);
+        {
+            let mut s = llm_session.lock().unwrap();
+            // Persist any tool-call exchanges so the LLM sees them in future turns.
+            // Without this the history only shows verbal responses, training the
+            // model to skip tool calls entirely after a few turns.
+            let tool_exchanges = messages[base_msg_len..].to_vec();
+            if !tool_exchanges.is_empty() {
+                s.add_tool_exchange(tool_exchanges);
+            }
+            s.add_assistant_turn(&final_response);
+        }
         committed = true;
 
         // ── Background GPU tasks — overlap with tail audio playback ───────────
@@ -1229,6 +1241,7 @@ async fn run_text_pipeline(
 
     let tool_defs = tools.tool_definitions();
     let mut messages = messages_api;
+    let base_msg_len = messages.len();
     let mut last_play: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
     let mut llm_text_final = String::new();
 
@@ -1286,7 +1299,12 @@ async fn run_text_pipeline(
 
     // Persist assistant response to session and DB.
     if !llm_text_final.is_empty() {
-        llm_session.lock().unwrap().add_assistant_turn(&llm_text_final);
+        let mut s = llm_session.lock().unwrap();
+        let tool_exchanges = messages[base_msg_len..].to_vec();
+        if !tool_exchanges.is_empty() {
+            s.add_tool_exchange(tool_exchanges);
+        }
+        s.add_assistant_turn(&llm_text_final);
         let db_c = db.clone();
         let text_c = llm_text_final.clone();
         tokio::spawn(async move {

@@ -196,7 +196,7 @@ impl Config {
                     .to_string()
             }),
             llm_temperature: env::var("LLM_TEMPERATURE")
-                .unwrap_or_else(|_| "0.7".to_string())
+                .unwrap_or_else(|_| "0.3".to_string())
                 .parse()
                 .context("Invalid LLM_TEMPERATURE")?,
 
@@ -297,11 +297,11 @@ impl Config {
                 .unwrap_or_else(|_| "jarvis".to_string())
                 .to_lowercase(),
             ambient_clear_secs: env::var("AMBIENT_CLEAR_SECS")
-                .unwrap_or_else(|_| "300".to_string())
+                .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .context("Invalid AMBIENT_CLEAR_SECS")?,
             speaker_ambient_trigger: env::var("SPEAKER_AMBIENT_TRIGGER")
-                .unwrap_or_else(|_| "3".to_string())
+                .unwrap_or_else(|_| "1".to_string())
                 .parse()
                 .context("Invalid SPEAKER_AMBIENT_TRIGGER")?,
 

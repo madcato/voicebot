@@ -191,16 +191,22 @@ impl LlamaClient {
             payload["cache_prompt"] = serde_json::json!(true);
             payload["slot_id"] = serde_json::json!(self.slot_id);
         } else {
-            // mlx-lm + Qwen3: disable thinking mode so the model responds directly
-            // without <think>…</think> blocks that ThinkFilter would strip entirely.
-            // Some mlx-lm versions read the top-level field; others need it inside
-            // chat_template_kwargs. Send both to cover all versions.
-            payload["enable_thinking"] = serde_json::json!(false);
-            payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
-            // Prevent the model from looping (repeating sentences). mlx-lm uses
-            // `repetition_penalty`; llama.cpp uses --repeat-penalty in the server args.
+            // mlx-lm: prevent the model from looping (repeating sentences).
+            // llama.cpp controls this via --repeat-penalty in server args.
             payload["repetition_penalty"] = serde_json::json!(1.1);
         }
+        // Disable Qwen3 thinking mode for all backends.
+        //
+        // With thinking enabled, Qwen3 reasons in a <think>…</think> block and
+        // sometimes argues itself OUT of calling a tool, producing a verbal
+        // acknowledgment instead ("Modo activado, señor"). The ThinkFilter
+        // strips the block but the tool call decision was already lost.
+        // Disabling thinking makes Qwen3 call tools reliably. Non-Qwen models
+        // ignore these fields.
+        //
+        // Both fields are sent because some server versions read one or the other.
+        payload["enable_thinking"] = serde_json::json!(false);
+        payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
         if !tools.is_empty() {
             payload["tools"] = serde_json::json!(tools);
             payload["tool_choice"] = serde_json::json!("auto");

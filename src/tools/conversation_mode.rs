@@ -84,3 +84,4 @@ impl Tool for SetConversationModeTool {
         msg.to_string()
     }
 }
+
