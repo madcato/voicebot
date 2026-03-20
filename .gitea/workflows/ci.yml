@@ -69,7 +69,7 @@ jobs:
 
       - name: Run STT e2e tests (Whisper model required)
         env:
-          WHISPER_MODEL: models/ggml-base.bin
+          WHISPER_MODEL: models/models/ggml-large-v3-turbo.bin
         run: |
           cargo test --features kokoro \
             e2e::stt_transcribes_wav_file \
