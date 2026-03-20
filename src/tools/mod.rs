@@ -74,7 +74,18 @@ impl ToolRegistry {
 
     /// Returns a section to append to the system prompt describing how to call tools.
     pub fn system_prompt_section(&self) -> String {
-        String::new()
+        if self.tools.is_empty() {
+            return String::new();
+        }
+        "\n\nREGLA CRÍTICA — USO DE HERRAMIENTAS: \
+         Tienes herramientas disponibles para ejecutar acciones reales. \
+         Cuando el usuario solicite una acción que corresponda a una herramienta \
+         (cambiar modo de conversación, consultar la hora, crear eventos, \
+         abrir apps, ejecutar comandos, etc.), DEBES llamar a la herramienta \
+         inmediatamente usando la función correspondiente. \
+         NUNCA simules ni finjas que ejecutaste la acción sin llamar a la herramienta. \
+         Primero llama a la herramienta, luego responde al usuario con el resultado."
+            .to_string()
     }
 
     /// Parse a tool call from LLM output.
@@ -216,9 +227,10 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_section_always_empty() {
+    fn system_prompt_section_non_empty_when_tools_registered() {
         let r = registry_with_current_time();
-        assert!(r.system_prompt_section().is_empty());
+        assert!(!r.system_prompt_section().is_empty());
+        assert!(r.system_prompt_section().contains("herramienta"));
     }
 
     #[test]
