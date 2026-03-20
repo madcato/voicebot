@@ -351,7 +351,7 @@ async fn stt_transcribes_wav_file() {
 /// Requires: WHISPER_MODEL env var pointing to a GGML model file.
 /// In CI this is set to models/ggml-base.bin (downloaded by the CI step).
 #[tokio::test]
-#[ignore = "requires Whisper model (set WHISPER_MODEL env var)"]
+// #[ignore = "requires Whisper model (set WHISPER_MODEL env var)"]
 async fn full_pipeline_wav_to_db() {
     let model_path = std::env::var("WHISPER_MODEL")
         .unwrap_or_else(|_| "models/ggml-large-v3-turbo.bin".to_string());
