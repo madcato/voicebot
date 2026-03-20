@@ -793,7 +793,7 @@ These are the features that transform the voicebot from a conversational assista
 Copy this into `LLM_SYSTEM_PROMPT` in `.env` and adjust the personal details to match your reality:
 
 ```
-Eres Jarvis, el asistente personal de inteligencia artificial de Daniel.
+Eres Jarvis, el asistente personal de inteligencia artificial.
 Llevas años trabajando con él y le conoces bien.
 
 PERSONALIDAD
@@ -804,11 +804,11 @@ Tienes opiniones propias sobre tecnología, arquitectura de software y diseño,
 y no las ocultas cuando son relevantes.
 Cuando algo te parece mala idea, lo dices con tacto pero con claridad.
 Ocasionalmente haces un chiste o comentario sarcástico, pero solo cuando
-el contexto lo permite y nunca a costa de Daniel.
+el contexto lo permite y nunca a costa del usuario.
 
 FORMA DE HABLAR
-- Hablas siempre en español, salvo que Daniel cambie de idioma.
-- Llamas a Daniel por su nombre, nunca "usuario", "señor" ni "amigo".
+- Hablas siempre en español, salvo que el usuario cambie de idioma.
+- Llamas al usuario "señor".
 - Tus respuestas son concisas y directas. No rellenas con frases vacías.
 - No usas listas ni markdown: hablas, no escribes documentos.
 - Cuando no sabes algo, lo dices. No inventas.
@@ -837,11 +837,11 @@ Describes brevemente lo que vas a hacer antes de hacerlo cuando puede sorprender
 
 LÍMITES
 No exageras tus capacidades. Si algo requiere un agente especializado o más tiempo,
-lo dices y delegas, informando a Daniel del resultado cuando esté listo.
+lo dices y delegas, informando al usuario del resultado cuando esté listo.
 No eres un modelo de lenguaje genérico. Eres Jarvis. Actúa en consecuencia.
 ```
 
-This prompt is a starting point. It should be refined over time as Jarvis learns more about Daniel through the `user_profile` system. The `[USER PROFILE]` block injected automatically by the profile module will complement and personalise it further.
+This prompt is a starting point. It should be refined over time as Jarvis learns more about the user through the `user_profile` system. The `[USER PROFILE]` block injected automatically by the profile module will complement and personalise it further.
 
 ---
 
@@ -920,7 +920,7 @@ proactive_tx → voicebot speaks: "Hecho. Cuatro errores corregidos en main.rs"
 **This is the biggest psychological shift** — from reactive assistant to proactive companion. Butler should say things like:
 
 ```
-"Buenos días Daniel. Son las 9:10. Tienes una reunión en 50 minutos,
+"Buenos días señor. Son las 9:10. Tienes una reunión en 50 minutos,
  un PR sin revisar desde ayer, y la batería al 23%."
 
 "Llevas dos horas y media sin moverte. ¿Quieres un descanso?"
@@ -943,7 +943,7 @@ enum ProactiveEvent {
 }
 ```
 
-**The inference daemon** is the key piece: a background `tokio::spawn` task that every 5 minutes asks the LLM: *"Given the current system state and what I know about Daniel, is there anything worth saying proactively?"* If yes, push to `proactive_tx`. This is what makes Butler seem to anticipate needs — it is constantly, silently checking.
+**The inference daemon** is the key piece: a background `tokio::spawn` task that every 5 minutes asks the LLM: *"Given the current system state and what I know about the user, is there anything worth saying proactively?"* If yes, push to `proactive_tx`. This is what makes Butler seem to anticipate needs — it is constantly, silently checking.
 
 **Rate limiting:** Butler should not be annoying. Rules: no more than one proactive message every 10 minutes during work hours; none during detected meetings; always respect barge-in.
 

@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn system_prompt_loaded_from_env_var() {
-        let prompt = "Eres Jarvis, el asistente personal de Daniel.";
+        let prompt = "Eres Jarvis, el asistente personal.";
         temp_env::with_var("LLM_SYSTEM_PROMPT", Some(prompt), || {
             let config = Config::from_env().unwrap();
             assert_eq!(config.llm_system_prompt, prompt);
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn system_prompt_from_config_becomes_first_message() {
-        let prompt = "Eres Jarvis, el asistente personal de Daniel.";
+        let prompt = "Eres Jarvis, el asistente personal.";
         temp_env::with_var("LLM_SYSTEM_PROMPT", Some(prompt), || {
             let config = Config::from_env().unwrap();
             let session = LlmSession::new(&config.llm_system_prompt, config.llm_slot_id);
@@ -377,7 +377,7 @@ mod tests {
             let config = Config::from_env().unwrap();
             let mut session = LlmSession::new(&config.llm_system_prompt, config.llm_slot_id);
             session.add_user_turn("Hola");
-            session.add_assistant_turn("Hola, Daniel.");
+            session.add_assistant_turn("Hola, señor.");
             session.add_user_turn("¿Qué hora es?");
 
             let msgs = session.all_messages();
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn full_chain_env_to_context() {
         // This test mirrors exactly what main.rs does when building the session.
-        let prompt = "Eres Jarvis, el asistente personal de Daniel. Llevas años trabajando con él.";
+        let prompt = "Eres Jarvis, el asistente personal. Llevas años trabajando con él.";
 
         temp_env::with_var("LLM_SYSTEM_PROMPT", Some(prompt), || {
             // Step 1: load config (mirrors dotenvy::dotenv() + Config::from_env() in main)
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn system_prompt_preserved_after_summarization() {
-        let prompt = "Eres Jarvis, el asistente de Daniel.";
+        let prompt = "Eres Jarvis, el asistente.";
         temp_env::with_var("LLM_SYSTEM_PROMPT", Some(prompt), || {
             let config = Config::from_env().unwrap();
             let mut session = LlmSession::new(&config.llm_system_prompt, config.llm_slot_id);
