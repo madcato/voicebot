@@ -50,15 +50,15 @@ jobs:
       - name: Cache Whisper model
         uses: actions/cache@v4
         with:
-          path: models/ggml-base.bin
+          path: models/ggml-large-v3-turbo.bin
           key: whisper-ggml-base-v1
 
       - name: Download Whisper base model
         run: |
           mkdir -p models
-          if [ ! -f models/ggml-base.bin ]; then
-            curl -L -o models/ggml-base.bin \
-              https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+          if [ ! -f models/ggml-large-v3-turbo.bin ]; then
+            curl -L -o models/ggml-large-v3-turbo.bin \
+              https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
           fi
 
       - name: Run unit and pipeline e2e tests
@@ -73,4 +73,5 @@ jobs:
         run: |
           cargo test --features kokoro \
             e2e::stt_transcribes_wav_file \
+            e2e::full_pipeline_wav_to_db \
             -- --ignored --nocapture
