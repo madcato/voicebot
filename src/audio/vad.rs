@@ -6,8 +6,8 @@ use voice_activity_detector::VoiceActivityDetector as SileroDetector;
 const VAD_SAMPLE_RATE: u32 = 16_000;
 const VAD_FRAME_SIZE: usize = 512;
 
-/// Consecutive 32ms frames of speech required before signalling SpeechStart (~250ms).
-const SPEECH_FRAMES_NEEDED: u32 = 8;
+/// Consecutive 32ms frames of speech required before signalling SpeechStart (1 frame = 32ms).
+const SPEECH_FRAMES_NEEDED: u32 = 1;
 /// Probability threshold above which a frame is considered speech.
 const SPEECH_THRESHOLD: f32 = 0.5;
 

@@ -52,7 +52,7 @@ mod e2e_tests;
 
 const AUDIO_CHANNEL_CAPACITY: usize = 200;
 const MAX_SPEECH_BUFFER_SECS: u32 = 30;
-const MIN_SPEECH_DURATION_MS: u32 = 800;
+const MIN_SPEECH_DURATION_MS: u32 = 300;
 /// Pre-roll chunks kept before speech onset to recover VAD onset delay (~250ms).
 const PRE_ROLL_CHUNKS: usize = 15;
 

@@ -1,6 +1,24 @@
 use anyhow::{Context, Result};
+use std::borrow::Cow;
 use std::sync::Mutex;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
+
+/// Minimum audio length fed to Whisper. Audio shorter than this is padded with
+/// trailing silence so the model has enough context to decode short utterances
+/// reliably ("yes", "ok", "sí", etc.).
+const MIN_AUDIO_SAMPLES: usize = 16_000; // 1 second at 16 kHz
+
+/// Pad `audio` with trailing zeros if shorter than `min_samples`.
+/// Returns a `Cow` to avoid allocation when padding is not needed.
+pub(crate) fn pad_to_min_duration(audio: &[f32], min_samples: usize) -> Cow<'_, [f32]> {
+    if audio.len() >= min_samples {
+        Cow::Borrowed(audio)
+    } else {
+        let mut padded = audio.to_vec();
+        padded.resize(min_samples, 0.0);
+        Cow::Owned(padded)
+    }
+}
 
 /// Persistent Whisper STT.
 ///
@@ -55,8 +73,9 @@ impl WhisperStt {
         // Skip the word-level timestamp alignment post-processing pass.
         params.set_token_timestamps(false);
 
+        let audio = pad_to_min_duration(audio, MIN_AUDIO_SAMPLES);
         state
-            .full(params, audio)
+            .full(params, &audio)
             .context("Whisper transcription failed")?;
 
         let num_segments = state.full_n_segments();
@@ -74,5 +93,33 @@ impl WhisperStt {
         }
 
         Ok(text.trim().to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_audio_is_padded_to_one_second() {
+        let short = vec![0.1_f32; 4_000]; // 250 ms
+        let padded = pad_to_min_duration(&short, 16_000);
+        assert_eq!(padded.len(), 16_000);
+        assert_eq!(&padded[..4_000], short.as_slice());
+        assert!(padded[4_000..].iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn audio_at_exactly_one_second_is_not_reallocated() {
+        let audio = vec![0.5_f32; 16_000];
+        let result = pad_to_min_duration(&audio, 16_000);
+        assert!(matches!(result, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn longer_audio_is_not_truncated() {
+        let long = vec![0.3_f32; 32_000]; // 2 seconds
+        let result = pad_to_min_duration(&long, 16_000);
+        assert_eq!(result.len(), 32_000);
     }
 }
