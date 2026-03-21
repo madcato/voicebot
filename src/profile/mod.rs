@@ -513,4 +513,102 @@ mod tests {
         assert!(msgs[0].content.contains("hobby_1: Rust"));
         assert!(!msgs[0].content.contains("skill"));
     }
+
+    /// Integration test for `extract_facts` using a real LLM server.
+    ///
+    /// Reads LLM config from `.env` (LLM_URL, LLM_MODEL, LLM_PROVIDER, LLM_API_KEY).
+    ///
+    /// Run manually:
+    /// ```sh
+    /// cargo test test_extract_facts_real_llm --bin voicebot -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore]
+    async fn test_extract_facts_real_llm() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("debug")
+            .try_init();
+
+        let _ = dotenvy::dotenv();
+        let llm_url = std::env::var("LLM_URL")
+            .unwrap_or_else(|_| "http://localhost:8080".to_string());
+        let llm_model = std::env::var("LLM_MODEL")
+            .unwrap_or_else(|_| "local-model".to_string());
+        let llm_provider = std::env::var("LLM_PROVIDER")
+            .unwrap_or_else(|_| "llama".to_string());
+        let llm_api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
+        let client = LlamaClient::new(
+            &llm_url,
+            &llm_model,
+            400,
+            0.3,
+            0,
+            -1,
+        )
+        .with_provider(&llm_provider)
+        .with_api_key(&llm_api_key);
+
+        // ── Case 1: User reveals personal facts ─────────────────────────────
+        let facts = extract_facts(
+            &client,
+            "Me llamo Daniel, vivo en Madrid y trabajo como ingeniero de software.",
+            "Encantado de conocerte, Daniel. Madrid es una ciudad estupenda.",
+        )
+        .await;
+
+        println!("Extracted facts: {:#?}", facts);
+        assert!(
+            !facts.is_empty(),
+            "LLM should extract at least one fact from a self-introduction"
+        );
+        assert!(
+            facts.iter().any(|f| f.key == "name" && f.value.to_lowercase().contains("daniel")),
+            "Should extract the user's name 'Daniel', got: {:?}",
+            facts
+        );
+
+        // ── Case 2: No user facts present ───────────────────────────────────
+        let facts_empty = extract_facts(
+            &client,
+            "¿Qué hora es?",
+            "Son las 14:00.",
+        )
+        .await;
+
+        println!("Facts from factless exchange: {:#?}", facts_empty);
+        assert!(
+            facts_empty.is_empty(),
+            "Should return empty vec when no user facts are present, got: {:?}",
+            facts_empty
+        );
+
+        // ── Case 3: Multiple facts ──────────────────────────────────────────
+        let facts_multi = extract_facts(
+            &client,
+            "Tengo 35 años, me encanta programar en Rust y tengo un perro llamado Max.",
+            "Qué bien, Rust es un gran lenguaje. Max debe ser un gran compañero.",
+        )
+        .await;
+
+        println!("Multi-fact extraction: {:#?}", facts_multi);
+        assert!(
+            facts_multi.len() >= 2,
+            "Should extract at least 2 facts from a rich message, got {}",
+            facts_multi.len()
+        );
+
+        // Confidence values should be valid
+        for fact in &facts_multi {
+            assert!(
+                fact.confidence > 0.0 && fact.confidence <= 1.0,
+                "Confidence should be in (0, 1], got {} for key '{}'",
+                fact.confidence,
+                fact.key
+            );
+            assert!(!fact.key.is_empty(), "Key should not be empty");
+            assert!(!fact.value.is_empty(), "Value should not be empty");
+        }
+
+        println!("\n✓ extract_facts integration test passed");
+    }
 }

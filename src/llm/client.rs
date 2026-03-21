@@ -333,6 +333,8 @@ impl LlamaClient {
             payload["cache_prompt"] = serde_json::json!(false);
             payload["slot_id"] = serde_json::json!(self.background_slot_id);
         }
+        payload["enable_thinking"] = serde_json::json!(false);
+        payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
 
         let response = self
             .post_chat()
@@ -367,6 +369,8 @@ impl LlamaClient {
             payload["cache_prompt"] = serde_json::json!(false);
             payload["slot_id"] = serde_json::json!(self.background_slot_id);
         }
+        payload["enable_thinking"] = serde_json::json!(false);
+        payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
 
         let response = self
             .post_chat()

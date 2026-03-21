@@ -25,6 +25,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use crate::agents::ProactiveEvent;
+use crate::profile::extract_facts;
 use crate::audio::audio_capture::{AudioCapture, AudioChunk};
 use crate::audio::buffer::AudioBuffer;
 use crate::audio::output::AudioOutput;
@@ -1182,32 +1183,20 @@ async fn run_pipeline(
         }
         committed = true;
 
-        // ── Background GPU tasks — overlap with tail audio playback ───────────
-        // Both calls use cache_prompt=false so they don't touch the main slot.
+        // ── Background GPU task — overlap with tail audio playback ────────────
+        // Uses cache_prompt=false so it doesn't touch the main slot.
+        // Both extract_facts and summarization run only when the context limit
+        // is approaching, to avoid overloading the LLM on every turn.
         {
             let llm_session_c = Arc::clone(&llm_session);
             let llm_client_c  = llm_client.clone();
             let db_c          = db.clone();
+            let transcript_c  = transcript.clone();
+            let response_c    = final_response.clone();
             tokio::spawn(async move {
-                maybe_summarize(&llm_session_c, &llm_client_c, &db_c, session_id, context_tokens, summary_keep_turns).await;
+                maybe_summarize(&llm_session_c, &llm_client_c, &db_c, session_id, context_tokens, summary_keep_turns, &transcript_c, &response_c).await;
             });
         }
-        // {
-        //     let llm_client_c = llm_client.clone();
-        //     let db_c         = db.clone();
-        //     let transcript_c = transcript.clone();
-        //     let response_c   = final_response.clone();
-        //     tokio::spawn(async move {
-        //         let facts = extract_facts(&llm_client_c, &transcript_c, &response_c).await;
-        //         for fact in facts {
-        //             if let Err(e) = db_c.upsert_profile_fact(&fact.key, &fact.value, fact.confidence).await {
-        //                 warn!(target: "profile", "Failed to save profile fact '{}': {}", fact.key, e);
-        //             } else {
-        //                 debug!(target: "profile", "Profile: {} = {} ({:.0}%)", fact.key, fact.value, fact.confidence * 100.0);
-        //             }
-        //         }
-        //     });
-        // }
 
         // ── Await last TTS sentence — keeps pipeline_handle alive for barge-in ─
         if let Some(h) = last_play {
@@ -1239,10 +1228,23 @@ async fn maybe_summarize(
     session_id: Uuid,
     context_tokens: usize,
     keep_turns: usize,
+    user_text: &str,
+    assistant_text: &str,
 ) {
     let needs = llm_session.lock().unwrap().needs_summarization(context_tokens);
     if !needs {
         return;
+    }
+
+    // Extract user profile facts from the current turn before summarizing.
+    // Only runs when summarization is needed, avoiding an LLM call every turn.
+    let facts = extract_facts(llm_client, user_text, assistant_text).await;
+    for fact in facts {
+        if let Err(e) = db.upsert_profile_fact(&fact.key, &fact.value, fact.confidence).await {
+            warn!(target: "profile", "Failed to save profile fact '{}': {}", fact.key, e);
+        } else {
+            debug!(target: "profile", "Profile: {} = {} ({:.0}%)", fact.key, fact.value, fact.confidence * 100.0);
+        }
     }
 
     let (summary_prompt, turns_to_summarize) = {
@@ -1426,5 +1428,155 @@ async fn run_text_pipeline(
             Ok(Err(e)) => error!(target: "audio", "Text pipeline playback error: {}", e),
             Err(e)     => error!(target: "audio", "Text pipeline playback task panicked: {}", e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// Integration test for `maybe_summarize` using a real LLM server.
+    ///
+    /// Requires a running llama.cpp server (default http://localhost:8080).
+    /// Override with `LLM_URL` env var.
+    ///
+    /// Run manually:
+    /// ```sh
+    /// cargo test test_maybe_summarize_real_llm -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore]
+    async fn test_maybe_summarize_real_llm() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("info")
+            .try_init();
+
+        // ── Setup temp DB ────────────────────────────────────────────────────
+        let db_dir = tempfile::TempDir::new().unwrap();
+        let db_path = db_dir.path().join("test_summarize.db");
+        let db = crate::db::Database::new(db_path.to_str().unwrap())
+            .await
+            .unwrap();
+        let session_id = db.get_or_create_session().await.unwrap();
+
+        // ── Load .env and setup real LLM client ─────────────────────────────
+        let _ = dotenvy::dotenv();
+        let llm_url = std::env::var("LLM_URL")
+            .unwrap_or_else(|_| "http://localhost:8080".to_string());
+        let llm_model = std::env::var("LLM_MODEL")
+            .unwrap_or_else(|_| "local-model".to_string());
+        let llm_provider = std::env::var("LLM_PROVIDER")
+            .unwrap_or_else(|_| "llama".to_string());
+        let llm_api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
+        let llm_client = crate::llm::LlamaClient::new(
+            &llm_url,
+            &llm_model,
+            400,       // max_tokens
+            0.3,       // temperature
+            0,         // slot_id
+            -1,        // background_slot_id
+        )
+        .with_provider(&llm_provider)
+        .with_api_key(&llm_api_key);
+
+        // ── Populate session with enough turns to trigger summarization ──────
+        let system_prompt = "You are a helpful assistant.";
+        let mut session = crate::llm::LlmSession::new(system_prompt, 0);
+
+        let turns = vec![
+            ("What is the capital of France?", "The capital of France is Paris, a city known for the Eiffel Tower and its rich cultural heritage."),
+            ("Tell me about the Rust programming language.", "Rust is a systems programming language focused on safety, speed, and concurrency. It was created by Mozilla."),
+            ("What is photosynthesis?", "Photosynthesis is the process by which plants convert sunlight, water, and carbon dioxide into glucose and oxygen."),
+            ("Who wrote Don Quixote?", "Don Quixote was written by Miguel de Cervantes and published in two parts in 1605 and 1615."),
+            ("Explain quantum computing briefly.", "Quantum computing uses quantum bits or qubits that can exist in superposition, enabling parallel computation for certain problems."),
+            ("What is the tallest mountain on Earth?", "Mount Everest is the tallest mountain on Earth at 8,849 meters above sea level, located in the Himalayas."),
+            ("How does a combustion engine work?", "A combustion engine burns fuel in cylinders, creating expanding gases that push pistons connected to a crankshaft to produce rotary motion."),
+            ("What is the speed of light?", "The speed of light in a vacuum is approximately 299,792,458 meters per second, often rounded to 300,000 km/s."),
+        ];
+
+        for (user_msg, assistant_msg) in &turns {
+            session.add_user_turn(user_msg);
+            session.add_assistant_turn(assistant_msg);
+            db.save_message(session_id, "User", user_msg).await.unwrap();
+            db.save_message(session_id, "Assistant", assistant_msg).await.unwrap();
+        }
+
+        let msg_count_before = session.messages.len();
+        println!("Messages before summarization: {}", msg_count_before);
+
+        // Use a small context_tokens to force summarization, keep only 2 recent turns.
+        // Token estimate ≈ total_chars * 10 / 35; threshold = context_tokens * 3 / 4.
+        let context_tokens: usize = 300;
+        let keep_turns: usize = 2;
+
+        assert!(
+            session.needs_summarization(context_tokens),
+            "Session should need summarization with context_tokens={} but doesn't. \
+             Add more turns or reduce context_tokens.",
+            context_tokens
+        );
+
+        // ── Call maybe_summarize ─────────────────────────────────────────────
+        let llm_session = Arc::new(Mutex::new(session));
+        maybe_summarize(
+            &llm_session,
+            &llm_client,
+            &db,
+            session_id,
+            context_tokens,
+            keep_turns,
+            "",
+            "",
+        )
+        .await;
+
+        // ── Assertions ──────────────────────────────────────────────────────
+        let session_after = llm_session.lock().unwrap();
+
+        // 1. Messages should be compacted to keep_turns * 2 (user+assistant pairs)
+        let msg_count_after = session_after.messages.len();
+        println!("Messages after summarization: {}", msg_count_after);
+        assert!(
+            msg_count_after < msg_count_before,
+            "Message count should decrease after summarization: before={}, after={}",
+            msg_count_before, msg_count_after
+        );
+        assert_eq!(
+            msg_count_after,
+            keep_turns,
+            "Should keep exactly {} messages (keep_turns={}), got {}",
+            keep_turns,
+            keep_turns,
+            msg_count_after
+        );
+
+        // 2. System message should now contain the summary
+        let all_msgs = session_after.all_messages_api();
+        let system_content = all_msgs[0]["content"].as_str().unwrap();
+        println!("System message after summarization:\n{}", system_content);
+        assert!(
+            system_content.contains("[CONVERSATION SUMMARY]"),
+            "System message should contain [CONVERSATION SUMMARY] marker"
+        );
+
+        // 3. Summary should be persisted in DB
+        let (db_summary, db_recent) = db.get_session_context(session_id).await.unwrap();
+        assert!(
+            db_summary.is_some(),
+            "DB should have a summary after summarization"
+        );
+        let summary_text = db_summary.unwrap();
+        println!("Summary from DB:\n{}", summary_text);
+        assert!(
+            !summary_text.is_empty(),
+            "Summary text should not be empty"
+        );
+        assert!(
+            !db_recent.is_empty(),
+            "DB should still have recent messages after summary cutoff"
+        );
+
+        println!("\n✓ maybe_summarize integration test passed");
     }
 }
