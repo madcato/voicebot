@@ -1,38 +1,25 @@
 use anyhow::{Context, Result};
 use block2::RcBlock;
 use core::ptr::NonNull;
+use objc2::rc::autoreleasepool;
 use objc2_avf_audio::{
     AVAudioBuffer, AVAudioPCMBuffer, AVSpeechSynthesizer, AVSpeechSynthesisVoice,
     AVSpeechUtterance,
 };
 use objc2_foundation::NSString;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
-// CoreFoundation FFI for running the thread's run loop so AVSpeechSynthesizer
-// callbacks are dispatched on spawn_blocking threads.
+// GCD FFI — dispatch synthesis onto the main queue where
+// AVSpeechSynthesizer's run-loop sources live.
 unsafe extern "C" {
-    fn CFRunLoopRunInMode(mode: *const std::ffi::c_void, seconds: f64, return_after: u8) -> i32;
-    static kCFRunLoopDefaultMode: *const std::ffi::c_void;
-}
-
-/// Spin the current thread's CFRunLoop until `done` is true or `timeout` elapses.
-/// This is required because AVSpeechSynthesizer dispatches buffer callbacks via
-/// the run loop — a plain Condvar::wait blocks the thread and prevents delivery.
-fn run_loop_until(done: &Arc<Mutex<bool>>, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if *done.lock().unwrap() {
-            break;
-        }
-        if Instant::now() >= deadline {
-            break;
-        }
-        unsafe {
-            // Process pending run-loop sources for up to 10ms, then re-check done flag.
-            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, 1);
-        }
-    }
+    #[link_name = "_dispatch_main_q"]
+    static DISPATCH_MAIN_Q: std::ffi::c_void;
+    fn dispatch_async_f(
+        queue: *const std::ffi::c_void,
+        context: *mut std::ffi::c_void,
+        work: unsafe extern "C" fn(*mut std::ffi::c_void),
+    );
 }
 
 /// macOS AVSpeechSynthesizer TTS backend.
@@ -40,6 +27,12 @@ fn run_loop_until(done: &Arc<Mutex<bool>>, timeout: Duration) {
 /// Uses the native macOS `AVSpeechSynthesizer` API via `objc2` bindings, writing
 /// synthesized PCM audio directly into a buffer instead of routing to the
 /// audio hardware. This avoids a subprocess and runs fully in-process.
+///
+/// **Threading**: `writeUtterance:toBufferCallback:` delivers buffer callbacks
+/// via the main thread's CFRunLoop.  The application must keep the main thread
+/// running CFRunLoop (see `main()` when `feature = "avspeech"`).  Synthesis is
+/// dispatched to the main queue via GCD; the calling thread blocks on a Condvar
+/// until the callbacks complete.
 ///
 /// Voice is configured via `AVSPEECH_VOICE` (default: "Jorge (Enhanced)").
 /// Rate is a normalized float [0.0, 1.0] via `AVSPEECH_RATE` (default: 0.55 ≈ 215 wpm).
@@ -83,7 +76,7 @@ impl AvSpeechTts {
 
     /// Synthesize `text` into mono f32 PCM samples at `self.sample_rate` Hz.
     ///
-    /// CPU-bound — call from `tokio::task::spawn_blocking`.
+    /// Safe to call from any thread — dispatches to the main queue internally.
     pub fn synthesize(&self, text: &str) -> Result<Vec<f32>> {
         let samples = synth_text(text, &self.voice_identifier, self.rate)?;
 
@@ -100,7 +93,7 @@ impl AvSpeechTts {
 
     /// Print all available AVSpeechSynthesizer voices to stdout.
     pub fn list_voices() {
-        unsafe {
+        autoreleasepool(|_pool| unsafe {
             let voices = AVSpeechSynthesisVoice::speechVoices();
             let mut entries: Vec<(String, String, String, String, String)> = Vec::new();
             for voice in voices.iter() {
@@ -128,7 +121,7 @@ impl AvSpeechTts {
                 println!("{:<30} {:<10} {:<10} {:<12} {}", name, lang, quality, gender, identifier);
             }
             println!("\nTotal: {} voices", entries.len());
-        }
+        });
     }
 }
 
@@ -137,7 +130,7 @@ impl AvSpeechTts {
 /// Iterate installed voices and return the system identifier for the one whose
 /// display name matches `voice_name` exactly.
 fn find_voice_identifier(voice_name: &str) -> Option<String> {
-    unsafe {
+    autoreleasepool(|_pool| unsafe {
         let voices = AVSpeechSynthesisVoice::speechVoices();
         for voice in voices.iter() {
             let name = voice.name().to_string();
@@ -146,18 +139,13 @@ fn find_voice_identifier(voice_name: &str) -> Option<String> {
             }
         }
         None
-    }
+    })
 }
 
 /// Drive a minimal synthesis call to discover the sample rate AVSpeechSynthesizer
 /// will actually use for the chosen voice.
 fn probe_sample_rate(identifier: &str, rate: f32) -> Option<u32> {
-    // "." is the shortest possible utterance.
     let result = synth_text(".", identifier, rate).ok()?;
-    // The sample_rate isn't read from result length; we read it inside synth_text via the
-    // buffer format. But synth_text returns Vec<f32> and we've already stored the rate in
-    // the AvSpeechTts constructor. Here we just confirm synthesis worked; the real rate
-    // comes from synth_sample_rate().
     drop(result);
     synth_sample_rate(identifier, rate)
 }
@@ -165,10 +153,10 @@ fn probe_sample_rate(identifier: &str, rate: f32) -> Option<u32> {
 /// Returns the sample rate of the first non-empty buffer produced for the voice.
 fn synth_sample_rate(identifier: &str, rate: f32) -> Option<u32> {
     let rate_cell: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
-    let done: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+    let pair: Arc<(Mutex<bool>, Condvar)> = Arc::new((Mutex::new(false), Condvar::new()));
 
     let rate_cb = Arc::clone(&rate_cell);
-    let done_cb = Arc::clone(&done);
+    let pair_cb = Arc::clone(&pair);
 
     let block = RcBlock::new(move |buf: NonNull<AVAudioBuffer>| {
         unsafe {
@@ -176,7 +164,9 @@ fn synth_sample_rate(identifier: &str, rate: f32) -> Option<u32> {
             let frame_length = pcm.frameLength();
 
             if frame_length == 0 {
-                *done_cb.lock().unwrap() = true;
+                let (lock, cvar) = &*pair_cb;
+                *lock.lock().unwrap() = true;
+                cvar.notify_one();
                 return;
             }
 
@@ -190,34 +180,30 @@ fn synth_sample_rate(identifier: &str, rate: f32) -> Option<u32> {
     let block_ptr = RcBlock::as_ptr(&block)
         as *mut block2::DynBlock<dyn Fn(NonNull<AVAudioBuffer>)>;
 
-    unsafe {
-        let synth = AVSpeechSynthesizer::new();
-        let ns_text = NSString::from_str(".");
-        let utterance = AVSpeechUtterance::speechUtteranceWithString(&ns_text);
-        let ns_id = NSString::from_str(identifier);
-        if let Some(voice) = AVSpeechSynthesisVoice::voiceWithIdentifier(&ns_id) {
-            utterance.setVoice(Some(&voice));
-        }
-        utterance.setRate(rate);
-        synth.writeUtterance_toBufferCallback(&utterance, block_ptr);
+    // Dispatch synthesis onto the main queue and wait for completion.
+    let synth_handle = dispatch_synth_on_main(".", identifier, rate, block_ptr);
 
-        run_loop_until(&done, Duration::from_secs(5));
+    let (lock, cvar) = &*pair;
+    let _result = cvar.wait_timeout_while(
+        lock.lock().unwrap(),
+        Duration::from_secs(5),
+        |done| !*done,
+    );
 
-        drop(synth);
-    }
+    // Drop synthesizer and block now that callbacks are done.
+    drop(synth_handle);
     drop(block);
-
     rate_cell.lock().unwrap().take()
 }
 
-/// Core synthesis: returns raw f32 mono PCM samples for `text` spoken with `identifier`
-/// at normalized `rate`.
+/// Core synthesis: returns raw f32 mono PCM samples for `text` spoken with
+/// `identifier` at normalized `rate`.
 fn synth_text(text: &str, identifier: &str, rate: f32) -> Result<Vec<f32>> {
     let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
-    let done: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+    let pair: Arc<(Mutex<bool>, Condvar)> = Arc::new((Mutex::new(false), Condvar::new()));
 
     let samples_cb = Arc::clone(&samples);
-    let done_cb = Arc::clone(&done);
+    let pair_cb = Arc::clone(&pair);
 
     let block = RcBlock::new(move |buf: NonNull<AVAudioBuffer>| {
         unsafe {
@@ -225,7 +211,9 @@ fn synth_text(text: &str, identifier: &str, rate: f32) -> Result<Vec<f32>> {
             let frame_length = pcm.frameLength() as usize;
 
             if frame_length == 0 {
-                *done_cb.lock().unwrap() = true;
+                let (lock, cvar) = &*pair_cb;
+                *lock.lock().unwrap() = true;
+                cvar.notify_one();
                 return;
             }
 
@@ -242,31 +230,96 @@ fn synth_text(text: &str, identifier: &str, rate: f32) -> Result<Vec<f32>> {
     let block_ptr = RcBlock::as_ptr(&block)
         as *mut block2::DynBlock<dyn Fn(NonNull<AVAudioBuffer>)>;
 
+    // Dispatch synthesis onto the main queue and wait for completion.
+    let synth_handle = dispatch_synth_on_main(text, identifier, rate, block_ptr);
+
+    let (lock, cvar) = &*pair;
+    let result = cvar.wait_timeout_while(
+        lock.lock().unwrap(),
+        Duration::from_secs(30),
+        |done| !*done,
+    ).unwrap();
+
+    if result.1.timed_out() {
+        tracing::warn!(target: "tts", "AvSpeechTts: synthesis timed out for {:?}", text);
+    }
+
+    // Drop synthesizer and block now that callbacks are done.
+    drop(synth_handle);
+    drop(block);
+    let result = std::mem::take(&mut *samples.lock().unwrap());
+    Ok(result)
+}
+
+// ── GCD dispatch helper ─────────────────────────────────────────────────────
+
+/// Opaque wrapper so we can send the synthesizer pointer across threads.
+/// The synthesizer is created on the main thread and dropped by the caller
+/// after all callbacks have fired.
+struct SynthHandle(*mut std::ffi::c_void);
+unsafe impl Send for SynthHandle {}
+
+/// Context passed through `dispatch_async_f` to the main queue.
+struct SynthContext {
+    text: String,
+    identifier: String,
+    rate: f32,
+    block_ptr: *mut block2::DynBlock<dyn Fn(NonNull<AVAudioBuffer>)>,
+    /// Caller-provided slot: the trampoline writes the synthesizer pointer here
+    /// so the caller can drop it after callbacks complete.
+    synth_out: Arc<Mutex<Option<SynthHandle>>>,
+}
+
+// SAFETY: The block_ptr points to an RcBlock that outlives the dispatch call
+// (caller holds the RcBlock until after Condvar wait returns).
+unsafe impl Send for SynthContext {}
+
+/// Dispatch `writeUtterance:toBufferCallback:` onto the main GCD queue.
+/// Returns an `Arc` that will hold the synthesizer once the trampoline runs.
+/// The caller must keep it alive until callbacks are done, then drop it.
+fn dispatch_synth_on_main(
+    text: &str,
+    identifier: &str,
+    rate: f32,
+    block_ptr: *mut block2::DynBlock<dyn Fn(NonNull<AVAudioBuffer>)>,
+) -> Arc<Mutex<Option<SynthHandle>>> {
+    let synth_out: Arc<Mutex<Option<SynthHandle>>> = Arc::new(Mutex::new(None));
+    let ctx = Box::new(SynthContext {
+        text: text.to_string(),
+        identifier: identifier.to_string(),
+        rate,
+        block_ptr,
+        synth_out: Arc::clone(&synth_out),
+    });
+    let ctx_ptr = Box::into_raw(ctx) as *mut std::ffi::c_void;
+
     unsafe {
+        dispatch_async_f(std::ptr::addr_of!(DISPATCH_MAIN_Q), ctx_ptr, synth_trampoline);
+    }
+    synth_out
+}
+
+/// C-callable trampoline invoked by GCD on the main thread.
+unsafe extern "C" fn synth_trampoline(ctx_ptr: *mut std::ffi::c_void) {
+    let ctx = unsafe { Box::from_raw(ctx_ptr as *mut SynthContext) };
+
+    autoreleasepool(|_pool| unsafe {
         let synth = AVSpeechSynthesizer::new();
 
-        let ns_text = NSString::from_str(text);
+        let ns_text = NSString::from_str(&ctx.text);
         let utterance = AVSpeechUtterance::speechUtteranceWithString(&ns_text);
 
-        let ns_id = NSString::from_str(identifier);
+        let ns_id = NSString::from_str(&ctx.identifier);
         if let Some(voice) = AVSpeechSynthesisVoice::voiceWithIdentifier(&ns_id) {
             utterance.setVoice(Some(&voice));
         }
-        utterance.setRate(rate);
+        utterance.setRate(ctx.rate);
 
-        synth.writeUtterance_toBufferCallback(&utterance, block_ptr);
+        synth.writeUtterance_toBufferCallback(&utterance, ctx.block_ptr);
 
-        // Spin the CFRunLoop so callbacks are delivered on this thread.
-        run_loop_until(&done, Duration::from_secs(30));
-
-        if !*done.lock().unwrap() {
-            tracing::warn!(target: "tts", "AvSpeechTts: synthesis timed out for {:?}", text);
-        }
-
-        drop(synth);
-    }
-    drop(block);
-
-    let result = std::mem::take(&mut *samples.lock().unwrap());
-    Ok(result)
+        // Transfer ownership to the caller so the synthesizer stays alive
+        // while callbacks fire during subsequent run-loop iterations.
+        let raw = objc2::rc::Retained::into_raw(synth) as *mut std::ffi::c_void;
+        *ctx.synth_out.lock().unwrap() = Some(SynthHandle(raw));
+    });
 }

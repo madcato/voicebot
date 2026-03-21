@@ -56,11 +56,47 @@ const MIN_SPEECH_DURATION_MS: u32 = 300;
 /// Pre-roll chunks kept before speech onset to recover VAD onset delay (~250ms).
 const PRE_ROLL_CHUNKS: usize = 15;
 
+// When the `avspeech` feature is enabled, the main thread must run CFRunLoop
+// so that AVSpeechSynthesizer buffer callbacks are delivered.  The tokio
+// runtime is moved to a background thread.
+#[cfg(feature = "avspeech")]
+fn main() {
+    unsafe extern "C" {
+        fn CFRunLoopRunInMode(mode: *const std::ffi::c_void, seconds: f64, ret: u8) -> i32;
+        static kCFRunLoopDefaultMode: *const std::ffi::c_void;
+    }
+
+    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    let quit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let quit_c = quit.clone();
+
+    let handle = std::thread::spawn(move || {
+        let result = rt.block_on(async_main());
+        quit_c.store(true, std::sync::atomic::Ordering::SeqCst);
+        result
+    });
+
+    // Drive the main CFRunLoop so AVSpeechSynthesizer callbacks fire.
+    while !quit.load(std::sync::atomic::Ordering::SeqCst) {
+        unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, 0); }
+    }
+
+    if let Err(e) = handle.join().expect("tokio thread panicked") {
+        eprintln!("Error: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(not(feature = "avspeech"))]
 #[tokio::main]
 async fn main() -> Result<()> {
+    async_main().await
+}
+
+async fn async_main() -> Result<()> {
     // Disable whisper prints into console
     install_logging_hooks();
-    
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
