@@ -611,7 +611,7 @@ async fn main() -> Result<()> {
                             // cannot cancel directly). Without this pause, cancel is
                             // reset to false before the callback fires and the old
                             // audio keeps playing alongside the new pipeline's TTS.
-                            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                         }
 
                         cancel.store(false, Ordering::SeqCst);
@@ -948,7 +948,7 @@ async fn run_pipeline(
         _ = &mut spec_handle => {
             if use_prefill { debug!(target: "llm", "Speculative prefill completed cleanly"); }
         }
-        _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
+        _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {
             if use_prefill {
                 debug!(target: "llm", "Speculative prefill still running — aborting");
                 spec_handle.abort();

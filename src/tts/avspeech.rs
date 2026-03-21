@@ -6,7 +6,34 @@ use objc2_avf_audio::{
     AVSpeechUtterance,
 };
 use objc2_foundation::NSString;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+// CoreFoundation FFI for running the thread's run loop so AVSpeechSynthesizer
+// callbacks are dispatched on spawn_blocking threads.
+unsafe extern "C" {
+    fn CFRunLoopRunInMode(mode: *const std::ffi::c_void, seconds: f64, return_after: u8) -> i32;
+    static kCFRunLoopDefaultMode: *const std::ffi::c_void;
+}
+
+/// Spin the current thread's CFRunLoop until `done` is true or `timeout` elapses.
+/// This is required because AVSpeechSynthesizer dispatches buffer callbacks via
+/// the run loop — a plain Condvar::wait blocks the thread and prevents delivery.
+fn run_loop_until(done: &Arc<Mutex<bool>>, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if *done.lock().unwrap() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        unsafe {
+            // Process pending run-loop sources for up to 10ms, then re-check done flag.
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, 1);
+        }
+    }
+}
 
 /// macOS AVSpeechSynthesizer TTS backend.
 ///
@@ -105,10 +132,10 @@ fn probe_sample_rate(identifier: &str, rate: f32) -> Option<u32> {
 /// Returns the sample rate of the first non-empty buffer produced for the voice.
 fn synth_sample_rate(identifier: &str, rate: f32) -> Option<u32> {
     let rate_cell: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
-    let done_pair: Arc<(Mutex<bool>, Condvar)> = Arc::new((Mutex::new(false), Condvar::new()));
+    let done: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
 
     let rate_cb = Arc::clone(&rate_cell);
-    let done_cb = Arc::clone(&done_pair);
+    let done_cb = Arc::clone(&done);
 
     let block = RcBlock::new(move |buf: NonNull<AVAudioBuffer>| {
         unsafe {
@@ -116,9 +143,7 @@ fn synth_sample_rate(identifier: &str, rate: f32) -> Option<u32> {
             let frame_length = pcm.frameLength();
 
             if frame_length == 0 {
-                let (lock, cvar) = &*done_cb;
-                *lock.lock().unwrap() = true;
-                cvar.notify_one();
+                *done_cb.lock().unwrap() = true;
                 return;
             }
 
@@ -143,12 +168,8 @@ fn synth_sample_rate(identifier: &str, rate: f32) -> Option<u32> {
         utterance.setRate(rate);
         synth.writeUtterance_toBufferCallback(&utterance, block_ptr);
 
-        // Wait for the empty-buffer done signal (max 5 s).
-        let (lock, cvar) = &*done_pair;
-        let finished = lock.lock().unwrap();
-        let _ = cvar.wait_timeout(finished, std::time::Duration::from_secs(5));
+        run_loop_until(&done, Duration::from_secs(5));
 
-        // Keep synth and block alive until here.
         drop(synth);
     }
     drop(block);
@@ -160,10 +181,10 @@ fn synth_sample_rate(identifier: &str, rate: f32) -> Option<u32> {
 /// at normalized `rate`.
 fn synth_text(text: &str, identifier: &str, rate: f32) -> Result<Vec<f32>> {
     let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
-    let done_pair: Arc<(Mutex<bool>, Condvar)> = Arc::new((Mutex::new(false), Condvar::new()));
+    let done: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
 
     let samples_cb = Arc::clone(&samples);
-    let done_cb = Arc::clone(&done_pair);
+    let done_cb = Arc::clone(&done);
 
     let block = RcBlock::new(move |buf: NonNull<AVAudioBuffer>| {
         unsafe {
@@ -171,18 +192,12 @@ fn synth_text(text: &str, identifier: &str, rate: f32) -> Result<Vec<f32>> {
             let frame_length = pcm.frameLength() as usize;
 
             if frame_length == 0 {
-                // Empty buffer signals end of synthesis.
-                let (lock, cvar) = &*done_cb;
-                *lock.lock().unwrap() = true;
-                cvar.notify_one();
+                *done_cb.lock().unwrap() = true;
                 return;
             }
 
-            // floatChannelData() returns a pointer-to-pointer for each channel.
-            // AVSpeechSynthesizer always outputs mono (1 channel), so we read channel 0.
             let channel_ptrs = pcm.floatChannelData();
             if channel_ptrs.is_null() {
-                // Buffer is not float format — skip.
                 return;
             }
             let ch0: *const f32 = (*channel_ptrs).as_ptr();
@@ -208,29 +223,17 @@ fn synth_text(text: &str, identifier: &str, rate: f32) -> Result<Vec<f32>> {
 
         synth.writeUtterance_toBufferCallback(&utterance, block_ptr);
 
-        // Block until the synthesizer signals completion with an empty buffer.
-        // Timeout of 30 s guards against voices that never fire the done signal.
-        let (lock, cvar) = &*done_pair;
-        let finished = lock.lock().unwrap();
-        let (guard, timed_out) = cvar
-            .wait_timeout(finished, std::time::Duration::from_secs(30))
-            .unwrap();
-        let completed = *guard || !timed_out.timed_out();
-        drop(guard);
+        // Spin the CFRunLoop so callbacks are delivered on this thread.
+        run_loop_until(&done, Duration::from_secs(30));
 
-        if !completed {
+        if !*done.lock().unwrap() {
             tracing::warn!(target: "tts", "AvSpeechTts: synthesis timed out for {:?}", text);
         }
 
-        // Ensure synth is alive until after the callbacks have fired.
         drop(synth);
     }
     drop(block);
 
-    let result = Arc::try_unwrap(samples)
-        .map_err(|_| anyhow::anyhow!("samples Arc still shared after synthesis"))?
-        .into_inner()
-        .unwrap();
-
+    let result = std::mem::take(&mut *samples.lock().unwrap());
     Ok(result)
 }

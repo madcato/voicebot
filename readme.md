@@ -315,6 +315,22 @@ Compare LLM server performance:
 
 # Real-server KV-cache comparison
 python3 scripts/bench-server.py <llama-model> <mlx-model>
+
+# Full pipeline benchmark (STT → LLM → TTS) using WAV fixtures
+# Requires: Whisper model + running llama-server
+RUST_LOG=performance=debug cargo run --bin bench_pipeline
+```
+
+#### VAD Latency Tuning
+
+`VAD_SILENCE_MS` controls how long silence must persist before the pipeline starts (default: 250ms). Lower values feel more responsive but risk cutting speakers mid-pause. The speech buffer accumulates across pauses, so no audio is lost if the user resumes speaking.
+
+```bash
+# More responsive (may cut mid-pause)
+VAD_SILENCE_MS=200 cargo run
+
+# More conservative (waits longer for pauses)
+VAD_SILENCE_MS=500 cargo run
 ```
 
 ---

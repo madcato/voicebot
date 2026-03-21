@@ -94,6 +94,13 @@ path = "src/main.rs"
 name = "acp_agent_chat"
 path = "src/bin/acp_agent_chat.rs"
 
+[[bin]]
+name = "bench_pipeline"
+path = "src/bin/bench_pipeline.rs"
+
+[dependencies.hound]
+version = "3"
+
 [dev-dependencies]
 # Mock HTTP server for LLM client integration tests
 wiremock = "0.6"
@@ -101,5 +108,3 @@ wiremock = "0.6"
 temp-env = "0.3"
 # Temporary directories for file I/O tests
 tempfile = "3"
-# WAV file loading for e2e audio fixtures
-hound = "3"

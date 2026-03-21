@@ -54,7 +54,6 @@ impl AudioOutput {
     /// Null/headless audio output — `play_blocking` discards all audio immediately.
     ///
     /// Used in tests and CI environments where no sound device is available.
-    #[cfg(test)]
     pub fn null() -> Self {
         Self {
             device: None,
