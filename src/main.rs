@@ -37,7 +37,7 @@ use crate::profile::{build_profile_context, ProfileFact};
 use crate::stt::{WhisperStt, SttStream};
 use whisper_rs::install_logging_hooks;
 use crate::tools::{
-    format_history, AcpInbound, ActiveAcpTask, ConversationMode, CurrentTimeTool, HermesAcpWriter,
+    format_history, ActiveAcpTask, ConversationMode, CurrentTimeTool, HermesAcpWriter, JsonRpcMessage,
     OpenAppTool, ReadClipboardTool, RunAgentTool, SetClipboardTool, SetConversationModeTool,
     TakeScreenshotTool, ToolRegistry,
 };
@@ -115,7 +115,7 @@ async fn main() -> Result<()> {
     // External agent delegation — unified RunAgentTool (CLI or ACP mode)
     let acp_writer: Arc<tokio::sync::Mutex<Option<HermesAcpWriter>>> =
         Arc::new(tokio::sync::Mutex::new(None));
-    let acp_inbound: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<AcpInbound>>>> =
+    let acp_inbound: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<JsonRpcMessage>>>> =
         Arc::new(tokio::sync::Mutex::new(None));
     let active_task: Arc<tokio::sync::Mutex<Option<ActiveAcpTask>>> =
         Arc::new(tokio::sync::Mutex::new(None));

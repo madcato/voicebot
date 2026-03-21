@@ -297,7 +297,7 @@ impl Config {
                 .unwrap_or_else(|_| "jarvis".to_string())
                 .to_lowercase(),
             ambient_clear_secs: env::var("AMBIENT_CLEAR_SECS")
-                .unwrap_or_else(|_| "30".to_string())
+                .unwrap_or_else(|_| "300".to_string())
                 .parse()
                 .context("Invalid AMBIENT_CLEAR_SECS")?,
             speaker_ambient_trigger: env::var("SPEAKER_AMBIENT_TRIGGER")

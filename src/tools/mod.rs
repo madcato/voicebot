@@ -17,7 +17,7 @@ pub use conversation_mode::{ConversationMode, SetConversationModeTool};
 pub use current_time::CurrentTimeTool;
 pub use open_app::OpenAppTool;
 pub use run_agent::{
-    format_history, AcpInbound, ActiveAcpTask, HermesAcpWriter, RunAgentTool,
+    format_history, ActiveAcpTask, HermesAcpWriter, JsonRpcMessage, RunAgentTool,
 };
 pub use take_screenshot::TakeScreenshotTool;
 

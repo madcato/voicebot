@@ -1,7 +1,7 @@
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -80,27 +80,91 @@ async fn call_agent(command: String, query: String) -> String {
     }
 }
 
+// ── JSON-RPC 2.0 helpers ─────────────────────────────────────────────────────
+
+fn jsonrpc_request(id: u64, method: &str, params: Value) -> Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": params
+    })
+}
+
+fn jsonrpc_notification(method: &str, params: Value) -> Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": params
+    })
+}
+
+/// A parsed JSON-RPC 2.0 message received from the ACP process.
+#[derive(Debug, Clone)]
+pub enum JsonRpcMessage {
+    /// A response to a request we sent (matched by id).
+    Response {
+        id: u64,
+        result: Option<Value>,
+        error: Option<Value>,
+    },
+    /// A request from the server that expects a response (has id + method).
+    Request {
+        id: u64,
+        method: String,
+        params: Option<Value>,
+    },
+    /// A notification from the server (has method but no id).
+    Notification {
+        method: String,
+        params: Option<Value>,
+    },
+}
+
+fn parse_jsonrpc(v: &Value) -> Option<JsonRpcMessage> {
+    let method = v.get("method").and_then(|m| m.as_str()).map(String::from);
+    let id = v.get("id").and_then(|i| i.as_u64());
+
+    match (method, id) {
+        // Request from server (has both method and id)
+        (Some(method), Some(id)) => Some(JsonRpcMessage::Request {
+            id,
+            method,
+            params: v.get("params").cloned(),
+        }),
+        // Notification from server (has method, no id)
+        (Some(method), None) => Some(JsonRpcMessage::Notification {
+            method,
+            params: v.get("params").cloned(),
+        }),
+        // Response to our request (has id, no method)
+        (None, Some(id)) => Some(JsonRpcMessage::Response {
+            id,
+            result: v.get("result").cloned(),
+            error: v.get("error").cloned(),
+        }),
+        _ => None,
+    }
+}
+
 // ── RunAgentTool ──────────────────────────────────────────────────────────────
 
 /// Unified agent delegation tool.
 ///
 /// Supports two modes (selected by the `mode` field):
 /// - `"cli"` — spawns the agent as a one-shot CLI subprocess (fire-and-forget).
-/// - `"acp"` — maintains a persistent ACP subprocess via JSON-RPC over stdio.
+/// - `"acp"` — maintains a persistent ACP subprocess via JSON-RPC 2.0 over stdio.
 ///
 /// Additionally handles two inline commands that require no subprocess:
 /// - `run_agent: cancel` — cancels the currently running ACP task.
 /// - `run_agent: status` — reports whether the ACP agent is busy.
-///
-/// This single tool replaces the previous `RunAgentAsyncTool`, `RunAgentAcpTool`,
-/// `CancelAgentTool`, and `AgentStatusTool`.
 pub struct RunAgentTool {
     /// CLI executable (and optional args) — used in `"cli"` mode.
     command: Option<String>,
     /// Persistent ACP process write-side — lazily initialized on first use.
     acp_writer: Arc<Mutex<Option<HermesAcpWriter>>>,
     /// Inbound message channel from the ACP process.
-    acp_inbound: Arc<Mutex<Option<mpsc::Receiver<AcpInbound>>>>,
+    acp_inbound: Arc<Mutex<Option<mpsc::Receiver<JsonRpcMessage>>>>,
     /// Currently executing ACP task, if any.
     active_task: Arc<Mutex<Option<ActiveAcpTask>>>,
     /// Formatted conversation history shared with the agent for context.
@@ -118,7 +182,7 @@ impl RunAgentTool {
     pub fn new(
         command: Option<String>,
         acp_writer: Arc<Mutex<Option<HermesAcpWriter>>>,
-        acp_inbound: Arc<Mutex<Option<mpsc::Receiver<AcpInbound>>>>,
+        acp_inbound: Arc<Mutex<Option<mpsc::Receiver<JsonRpcMessage>>>>,
         active_task: Arc<Mutex<Option<ActiveAcpTask>>>,
         history: Arc<RwLock<String>>,
         proactive_tx: mpsc::Sender<ProactiveEvent>,
@@ -144,9 +208,7 @@ impl RunAgentTool {
             let _ = task.cancel_tx.send(());
             let mut w_guard = self.acp_writer.lock().await;
             if let Some(w) = w_guard.as_mut() {
-                let _ = w
-                    .send(&AcpOutbound::Cancel { session_id: task.session_id })
-                    .await;
+                let _ = w.send_cancel(task.prompt_request_id).await;
             }
             "[Tarea del agente cancelada.]".to_string()
         } else {
@@ -247,38 +309,44 @@ impl RunAgentTool {
             };
 
             // ── Send prompt ───────────────────────────────────────────────────
-            {
+            let prompt_request_id = {
                 let mut guard = acp_writer.lock().await;
                 if let Some(w) = guard.as_mut() {
-                    if let Err(e) = w
-                        .send(&AcpOutbound::Prompt {
-                            session_id: session_id.clone(),
-                            prompt: vec![AcpTextBlock::text(&query)],
-                        })
-                        .await
-                    {
-                        let _ = proactive_tx
-                            .send(ProactiveEvent::AgentResult {
-                                task: task_c,
-                                result: format!("ACP send error: {e}"),
-                            })
-                            .await;
-                        return;
+                    match w.send_prompt(&session_id, &query).await {
+                        Ok(id) => id,
+                        Err(e) => {
+                            let _ = proactive_tx
+                                .send(ProactiveEvent::AgentResult {
+                                    task: task_c,
+                                    result: format!("ACP send error: {e}"),
+                                })
+                                .await;
+                            return;
+                        }
                     }
+                } else {
+                    let _ = proactive_tx
+                        .send(ProactiveEvent::AgentResult {
+                            task: task_c,
+                            result: "ACP: writer not initialized.".to_string(),
+                        })
+                        .await;
+                    return;
                 }
-            }
+            };
 
             // ── Register active task ──────────────────────────────────────────
             let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
             {
                 let mut at = active_task.lock().await;
-                *at = Some(ActiveAcpTask { session_id: session_id.clone(), cancel_tx });
+                *at = Some(ActiveAcpTask {
+                    session_id: session_id.clone(),
+                    prompt_request_id,
+                    cancel_tx,
+                });
             }
 
             // ── Collect responses ─────────────────────────────────────────────
-            // Take the inbound rx out of the Arc<Mutex<Option<...>>> for the
-            // duration of this call. We put it back after collect finishes so
-            // future tasks can reuse it.
             let mut taken_rx = {
                 let mut rx_guard = acp_inbound.lock().await;
                 rx_guard.take()
@@ -289,6 +357,7 @@ impl RunAgentTool {
                     rx,
                     proactive_tx.clone(),
                     session_id,
+                    prompt_request_id,
                     cancel_rx,
                 )
                 .await
@@ -371,104 +440,18 @@ fn parse_task(args: &str) -> String {
         .unwrap_or_else(|| args.to_string())
 }
 
-// ── ACP Protocol types ────────────────────────────────────────────────────────
-
-/// A single text content block sent inside an ACP `Prompt` message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcpTextBlock {
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub text: String,
-}
-
-impl AcpTextBlock {
-    pub fn text(s: impl Into<String>) -> Self {
-        Self { kind: "text".into(), text: s.into() }
-    }
-}
-
-/// Messages sent **from the voicebot to the ACP process** (outbound).
-///
-/// `#[serde(tag = "type")]` emits `{"type": "<variant_snake_case>", ...}`.
-/// Field names are already snake_case so no rename_all is needed.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum AcpOutbound {
-    Initialize {
-        protocol_version: u32,
-    },
-    NewSession {
-        cwd: String,
-        #[serde(default)]
-        mcp_servers: Vec<serde_json::Value>,
-    },
-    Prompt {
-        session_id: String,
-        prompt: Vec<AcpTextBlock>,
-    },
-    PermissionResponse {
-        session_id: String,
-        outcome: String,
-    },
-    Cancel {
-        session_id: String,
-    },
-}
-
-/// Session-update sub-events streamed by the ACP process while working.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum AcpSessionUpdate {
-    ToolStart { tool: String },
-    ToolComplete { tool: String, #[allow(dead_code)] result: Option<String> },
-    AgentThought { text: String },
-    AgentMessage { text: String },
-}
-
-/// Messages received **from the ACP process** (inbound).
-///
-/// Unknown `type` values are captured by the `Unknown` variant so the reader
-/// loop never panics on future protocol extensions.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum AcpInbound {
-    InitializeResponse {
-        session_id: String,
-    },
-    SessionUpdate {
-        #[allow(dead_code)]
-        session_id: String,
-        update: AcpSessionUpdate,
-    },
-    PermissionRequest {
-        #[allow(dead_code)]
-        session_id: String,
-        description: String,
-        options: Vec<String>,
-    },
-    PromptResponse {
-        #[allow(dead_code)]
-        session_id: String,
-        output: String,
-        #[allow(dead_code)]
-        stop_reason: String,
-    },
-    #[serde(other)]
-    Unknown,
-}
-
 // ── HermesAcpWriter ───────────────────────────────────────────────────────────
 
-/// Write-side of a persistent `hermes acp` subprocess.
+/// Write-side of a persistent `hermes acp` subprocess using JSON-RPC 2.0.
 ///
 /// Reads are served by a background reader task that forwards parsed
-/// `AcpInbound` messages on an `mpsc` channel returned from `spawn()`.
-/// Keeping reads and writes separate avoids holding a Mutex while awaiting.
+/// `JsonRpcMessage` messages on an `mpsc` channel returned from `spawn()`.
 pub struct HermesAcpWriter {
     pub session_id: Option<String>,
     stdin: ChildStdin,
     #[allow(dead_code)]
     child: Child,
+    next_id: u64,
 }
 
 impl HermesAcpWriter {
@@ -476,7 +459,7 @@ impl HermesAcpWriter {
     ///
     /// Returns `(writer, inbound_rx)`. The caller owns `inbound_rx`; it should
     /// not be shared (single-consumer design).
-    pub async fn spawn(command: &str) -> anyhow::Result<(Self, mpsc::Receiver<AcpInbound>)> {
+    pub async fn spawn(command: &str) -> anyhow::Result<(Self, mpsc::Receiver<JsonRpcMessage>)> {
         let parts: Vec<&str> = command.split_whitespace().collect();
         let program = parts.first().copied()
             .ok_or_else(|| anyhow::anyhow!("ACP: AGENT_ACP_COMMAND is empty"))?;
@@ -495,7 +478,7 @@ impl HermesAcpWriter {
         let stdout = child.stdout.take()
             .ok_or_else(|| anyhow::anyhow!("ACP: no stdout handle"))?;
 
-        let (tx, rx) = mpsc::channel::<AcpInbound>(64);
+        let (tx, rx) = mpsc::channel::<JsonRpcMessage>(64);
 
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
@@ -504,10 +487,14 @@ impl HermesAcpWriter {
                 if line.is_empty() {
                     continue;
                 }
-                match serde_json::from_str::<AcpInbound>(&line) {
-                    Ok(msg) => {
-                        if tx.send(msg).await.is_err() {
-                            break;
+                match serde_json::from_str::<Value>(&line) {
+                    Ok(v) => {
+                        if let Some(msg) = parse_jsonrpc(&v) {
+                            if tx.send(msg).await.is_err() {
+                                break;
+                            }
+                        } else {
+                            warn!(target: "acp", "Unrecognized JSON-RPC message: {:?}", line);
                         }
                     }
                     Err(e) => {
@@ -518,11 +505,11 @@ impl HermesAcpWriter {
             debug!(target: "acp", "ACP reader task ended");
         });
 
-        Ok((Self { session_id: None, stdin, child }, rx))
+        Ok((Self { session_id: None, stdin, child, next_id: 0 }, rx))
     }
 
-    /// Serialize `msg` to a single JSON line and write it to the process stdin.
-    pub async fn send(&mut self, msg: &AcpOutbound) -> anyhow::Result<()> {
+    /// Write a raw JSON value as a newline-delimited line to the process stdin.
+    async fn write_json(&mut self, msg: &Value) -> anyhow::Result<()> {
         let json = serde_json::to_string(msg)?;
         self.stdin.write_all(json.as_bytes()).await?;
         self.stdin.write_all(b"\n").await?;
@@ -530,32 +517,104 @@ impl HermesAcpWriter {
         Ok(())
     }
 
-    /// Perform the ACP initialize handshake and send `new_session`.
-    /// Blocks until `initialize_response` arrives on `rx`.
+    /// Send a JSON-RPC request and return the assigned request id.
+    pub async fn send_request(&mut self, method: &str, params: Value) -> anyhow::Result<u64> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let msg = jsonrpc_request(id, method, params);
+        debug!(target: "acp", "→ {}", serde_json::to_string(&msg).unwrap_or_default());
+        self.write_json(&msg).await?;
+        Ok(id)
+    }
+
+    /// Send a JSON-RPC notification (no id, no response expected).
+    pub async fn send_notification(&mut self, method: &str, params: Value) -> anyhow::Result<()> {
+        let msg = jsonrpc_notification(method, params);
+        debug!(target: "acp", "→ {}", serde_json::to_string(&msg).unwrap_or_default());
+        self.write_json(&msg).await?;
+        Ok(())
+    }
+
+    /// Send a JSON-RPC response to a request from the server.
+    pub async fn send_response(&mut self, id: u64, result: Value) -> anyhow::Result<()> {
+        let msg = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
+        debug!(target: "acp", "→ {}", serde_json::to_string(&msg).unwrap_or_default());
+        self.write_json(&msg).await?;
+        Ok(())
+    }
+
+    /// Perform the full ACP initialize + session/new handshake.
+    /// Blocks until both responses arrive on `rx`.
     pub async fn initialize(
         &mut self,
-        rx: &mut mpsc::Receiver<AcpInbound>,
+        rx: &mut mpsc::Receiver<JsonRpcMessage>,
         cwd: &str,
     ) -> anyhow::Result<String> {
-        self.send(&AcpOutbound::Initialize { protocol_version: 1 }).await?;
+        // ── Step 1: initialize ───────────────────────────────────────────────
+        let init_id = self.send_request("initialize", serde_json::json!({
+            "protocolVersion": 1,
+            "clientCapabilities": {},
+            "clientInfo": {"name": "voicebot", "version": "0.1.0"}
+        })).await?;
 
-        let session_id = loop {
+        // Wait for initialize response
+        loop {
             match rx.recv().await {
-                Some(AcpInbound::InitializeResponse { session_id }) => break session_id,
+                Some(JsonRpcMessage::Response { id, error, .. }) if id == init_id => {
+                    if let Some(err) = error {
+                        anyhow::bail!("ACP initialize error: {}", err);
+                    }
+                    debug!(target: "acp", "initialize response received");
+                    break;
+                }
                 Some(other) => debug!(target: "acp", "init: ignoring {:?}", other),
-                None => anyhow::bail!("ACP process closed before initialize_response"),
+                None => anyhow::bail!("ACP process closed before initialize response"),
+            }
+        }
+
+        // ── Step 2: session/new ──────────────────────────────────────────────
+        let session_id = self.send_request("session/new", serde_json::json!({
+            "cwd": cwd,
+            "mcpServers": []
+        })).await?;
+
+        // Wait for session/new response with sessionId
+        let sid = loop {
+            match rx.recv().await {
+                Some(JsonRpcMessage::Response { id, result, error, .. }) if id == session_id => {
+                    if let Some(err) = error {
+                        anyhow::bail!("ACP session/new error: {}", err);
+                    }
+                    let result = result.unwrap_or_default();
+                    let sid = result["sessionId"]
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("ACP session/new response missing sessionId"))?
+                        .to_string();
+                    break sid;
+                }
+                Some(other) => debug!(target: "acp", "session/new: ignoring {:?}", other),
+                None => anyhow::bail!("ACP process closed before session/new response"),
             }
         };
 
-        self.send(&AcpOutbound::NewSession {
-            cwd: cwd.to_string(),
-            mcp_servers: vec![],
-        })
-        .await?;
+        self.session_id = Some(sid.clone());
+        info!(target: "acp", "ACP initialized, sessionId={}", sid);
+        Ok(sid)
+    }
 
-        self.session_id = Some(session_id.clone());
-        info!(target: "acp", "ACP initialized, session_id={}", session_id);
-        Ok(session_id)
+    /// Send a session/prompt request and return the request id.
+    pub async fn send_prompt(&mut self, session_id: &str, text: &str) -> anyhow::Result<u64> {
+        self.send_request("session/prompt", serde_json::json!({
+            "sessionId": session_id,
+            "prompt": [{"type": "text", "text": text}]
+        })).await
+    }
+
+    /// Send a session/cancel notification for a running prompt request.
+    pub async fn send_cancel(&mut self, request_id: u64) -> anyhow::Result<()> {
+        self.send_notification("session/cancel", serde_json::json!({
+            "requestId": request_id
+        })).await
     }
 
     /// Kill the subprocess.
@@ -570,6 +629,8 @@ impl HermesAcpWriter {
 /// Tracks a single in-flight ACP task.
 pub struct ActiveAcpTask {
     pub session_id: String,
+    /// The JSON-RPC request id for the prompt, used for cancellation.
+    pub prompt_request_id: u64,
     /// Sending on this channel cancels the task's collect loop.
     pub cancel_tx: oneshot::Sender<()>,
 }
@@ -578,15 +639,17 @@ pub struct ActiveAcpTask {
 
 /// Drive the ACP inbound message loop for one task.
 ///
-/// Handles streaming updates, permission requests, and cancellation.
-/// Returns the final text result (from `PromptResponse`) or an error/cancel string.
+/// Handles streaming session/update notifications, permission requests, and
+/// cancellation. Returns the accumulated text result or an error/cancel string.
 async fn collect_acp_response(
     acp_writer: Arc<Mutex<Option<HermesAcpWriter>>>,
-    inbound_rx: &mut mpsc::Receiver<AcpInbound>,
+    inbound_rx: &mut mpsc::Receiver<JsonRpcMessage>,
     proactive_tx: mpsc::Sender<ProactiveEvent>,
-    session_id: String,
+    _session_id: String,
+    prompt_request_id: u64,
     mut cancel_rx: oneshot::Receiver<()>,
 ) -> String {
+    let mut accumulated_text = String::new();
     let mut progress: Vec<String> = Vec::new();
 
     loop {
@@ -601,43 +664,95 @@ async fn collect_acp_response(
                 // Cancel fired or channel closed — send cancel to the agent.
                 let mut guard = acp_writer.lock().await;
                 if let Some(w) = guard.as_mut() {
-                    let _ = w.send(&AcpOutbound::Cancel { session_id: session_id.clone() }).await;
+                    let _ = w.send_cancel(prompt_request_id).await;
                 }
                 return "[Tarea cancelada.]".to_string();
             }
-            Some(AcpInbound::PromptResponse { output, .. }) => {
-                if progress.is_empty() {
-                    return output;
+            // ── Response to our prompt request → task complete ─────────────
+            Some(JsonRpcMessage::Response { id, result, error }) if id == prompt_request_id => {
+                if let Some(err) = error {
+                    return format!("ACP error: {}", err);
                 }
-                return format!("{output}\n\n[Progreso: {}]", progress.join("; "));
+                let stop_reason = result
+                    .as_ref()
+                    .and_then(|r| r["stopReason"].as_str())
+                    .unwrap_or("unknown");
+                debug!(target: "acp", "Prompt complete, stopReason={}", stop_reason);
+
+                if accumulated_text.is_empty() && !progress.is_empty() {
+                    return format!("[Progreso: {}]", progress.join("; "));
+                }
+                if !accumulated_text.is_empty() && !progress.is_empty() {
+                    return format!("{}\n\n[Progreso: {}]", accumulated_text.trim(), progress.join("; "));
+                }
+                if accumulated_text.is_empty() {
+                    return format!("[Agente terminó con stopReason={stop_reason}]");
+                }
+                return accumulated_text.trim().to_string();
             }
-            Some(AcpInbound::SessionUpdate { update, .. }) => match update {
-                AcpSessionUpdate::ToolStart { tool } => {
-                    info!(target: "acp", "Tool start: {}", tool);
-                    progress.push(format!("usando {tool}"));
+            // ── session/update notification → streaming content ───────────
+            Some(JsonRpcMessage::Notification { method, params }) if method == "session/update" => {
+                let params = params.unwrap_or_default();
+                let update = &params["update"];
+                let session_update = update["sessionUpdate"].as_str().unwrap_or("");
+
+                match session_update {
+                    "agent_message_chunk" => {
+                        if let Some(text) = update["content"]["text"].as_str() {
+                            accumulated_text.push_str(text);
+                            debug!(target: "acp", "Agent chunk: {}", text);
+                        }
+                    }
+                    "agent_thought_chunk" => {
+                        if let Some(text) = update["content"]["text"].as_str() {
+                            debug!(target: "acp", "Thought: {}", text);
+                        }
+                    }
+                    "tool_call" => {
+                        let tool_name = update["name"].as_str().unwrap_or("unknown");
+                        info!(target: "acp", "Tool start: {}", tool_name);
+                        progress.push(format!("usando {tool_name}"));
+                    }
+                    "tool_call_update" => {
+                        let tool_name = update["name"].as_str().unwrap_or("unknown");
+                        debug!(target: "acp", "Tool update: {}", tool_name);
+                    }
+                    other => {
+                        debug!(target: "acp", "Ignored session update: {}", other);
+                    }
                 }
-                AcpSessionUpdate::ToolComplete { tool, .. } => {
-                    debug!(target: "acp", "Tool complete: {}", tool);
-                }
-                AcpSessionUpdate::AgentThought { text } => {
-                    debug!(target: "acp", "Thought: {}", text);
-                }
-                AcpSessionUpdate::AgentMessage { text } => {
-                    info!(target: "acp", "Agent message: {}", text);
-                    progress.push(text);
-                }
-            },
-            Some(AcpInbound::PermissionRequest { description, options, .. }) => {
+            }
+            // ── session/request_permission request → auto-allow or ask user ─
+            Some(JsonRpcMessage::Request { id, method, params }) if method == "session/request_permission" => {
+                let params = params.unwrap_or_default();
+
+                // Extract permission options for the user
+                let options: Vec<String> = params["options"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|o| o["optionId"].as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // Build a description from the toolCall info
+                let tool_call = &params["toolCall"];
+                let description = tool_call["name"]
+                    .as_str()
+                    .unwrap_or("acción desconocida")
+                    .to_string();
+
                 let (resp_tx, resp_rx) = oneshot::channel::<String>();
                 let _ = proactive_tx
                     .send(ProactiveEvent::AgentQuestion {
-                        question: description.clone(),
+                        question: description,
                         options: options.clone(),
                         response_tx: resp_tx,
                     })
                     .await;
 
-                let outcome = match tokio::time::timeout(
+                let outcome_option_id = match tokio::time::timeout(
                     std::time::Duration::from_secs(60),
                     resp_rx,
                 )
@@ -645,21 +760,28 @@ async fn collect_acp_response(
                 {
                     Ok(Ok(ans)) => ans,
                     _ => {
-                        warn!(target: "acp", "Permission timeout — defaulting to reject_once");
-                        "reject_once".to_string()
+                        warn!(target: "acp", "Permission timeout — defaulting to cancelled");
+                        String::new() // will send cancelled outcome
                     }
+                };
+
+                // Build the response: AllowedOutcome or DeniedOutcome
+                let result = if outcome_option_id.is_empty() || outcome_option_id == "cancelled" {
+                    serde_json::json!({"outcome": "cancelled"})
+                } else {
+                    serde_json::json!({"outcome": "selected", "optionId": outcome_option_id})
                 };
 
                 let mut guard = acp_writer.lock().await;
                 if let Some(w) = guard.as_mut() {
-                    let _ = w
-                        .send(&AcpOutbound::PermissionResponse {
-                            session_id: session_id.clone(),
-                            outcome,
-                        })
-                        .await;
+                    let _ = w.send_response(id, result).await;
                 }
             }
+            // ── Unmatched response (different id) ─────────────────────────
+            Some(JsonRpcMessage::Response { id, .. }) => {
+                debug!(target: "acp", "Ignored response for id={}", id);
+            }
+            // ── Other notifications / requests ────────────────────────────
             Some(other) => {
                 debug!(target: "acp", "Ignored: {:?}", other);
             }
@@ -893,6 +1015,7 @@ mod tests {
         let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
         let active_task = Arc::new(Mutex::new(Some(ActiveAcpTask {
             session_id: "s1".to_string(),
+            prompt_request_id: 2,
             cancel_tx,
         })));
         let acp_writer: Arc<Mutex<Option<HermesAcpWriter>>> = Arc::new(Mutex::new(None));
@@ -913,91 +1036,303 @@ mod tests {
         assert!(result.contains("no tiene"), "got: {result:?}");
     }
 
-    // ── ACP message serialization ─────────────────────────────────────────────
+    // ── JSON-RPC helpers ─────────────────────────────────────────────────────
 
     #[test]
-    fn acp_initialize_serializes_type_field() {
-        let msg = AcpOutbound::Initialize { protocol_version: 1 };
-        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
-        assert_eq!(v["type"], "initialize");
-        assert_eq!(v["protocol_version"], 1);
+    fn jsonrpc_request_has_correct_structure() {
+        let msg = jsonrpc_request(0, "initialize", serde_json::json!({"protocolVersion": 1}));
+        assert_eq!(msg["jsonrpc"], "2.0");
+        assert_eq!(msg["id"], 0);
+        assert_eq!(msg["method"], "initialize");
+        assert_eq!(msg["params"]["protocolVersion"], 1);
     }
 
     #[test]
-    fn acp_cancel_serializes_correctly() {
-        let msg = AcpOutbound::Cancel { session_id: "s1".to_string() };
-        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
-        assert_eq!(v["type"], "cancel");
-        assert_eq!(v["session_id"], "s1");
+    fn jsonrpc_notification_has_no_id() {
+        let msg = jsonrpc_notification("session/cancel", serde_json::json!({"requestId": 5}));
+        assert_eq!(msg["jsonrpc"], "2.0");
+        assert!(msg.get("id").is_none(), "notification must not have id");
+        assert_eq!(msg["method"], "session/cancel");
+        assert_eq!(msg["params"]["requestId"], 5);
     }
 
     #[test]
-    fn acp_permission_response_serializes_correctly() {
-        let msg = AcpOutbound::PermissionResponse {
-            session_id: "s1".to_string(),
-            outcome: "allow_once".to_string(),
-        };
-        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
-        assert_eq!(v["type"], "permission_response");
-        assert_eq!(v["outcome"], "allow_once");
-    }
-
-    #[test]
-    fn acp_prompt_serializes_text_block() {
-        let msg = AcpOutbound::Prompt {
-            session_id: "s1".to_string(),
-            prompt: vec![AcpTextBlock::text("hello")],
-        };
-        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
-        assert_eq!(v["type"], "prompt");
-        assert_eq!(v["prompt"][0]["text"], "hello");
-        assert_eq!(v["prompt"][0]["type"], "text");
-    }
-
-    // ── ACP message deserialization ───────────────────────────────────────────
-
-    #[test]
-    fn acp_initialize_response_deserializes() {
-        let json = r#"{"type":"initialize_response","session_id":"abc123"}"#;
-        let msg: AcpInbound = serde_json::from_str(json).unwrap();
+    fn parse_jsonrpc_response() {
+        let v: Value = serde_json::from_str(
+            r#"{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentInfo":{"name":"hermes","version":"0.1.0"}}}"#
+        ).unwrap();
+        let msg = parse_jsonrpc(&v).unwrap();
         match msg {
-            AcpInbound::InitializeResponse { session_id } => {
-                assert_eq!(session_id, "abc123");
+            JsonRpcMessage::Response { id, result, error } => {
+                assert_eq!(id, 0);
+                assert!(result.is_some());
+                assert!(error.is_none());
+                assert_eq!(result.unwrap()["protocolVersion"], 1);
             }
-            other => panic!("wrong variant: {other:?}"),
+            other => panic!("expected Response, got: {:?}", other),
         }
     }
 
     #[test]
-    fn acp_prompt_response_deserializes() {
-        let json = r#"{"type":"prompt_response","session_id":"s1","output":"Done","stop_reason":"done"}"#;
-        let msg: AcpInbound = serde_json::from_str(json).unwrap();
+    fn parse_jsonrpc_notification() {
+        let v: Value = serde_json::from_str(
+            r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}"#
+        ).unwrap();
+        let msg = parse_jsonrpc(&v).unwrap();
         match msg {
-            AcpInbound::PromptResponse { output, stop_reason, .. } => {
-                assert_eq!(output, "Done");
-                assert_eq!(stop_reason, "done");
+            JsonRpcMessage::Notification { method, params } => {
+                assert_eq!(method, "session/update");
+                let params = params.unwrap();
+                assert_eq!(params["sessionId"], "s1");
+                assert_eq!(params["update"]["sessionUpdate"], "agent_message_chunk");
+                assert_eq!(params["update"]["content"]["text"], "hello");
             }
-            other => panic!("wrong variant: {other:?}"),
+            other => panic!("expected Notification, got: {:?}", other),
         }
     }
 
     #[test]
-    fn acp_permission_request_deserializes() {
-        let json = r#"{"type":"permission_request","session_id":"s1","description":"Abrir Safari","options":["allow_once","reject_once"]}"#;
-        let msg: AcpInbound = serde_json::from_str(json).unwrap();
+    fn parse_jsonrpc_request_from_server() {
+        let v: Value = serde_json::from_str(
+            r#"{"jsonrpc":"2.0","id":5,"method":"session/request_permission","params":{"sessionId":"s1","options":[{"optionId":"allow","name":"Allow","kind":"allow"}],"toolCall":{"name":"bash"}}}"#
+        ).unwrap();
+        let msg = parse_jsonrpc(&v).unwrap();
         match msg {
-            AcpInbound::PermissionRequest { description, options, .. } => {
-                assert_eq!(description, "Abrir Safari");
-                assert_eq!(options, vec!["allow_once", "reject_once"]);
+            JsonRpcMessage::Request { id, method, params } => {
+                assert_eq!(id, 5);
+                assert_eq!(method, "session/request_permission");
+                let params = params.unwrap();
+                assert_eq!(params["options"][0]["optionId"], "allow");
+                assert_eq!(params["toolCall"]["name"], "bash");
             }
-            other => panic!("wrong variant: {other:?}"),
+            other => panic!("expected Request, got: {:?}", other),
         }
     }
 
     #[test]
-    fn acp_unknown_type_deserializes_to_unknown() {
-        let json = r#"{"type":"some_future_message","foo":"bar"}"#;
-        let msg: AcpInbound = serde_json::from_str(json).unwrap();
-        assert!(matches!(msg, AcpInbound::Unknown), "expected Unknown variant");
+    fn parse_jsonrpc_error_response() {
+        let v: Value = serde_json::from_str(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid request"}}"#
+        ).unwrap();
+        let msg = parse_jsonrpc(&v).unwrap();
+        match msg {
+            JsonRpcMessage::Response { id, result, error } => {
+                assert_eq!(id, 1);
+                assert!(result.is_none());
+                assert!(error.is_some());
+                assert_eq!(error.unwrap()["message"], "Invalid request");
+            }
+            other => panic!("expected Response, got: {:?}", other),
+        }
+    }
+
+    // ── Initialize request format ────────────────────────────────────────────
+
+    #[test]
+    fn initialize_request_uses_camel_case() {
+        let msg = jsonrpc_request(0, "initialize", serde_json::json!({
+            "protocolVersion": 1,
+            "clientCapabilities": {},
+            "clientInfo": {"name": "voicebot", "version": "0.1.0"}
+        }));
+        assert_eq!(msg["params"]["protocolVersion"], 1);
+        assert!(msg["params"]["clientCapabilities"].is_object());
+        assert_eq!(msg["params"]["clientInfo"]["name"], "voicebot");
+    }
+
+    // ── Prompt request format ────────────────────────────────────────────────
+
+    #[test]
+    fn prompt_request_uses_session_id_camel_case() {
+        let msg = jsonrpc_request(2, "session/prompt", serde_json::json!({
+            "sessionId": "abc123",
+            "prompt": [{"type": "text", "text": "hello"}]
+        }));
+        assert_eq!(msg["method"], "session/prompt");
+        assert_eq!(msg["params"]["sessionId"], "abc123");
+        assert_eq!(msg["params"]["prompt"][0]["type"], "text");
+        assert_eq!(msg["params"]["prompt"][0]["text"], "hello");
+    }
+
+    // ── Cancel notification format ───────────────────────────────────────────
+
+    #[test]
+    fn cancel_notification_uses_request_id() {
+        let msg = jsonrpc_notification("session/cancel", serde_json::json!({
+            "requestId": 2
+        }));
+        assert_eq!(msg["method"], "session/cancel");
+        assert_eq!(msg["params"]["requestId"], 2);
+        assert!(msg.get("id").is_none(), "cancel must be a notification (no id)");
+    }
+
+    // ── Permission response format ───────────────────────────────────────────
+
+    #[test]
+    fn permission_response_allowed_format() {
+        let result = serde_json::json!({"outcome": "selected", "optionId": "allow"});
+        let msg = serde_json::json!({"jsonrpc": "2.0", "id": 5, "result": result});
+        assert_eq!(msg["result"]["outcome"], "selected");
+        assert_eq!(msg["result"]["optionId"], "allow");
+    }
+
+    #[test]
+    fn permission_response_denied_format() {
+        let result = serde_json::json!({"outcome": "cancelled"});
+        let msg = serde_json::json!({"jsonrpc": "2.0", "id": 5, "result": result});
+        assert_eq!(msg["result"]["outcome"], "cancelled");
+    }
+}
+
+// ── Integration tests (require running `hermes acp`) ──────────────────────────
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+
+    /// Full initialize + session/new handshake with a real `hermes acp` process.
+    ///
+    /// Requires `hermes acp` to be available in PATH.
+    /// Run with: `cargo test acp_initialize_handshake -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn acp_initialize_handshake() {
+        let (mut writer, mut rx) = HermesAcpWriter::spawn("hermes acp")
+            .await
+            .expect("failed to spawn hermes acp");
+
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let session_id = writer
+            .initialize(&mut rx, &cwd)
+            .await
+            .expect("initialize failed");
+
+        assert!(!session_id.is_empty(), "session_id should not be empty");
+        println!("Got session_id: {session_id}");
+
+        writer.kill().await;
+    }
+
+    /// Full flow: initialize → session/new → prompt("say hello") → collect response.
+    ///
+    /// Requires `hermes acp` to be available in PATH.
+    /// Run with: `cargo test acp_simple_prompt -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn acp_simple_prompt() {
+        let (mut writer, mut rx) = HermesAcpWriter::spawn("hermes acp")
+            .await
+            .expect("failed to spawn hermes acp");
+
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let session_id = writer
+            .initialize(&mut rx, &cwd)
+            .await
+            .expect("initialize failed");
+
+        let prompt_id = writer
+            .send_prompt(&session_id, "Say hello in one sentence.")
+            .await
+            .expect("send_prompt failed");
+
+        println!("Sent prompt with request id={prompt_id}");
+
+        let writer = Arc::new(Mutex::new(Some(writer)));
+        let (proactive_tx, _proactive_rx) = tokio::sync::mpsc::channel(8);
+        let (_cancel_tx, cancel_rx) = oneshot::channel::<()>();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            collect_acp_response(
+                writer.clone(),
+                &mut rx,
+                proactive_tx,
+                session_id,
+                prompt_id,
+                cancel_rx,
+            ),
+        )
+        .await
+        .expect("timed out waiting for agent response");
+
+        println!("Agent response: {result}");
+        assert!(!result.is_empty(), "response should not be empty");
+        assert!(
+            !result.contains("error") && !result.contains("Error"),
+            "should not be an error: {result}"
+        );
+
+        let mut guard = writer.lock().await;
+        if let Some(w) = guard.as_mut() {
+            w.kill().await;
+        }
+    }
+
+    /// Start a prompt, immediately cancel it, verify we get the cancel result.
+    ///
+    /// Requires `hermes acp` to be available in PATH.
+    /// Run with: `cargo test acp_cancel_running_task -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn acp_cancel_running_task() {
+        let (mut writer, mut rx) = HermesAcpWriter::spawn("hermes acp")
+            .await
+            .expect("failed to spawn hermes acp");
+
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let session_id = writer
+            .initialize(&mut rx, &cwd)
+            .await
+            .expect("initialize failed");
+
+        let prompt_id = writer
+            .send_prompt(&session_id, "Write a very long essay about the history of computing.")
+            .await
+            .expect("send_prompt failed");
+
+        // Give the agent a moment to start processing, then cancel
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        writer
+            .send_cancel(prompt_id)
+            .await
+            .expect("send_cancel failed");
+
+        println!("Sent cancel for request id={prompt_id}");
+
+        // Drain messages until we get the prompt response
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                match rx.recv().await {
+                    Some(JsonRpcMessage::Response { id, result, .. }) if id == prompt_id => {
+                        let stop_reason = result
+                            .as_ref()
+                            .and_then(|r| r["stopReason"].as_str())
+                            .unwrap_or("unknown");
+                        return stop_reason.to_string();
+                    }
+                    Some(_) => continue,
+                    None => return "channel closed".to_string(),
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for cancel response");
+
+        println!("Stop reason after cancel: {result}");
+
+        writer.kill().await;
     }
 }
