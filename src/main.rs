@@ -324,6 +324,18 @@ async fn main() -> Result<()> {
     // Sequence number of the last STT submission (updated in Silence to give worker a head start).
     let mut last_stt_gen: u64 = 0;
 
+    // ── Continuous audio accumulation ─────────────────────────────────────────
+    // speech_buffer is no longer cleared at SpeechEnd; it accumulates audio
+    // across short mid-thought pauses so all speech reaches Whisper as one chunk.
+    // It is cleared at the next SpeechStart only after a turn has been committed
+    // (i.e. add_user_turn was called in run_pipeline).
+    let turn_commit_counter = Arc::new(AtomicU64::new(0));
+    let mut last_cleared_commit: u64 = 0;
+    // Sample count in speech_buffer at the start of the current speech segment
+    // (recorded before pre-roll is flushed).  Used to trim old committed audio
+    // when a turn commits mid-segment.
+    let mut speech_buffer_start_offset: usize = 0;
+
     // ── Ambient state machine ─────────────────────────────────────────────────
     // Counts consecutive VAD segments where the speaker was NOT the enrolled user.
     // When it reaches config.speaker_ambient_trigger the bot silently switches to Ambient.
@@ -485,6 +497,17 @@ async fn main() -> Result<()> {
                             h.abort();
                         }
 
+                        // If a turn was committed since the last clear, the
+                        // accumulated audio is from a finished turn — start fresh.
+                        let current_commits = turn_commit_counter.load(Ordering::SeqCst);
+                        if current_commits > last_cleared_commit {
+                            speech_buffer.clear();
+                            last_cleared_commit = current_commits;
+                        }
+                        // Record where this segment starts in the buffer (before
+                        // pre-roll so we can trim if a commit arrives mid-segment).
+                        speech_buffer_start_offset = speech_buffer.sample_count();
+
                         for pre in pre_roll.drain(..) {
                             speech_buffer.push(&pre);
                         }
@@ -506,17 +529,31 @@ async fn main() -> Result<()> {
                     VadResult::SpeechEnd => {
                         let t_speech_end = Instant::now();
                         speech_buffer.push(&mono);
-                        let audio = speech_buffer.get_samples();
-                        let duration_ms = speech_buffer.duration_ms();
-                        speech_buffer.clear();
                         pre_roll.clear();
 
-                        if duration_ms < MIN_SPEECH_DURATION_MS {
-                            debug!(target: "pipeline", "Too short ({}ms), skipping", duration_ms);
+                        // Duration of *this* segment only (not the whole accumulated buffer).
+                        let segment_duration_ms = t_speech_start.as_ref()
+                            .map(|t| t.elapsed().as_millis() as u32)
+                            .unwrap_or(0);
+
+                        if segment_duration_ms < MIN_SPEECH_DURATION_MS {
+                            debug!(target: "pipeline", "Too short ({}ms), skipping", segment_duration_ms);
                             continue;
                         }
 
-                        info!(target: "pipeline", "Speech: {}ms — starting pipeline", duration_ms);
+                        // Extract audio: use the full accumulated buffer unless a turn was
+                        // committed while the user was mid-segment (edge case), in which case
+                        // we take only samples from this segment's start offset.
+                        let current_commits = turn_commit_counter.load(Ordering::SeqCst);
+                        let audio = if current_commits > last_cleared_commit {
+                            last_cleared_commit = current_commits;
+                            speech_buffer.get_samples_from(speech_buffer_start_offset)
+                        } else {
+                            speech_buffer.get_samples()
+                        };
+                        let duration_ms = audio.len() as u32 * 1000 / source_sample_rate;
+
+                        info!(target: "pipeline", "Speech: {}ms (segment {}ms) — starting pipeline", duration_ms, segment_duration_ms);
                         let vad_elapsed = t_speech_start.take()
                             .map(|t| t.elapsed().as_millis()).unwrap_or(0);
                         info!(target: "performance", "[+{}ms] VAD end ({}ms speech)", vad_elapsed, duration_ms);
@@ -603,17 +640,19 @@ async fn main() -> Result<()> {
                             continue;
                         }
 
-                        let cancel_c           = Arc::clone(&cancel);
-                        let stt_stream_c       = Arc::clone(&stt_stream);
-                        let tts_c              = Arc::clone(&tts);
-                        let audio_out_c        = Arc::clone(&audio_output);
-                        let llm_session_c      = Arc::clone(&llm_session);
-                        let llm_client_c       = llm_client.clone();
-                        let db_c               = db.clone();
-                        let tools_c            = Arc::clone(&tools);
-                        let shared_history_c   = Arc::clone(&shared_history);
-                        let context_tokens     = config.llm_context_tokens;
-                        let keep_turns         = config.llm_summary_keep_turns;
+                        let cancel_c              = Arc::clone(&cancel);
+                        let stt_stream_c          = Arc::clone(&stt_stream);
+                        let tts_c                 = Arc::clone(&tts);
+                        let audio_out_c           = Arc::clone(&audio_output);
+                        let llm_session_c         = Arc::clone(&llm_session);
+                        let llm_client_c          = llm_client.clone();
+                        let db_c                  = db.clone();
+                        let tools_c               = Arc::clone(&tools);
+                        let shared_history_c      = Arc::clone(&shared_history);
+                        let context_tokens        = config.llm_context_tokens;
+                        let keep_turns            = config.llm_summary_keep_turns;
+                        let turn_commit_counter_c = Arc::clone(&turn_commit_counter);
+                        let conv_mode_c           = Arc::clone(&conv_mode);
 
                         pipeline_handle = Some(tokio::spawn(async move {
                             run_pipeline(
@@ -633,7 +672,9 @@ async fn main() -> Result<()> {
                                 keep_turns,
                                 t_speech_end,
                                 ambient,
+                                conv_mode_c,
                                 wake_word,
+                                turn_commit_counter_c,
                             )
                             .await;
                         }));
@@ -857,7 +898,9 @@ async fn run_pipeline(
     t_speech_end: Instant,
     // If true, discard the utterance unless the transcript contains `wake_word`.
     ambient: bool,
+    conv_mode: Arc<Mutex<ConversationMode>>,
     wake_word: String,
+    turn_commit_counter: Arc<AtomicU64>,
 ) {
     let pipeline_id = PIPELINE_RUN_ID.fetch_add(1, Ordering::SeqCst);
     info!(target: "pipeline", "[pipe={}] run_pipeline START", pipeline_id);
@@ -928,6 +971,9 @@ async fn run_pipeline(
         let lower = transcript.to_lowercase();
         if lower.contains(&wake_word) {
             info!(target: "pipeline", "Ambient: wake word '{}' detected — processing", wake_word);
+            let mut mode = conv_mode.lock().unwrap();
+            *mode == ConversationMode::Active;
+            info!(target: "pipeline", "Ambient mode: deactivated by wake word");
         } else {
             debug!(
                 target: "pipeline",
@@ -945,6 +991,9 @@ async fn run_pipeline(
     let session_for_llm = {
         let mut s = llm_session.lock().unwrap();
         s.add_user_turn(&transcript);
+        // Signal that this user turn is now committed so the audio loop can clear
+        // the speech buffer on the next SpeechStart.
+        turn_commit_counter.fetch_add(1, Ordering::SeqCst);
         // Update shared history so the agent tool has the current conversation
         // context (including this user turn) when run_agent_async is called.
         if let Ok(mut h) = shared_history.write() {

@@ -52,4 +52,15 @@ impl AudioBuffer {
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty()
     }
+
+    /// Get samples starting from `offset` (number of samples to skip from the front).
+    /// If `offset >= self.buffer.len()` returns an empty Vec.
+    pub fn get_samples_from(&self, offset: usize) -> Vec<f32> {
+        self.buffer.iter().skip(offset).copied().collect()
+    }
+
+    /// Number of samples currently in the buffer.
+    pub fn sample_count(&self) -> usize {
+        self.buffer.len()
+    }
 }
