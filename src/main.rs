@@ -1579,4 +1579,160 @@ mod tests {
 
         println!("\n✓ maybe_summarize integration test passed");
     }
+
+    /// Benchmark: measures TTFT before and after summarization to detect
+    /// KV-cache invalidation caused by prompt compaction.
+    ///
+    /// Run manually:
+    /// ```sh
+    /// cargo test test_kv_cache_after_summarize --bin voicebot -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore]
+    async fn test_kv_cache_after_summarize() {
+        use std::time::Instant;
+
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("info")
+            .try_init();
+
+        // ── Setup ────────────────────────────────────────────────────────────
+        let _ = dotenvy::dotenv();
+        let llm_url = std::env::var("LLM_URL")
+            .unwrap_or_else(|_| "http://localhost:8080".to_string());
+        let llm_model = std::env::var("LLM_MODEL")
+            .unwrap_or_else(|_| "local-model".to_string());
+        let llm_provider = std::env::var("LLM_PROVIDER")
+            .unwrap_or_else(|_| "llama".to_string());
+        let llm_api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
+        let llm_client = crate::llm::LlamaClient::new(
+            &llm_url, &llm_model, 400, 0.3, 0, -1,
+        )
+        .with_provider(&llm_provider)
+        .with_api_key(&llm_api_key);
+
+        let db_dir = tempfile::TempDir::new().unwrap();
+        let db_path = db_dir.path().join("bench_kv.db");
+        let db = crate::db::Database::new(db_path.to_str().unwrap())
+            .await
+            .unwrap();
+        let session_id = db.get_or_create_session().await.unwrap();
+
+        // ── Populate session with conversation turns ─────────────────────────
+        let system_prompt = "You are a helpful assistant. Answer briefly.";
+        let mut session = crate::llm::LlmSession::new(system_prompt, 0);
+
+        let turns = vec![
+            ("What is the capital of France?", "The capital of France is Paris."),
+            ("Tell me about Rust.", "Rust is a systems programming language focused on safety and performance."),
+            ("What is photosynthesis?", "Photosynthesis converts sunlight, water, and CO2 into glucose and oxygen."),
+            ("Who wrote Don Quixote?", "Miguel de Cervantes wrote Don Quixote, published in 1605 and 1615."),
+            ("Explain quantum computing.", "Quantum computing uses qubits in superposition for parallel computation."),
+            ("What is the tallest mountain?", "Mount Everest at 8,849 meters above sea level."),
+            ("How does a combustion engine work?", "It burns fuel in cylinders, pushing pistons to create rotary motion."),
+            ("What is the speed of light?", "About 299,792,458 meters per second in a vacuum."),
+        ];
+
+        for (user_msg, assistant_msg) in &turns {
+            session.add_user_turn(user_msg);
+            session.add_assistant_turn(assistant_msg);
+            db.save_message(session_id, "User", user_msg).await.unwrap();
+            db.save_message(session_id, "Assistant", assistant_msg).await.unwrap();
+        }
+
+        // ── Helper: measure TTFT for a simple message ────────────────────────
+        async fn measure_ttft(
+            client: &crate::llm::LlamaClient,
+            session: &crate::llm::LlmSession,
+            probe_msg: &str,
+        ) -> (u128, u128, String) {
+            let mut session_clone = session.clone();
+            session_clone.add_user_turn(probe_msg);
+            let messages = session_clone.all_messages_api();
+
+            let t = Instant::now();
+            let mut rx = client.stream(&messages, &[]).await
+                .expect("Failed to start LLM stream");
+            let mut ttft_ms: Option<u128> = None;
+            let mut response = String::new();
+
+            while let Some(token) = rx.recv().await {
+                match token {
+                    StreamToken::Content(s) => {
+                        if ttft_ms.is_none() && !s.is_empty() {
+                            ttft_ms = Some(t.elapsed().as_millis());
+                        }
+                        response.push_str(&s);
+                    }
+                    StreamToken::ToolCall { .. } => {}
+                }
+            }
+            let total_ms = t.elapsed().as_millis();
+            (ttft_ms.unwrap_or(total_ms), total_ms, response)
+        }
+
+        let probe = "Hola, ¿qué tal?";
+
+        // ── Warmup: prime the KV-cache with the full conversation ────────────
+        // First call populates the cache; second call measures the warm TTFT.
+        println!("\n── Warmup (priming KV-cache) ──");
+        let (warmup_ttft, warmup_total, _) = measure_ttft(&llm_client, &session, probe).await;
+        println!("  Warmup TTFT: {}ms  (total {}ms)", warmup_ttft, warmup_total);
+
+        // ── BEFORE: measure TTFT with warm KV-cache ─────────────────────────
+        println!("\n── BEFORE summarization (warm KV-cache) ──");
+        let (before_ttft, before_total, before_response) =
+            measure_ttft(&llm_client, &session, probe).await;
+        println!("  TTFT:     {}ms", before_ttft);
+        println!("  Total:    {}ms", before_total);
+        println!("  Response: {:?}", &before_response[..before_response.len().min(80)]);
+        assert!(!before_response.is_empty(), "LLM should produce a response before summarization");
+
+        // ── Run summarization ───────────────────────────────────────────────
+        println!("\n── Running maybe_summarize ──");
+        let context_tokens: usize = 200;
+        let keep_turns: usize = 2;
+        let llm_session = Arc::new(Mutex::new(session));
+        maybe_summarize(
+            &llm_session, &llm_client, &db, session_id,
+            context_tokens, keep_turns, "", "",
+        ).await;
+
+        let session_after = llm_session.lock().unwrap().clone();
+        let msg_count = session_after.messages.len();
+        println!("  Session compacted: {} messages remaining", msg_count);
+
+        // ── AFTER: measure TTFT with invalidated KV-cache ───────────────────
+        println!("\n── AFTER summarization (KV-cache likely invalidated) ──");
+        let (after_ttft, after_total, after_response) =
+            measure_ttft(&llm_client, &session_after, probe).await;
+        println!("  TTFT:     {}ms", after_ttft);
+        println!("  Total:    {}ms", after_total);
+        println!("  Response: {:?}", &after_response[..after_response.len().min(80)]);
+        assert!(!after_response.is_empty(), "LLM should produce a response after summarization");
+
+        // ── Comparison ──────────────────────────────────────────────────────
+        let delta = after_ttft as i128 - before_ttft as i128;
+        let ratio = if before_ttft > 0 {
+            after_ttft as f64 / before_ttft as f64
+        } else {
+            f64::NAN
+        };
+
+        println!("\n{}", "=".repeat(60));
+        println!("  KV-CACHE BENCHMARK RESULTS");
+        println!("{}", "=".repeat(60));
+        println!("  TTFT before summarization:  {:>6}ms", before_ttft);
+        println!("  TTFT after  summarization:  {:>6}ms", after_ttft);
+        println!("  Delta:                      {:>+6}ms", delta);
+        println!("  Ratio (after/before):       {:>6.2}x", ratio);
+        println!("{}", "=".repeat(60));
+        if delta > 0 {
+            println!("  → KV-cache was likely INVALIDATED by summarization.");
+            println!("    The LLM had to re-process the entire prompt.");
+        } else {
+            println!("  → KV-cache appears to still be effective.");
+        }
+        println!();
+    }
 }
