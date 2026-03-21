@@ -86,6 +86,42 @@ impl SayTts {
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
+
+    /// Print all available macOS `say` voices to stdout.
+    pub fn list_voices() -> Result<()> {
+        let output = Command::new("say")
+            .arg("-v")
+            .arg("?")
+            .output()
+            .context("Failed to run 'say -v ?' — this requires macOS")?;
+
+        if !output.status.success() {
+            anyhow::bail!("'say -v ?' exited with status {}", output.status);
+        }
+
+        let text = String::from_utf8_lossy(&output.stdout);
+        println!("Available voices for TTS provider: say");
+        println!("{:<30} {:<10} {}", "Name", "Language", "Sample");
+        println!("{}", "-".repeat(70));
+        for line in text.lines() {
+            // Format: "Name              lang_REGION  # Sample text"
+            if let Some((before_hash, sample)) = line.split_once('#') {
+                let before = before_hash.trim();
+                // Split name and language: name is everything before the last whitespace-separated token
+                let parts: Vec<&str> = before.rsplitn(2, char::is_whitespace).collect();
+                if parts.len() == 2 {
+                    let lang = parts[0].trim();
+                    let name = parts[1].trim();
+                    println!("{:<30} {:<10} {}", name, lang, sample.trim());
+                } else {
+                    println!("{}", line);
+                }
+            } else {
+                println!("{}", line);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Parse a WAV file and return f32 samples.

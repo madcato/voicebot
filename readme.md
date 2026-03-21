@@ -195,6 +195,19 @@ TTS_PROVIDER=kokoro cargo run --features kokoro --release
 WHISPER_COREML=1 cargo run --release
 ```
 
+**List available voices for the active TTS provider:**
+
+```bash
+cargo run -- --list-voices
+# or
+LIST_VOICES=1 cargo run
+```
+
+The output depends on the `TTS_PROVIDER` setting:
+- `say` — lists all macOS system voices (name, language, sample text)
+- `avspeech` — lists all AVSpeechSynthesizer voices (name, language, quality, gender, identifier)
+- `kokoro` — lists all Kokoro ONNX voice styles (voice ID, language, gender)
+
 ---
 
 ## Architecture

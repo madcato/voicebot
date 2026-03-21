@@ -97,6 +97,39 @@ impl AvSpeechTts {
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
+
+    /// Print all available AVSpeechSynthesizer voices to stdout.
+    pub fn list_voices() {
+        unsafe {
+            let voices = AVSpeechSynthesisVoice::speechVoices();
+            let mut entries: Vec<(String, String, String, String, String)> = Vec::new();
+            for voice in voices.iter() {
+                let name = voice.name().to_string();
+                let lang = voice.language().to_string();
+                let identifier = voice.identifier().to_string();
+                let quality = match voice.quality() {
+                    q if q == objc2_avf_audio::AVSpeechSynthesisVoiceQuality::Enhanced => "Enhanced",
+                    q if q == objc2_avf_audio::AVSpeechSynthesisVoiceQuality::Premium => "Premium",
+                    _ => "Default",
+                };
+                let gender = match voice.gender() {
+                    g if g == objc2_avf_audio::AVSpeechSynthesisVoiceGender::Male => "Male",
+                    g if g == objc2_avf_audio::AVSpeechSynthesisVoiceGender::Female => "Female",
+                    _ => "Unspecified",
+                };
+                entries.push((name, lang, quality.to_string(), gender.to_string(), identifier));
+            }
+            entries.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+
+            println!("Available voices for TTS provider: avspeech");
+            println!("{:<30} {:<10} {:<10} {:<12} {}", "Name", "Language", "Quality", "Gender", "Identifier");
+            println!("{}", "-".repeat(100));
+            for (name, lang, quality, gender, identifier) in &entries {
+                println!("{:<30} {:<10} {:<10} {:<12} {}", name, lang, quality, gender, identifier);
+            }
+            println!("\nTotal: {} voices", entries.len());
+        }
+    }
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

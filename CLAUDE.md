@@ -16,6 +16,11 @@ cargo clippy               # Lint code
 cargo run -- --list-devices
 # or
 LIST_AUDIO_DEVICES=1 cargo run
+
+# List available TTS voices (for the active TTS_PROVIDER)
+cargo run -- --list-voices
+# or
+LIST_VOICES=1 cargo run
 ```
 
 To run a single test:

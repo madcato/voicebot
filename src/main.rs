@@ -80,6 +80,43 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ── Voice listing shortcut ────────────────────────────────────────────────
+    let list_voices = config.list_voices
+        || std::env::args().any(|a| a == "--list-voices" || a == "list-voices");
+    if list_voices {
+        match config.tts_provider.as_str() {
+            #[cfg(feature = "avspeech")]
+            "avspeech" => {
+                AvSpeechTts::list_voices();
+            }
+            #[cfg(not(feature = "avspeech"))]
+            "avspeech" => {
+                eprintln!("TTS_PROVIDER=avspeech requires the 'avspeech' feature: cargo run --features avspeech");
+                std::process::exit(1);
+            }
+            #[cfg(feature = "kokoro")]
+            "kokoro" => {
+                let k = KokoroTts::new(
+                    &config.kokoro_model,
+                    &config.kokoro_voices,
+                    &config.kokoro_voice,
+                    &config.kokoro_language,
+                )
+                .await?;
+                k.list_voices();
+            }
+            #[cfg(not(feature = "kokoro"))]
+            "kokoro" => {
+                eprintln!("TTS_PROVIDER=kokoro requires the 'kokoro' feature: cargo run --features kokoro");
+                std::process::exit(1);
+            }
+            _ => {
+                SayTts::list_voices()?;
+            }
+        }
+        return Ok(());
+    }
+
     info!(target: "voicebot", "Language: {}", config.language);
 
     // ── Proactive event channel ───────────────────────────────────────────────

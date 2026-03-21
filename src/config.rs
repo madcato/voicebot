@@ -12,6 +12,7 @@ pub struct Config {
     pub audio_input_device: Option<String>,
     pub audio_output_device: Option<String>,
     pub list_devices: bool,
+    pub list_voices: bool,
 
     // ── VAD ───────────────────────────────────────────────────────────────────
     /// Milliseconds of continuous silence before SpeechEnd fires.
@@ -153,6 +154,9 @@ impl Config {
             audio_input_device: env::var("AUDIO_INPUT_DEVICE").ok(),
             audio_output_device: env::var("AUDIO_OUTPUT_DEVICE").ok(),
             list_devices: env::var("LIST_AUDIO_DEVICES")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(false),
+            list_voices: env::var("LIST_VOICES")
                 .map(|v| v == "1" || v.to_lowercase() == "true")
                 .unwrap_or(false),
 

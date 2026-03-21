@@ -69,4 +69,56 @@ impl KokoroTts {
     pub fn sample_rate(&self) -> u32 {
         24_000
     }
+
+    /// Print all available Kokoro voice styles to stdout.
+    ///
+    /// Voice naming convention: `{lang}{gender}_{name}`
+    /// - `af_*` = American English, Female
+    /// - `am_*` = American English, Male
+    /// - `bf_*` = British English, Female
+    /// - `bm_*` = British English, Male
+    /// - `ef_*` = Spanish, Female
+    /// - `em_*` = Spanish, Male
+    /// - `ff_*` = French, Female
+    /// - `hf_*` = Hindi, Female
+    /// - `jf_*` = Japanese, Female
+    /// - `zf_*` = Chinese, Female
+    pub fn list_voices(&self) {
+        let voices = self.inner.get_available_voices();
+
+        println!("Available voices for TTS provider: kokoro");
+        println!("{:<25} {:<20} {:<10}", "Voice ID", "Language", "Gender");
+        println!("{}", "-".repeat(55));
+        for voice in &voices {
+            let (lang, gender) = parse_kokoro_voice_id(voice);
+            println!("{:<25} {:<20} {:<10}", voice, lang, gender);
+        }
+        println!("\nTotal: {} voices", voices.len());
+    }
+}
+
+/// Parse a Kokoro voice ID prefix into (language, gender) labels.
+fn parse_kokoro_voice_id(id: &str) -> (&str, &str) {
+    if id.len() < 2 {
+        return ("Unknown", "Unknown");
+    }
+    let prefix: Vec<char> = id.chars().take(2).collect();
+    let lang = match prefix[0] {
+        'a' => "English (American)",
+        'b' => "English (British)",
+        'e' => "Spanish",
+        'f' => "French",
+        'h' => "Hindi",
+        'i' => "Italian",
+        'j' => "Japanese",
+        'p' => "Portuguese (Brazilian)",
+        'z' => "Chinese (Mandarin)",
+        _ => "Unknown",
+    };
+    let gender = match prefix[1] {
+        'f' => "Female",
+        'm' => "Male",
+        _ => "Unknown",
+    };
+    (lang, gender)
 }
