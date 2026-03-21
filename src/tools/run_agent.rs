@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
@@ -452,6 +453,8 @@ pub struct HermesAcpWriter {
     #[allow(dead_code)]
     child: Child,
     next_id: u64,
+    /// When true, raw JSON-RPC messages are printed to stderr.
+    pub verbose: Arc<AtomicBool>,
 }
 
 impl HermesAcpWriter {
@@ -479,6 +482,8 @@ impl HermesAcpWriter {
             .ok_or_else(|| anyhow::anyhow!("ACP: no stdout handle"))?;
 
         let (tx, rx) = mpsc::channel::<JsonRpcMessage>(64);
+        let verbose = Arc::new(AtomicBool::new(false));
+        let verbose_reader = Arc::clone(&verbose);
 
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
@@ -486,6 +491,9 @@ impl HermesAcpWriter {
                 let line = line.trim().to_string();
                 if line.is_empty() {
                     continue;
+                }
+                if verbose_reader.load(Ordering::Relaxed) {
+                    eprintln!("\x1b[2m← {line}\x1b[0m");
                 }
                 match serde_json::from_str::<Value>(&line) {
                     Ok(v) => {
@@ -505,12 +513,15 @@ impl HermesAcpWriter {
             debug!(target: "acp", "ACP reader task ended");
         });
 
-        Ok((Self { session_id: None, stdin, child, next_id: 0 }, rx))
+        Ok((Self { session_id: None, stdin, child, next_id: 0, verbose }, rx))
     }
 
     /// Write a raw JSON value as a newline-delimited line to the process stdin.
-    async fn write_json(&mut self, msg: &Value) -> anyhow::Result<()> {
+    pub async fn write_json(&mut self, msg: &Value) -> anyhow::Result<()> {
         let json = serde_json::to_string(msg)?;
+        if self.verbose.load(Ordering::Relaxed) {
+            eprintln!("\x1b[2m→ {json}\x1b[0m");
+        }
         self.stdin.write_all(json.as_bytes()).await?;
         self.stdin.write_all(b"\n").await?;
         self.stdin.flush().await?;
@@ -614,6 +625,45 @@ impl HermesAcpWriter {
     pub async fn send_cancel(&mut self, request_id: u64) -> anyhow::Result<()> {
         self.send_notification("session/cancel", serde_json::json!({
             "requestId": request_id
+        })).await
+    }
+
+    /// Create a new session (without re-initializing the process).
+    pub async fn send_new_session(&mut self, cwd: &str) -> anyhow::Result<u64> {
+        self.send_request("session/new", serde_json::json!({
+            "cwd": cwd,
+            "mcpServers": []
+        })).await
+    }
+
+    /// Fork an existing session.
+    pub async fn send_fork_session(&mut self, session_id: &str, cwd: &str) -> anyhow::Result<u64> {
+        self.send_request("session/fork", serde_json::json!({
+            "sessionId": session_id,
+            "cwd": cwd
+        })).await
+    }
+
+    /// Load a previous session by ID.
+    pub async fn send_load_session(&mut self, session_id: &str, cwd: &str) -> anyhow::Result<u64> {
+        self.send_request("session/load", serde_json::json!({
+            "sessionId": session_id,
+            "cwd": cwd
+        })).await
+    }
+
+    /// Resume a suspended session.
+    pub async fn send_resume_session(&mut self, session_id: &str, cwd: &str) -> anyhow::Result<u64> {
+        self.send_request("session/resume", serde_json::json!({
+            "sessionId": session_id,
+            "cwd": cwd
+        })).await
+    }
+
+    /// List active sessions.
+    pub async fn send_list_sessions(&mut self, cwd: &str) -> anyhow::Result<u64> {
+        self.send_request("session/list", serde_json::json!({
+            "cwd": cwd
         })).await
     }
 

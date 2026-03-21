@@ -86,6 +86,14 @@ avspeech = ["dep:objc2", "dep:block2", "dep:objc2-foundation", "dep:objc2-avf-au
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.15", features = ["coreml", "metal"] }
 
+[[bin]]
+name = "voicebot"
+path = "src/main.rs"
+
+[[bin]]
+name = "acp_agent_chat"
+path = "src/bin/acp_agent_chat.rs"
+
 [dev-dependencies]
 # Mock HTTP server for LLM client integration tests
 wiremock = "0.6"
