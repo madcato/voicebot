@@ -19,7 +19,7 @@
 //! cargo test e2e::stt_ -- --ignored --nocapture
 //! ```
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -31,7 +31,7 @@ use crate::audio::output::AudioOutput;
 use crate::db::Database;
 use crate::llm::{LlamaClient, LlmSession};
 use crate::stt::SttStream;
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolRegistry, ConversationMode};
 use crate::tts::{mock_tts::MockTts, TtsEngine};
 
 // ── SSE helpers ───────────────────────────────────────────────────────────────
@@ -158,6 +158,7 @@ impl E2eHarness {
         let stt_stream = SttStream::mock(transcript.to_string());
         let cancel = Arc::new(AtomicBool::new(false));
         let sample_rate = self.tts.sample_rate();
+        let conv_mode = Arc::new(Mutex::new(ConversationMode::Active));
 
         super::run_pipeline(
             1, // min_stt_gen — matches SttStream::mock seq
@@ -176,7 +177,9 @@ impl E2eHarness {
             6,     // summary_keep_turns
             Instant::now(),
             ambient,
+            conv_mode,
             wake_word.to_string(),
+            Arc::new(AtomicU64::new(0)),
         )
         .await;
 
