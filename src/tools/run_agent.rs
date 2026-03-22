@@ -239,8 +239,14 @@ impl RunAgentTool {
         tokio::spawn(async move {
             info!("RunAgentTool(cli): task started: {:?}", task);
             let result = call_agent(command, query).await;
-            info!("RunAgentTool(cli): task complete ({} chars): {:?}", result.len(), result);
-            let _ = proactive_tx.send(ProactiveEvent::AgentResult { task, result }).await;
+            info!("RunAgentTool(cli): task complete ({} chars)", result.len());
+            if proactive_tx
+                .send(ProactiveEvent::AgentResult { task, result })
+                .await
+                .is_err()
+            {
+                warn!("RunAgentTool(cli): failed to deliver agent result: main loop channel closed");
+            }
         });
 
         "[Tarea delegada al agente. El resultado llegará en breve.]".to_string()
@@ -373,9 +379,14 @@ impl RunAgentTool {
 
             { active_task.lock().await.take(); }
 
-            let _ = proactive_tx
+            info!(target: "acp", "Agent task complete — sending result ({} chars)", result.len());
+            if proactive_tx
                 .send(ProactiveEvent::AgentResult { task: task_c, result })
-                .await;
+                .await
+                .is_err()
+            {
+                warn!(target: "acp", "Failed to deliver agent result: main loop channel closed");
+            }
         });
 
         "[Tarea ACP delegada al agente. El resultado llegará en breve.]".to_string()

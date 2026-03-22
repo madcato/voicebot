@@ -423,6 +423,9 @@ async fn async_main() -> Result<()> {
     // Agent results that arrived while the voicebot was busy — processed in order when idle.
     let mut pending_agent_results: std::collections::VecDeque<(String, String)> =
         std::collections::VecDeque::new();
+    // Tracks the agent result currently being announced so it can be re-queued
+    // if the announcement pipeline is barged-in before the user hears it.
+    let mut current_agent_announcement: Option<(String, String)> = None;
     // ACP permission gate: when Some, the next STT result is routed to this
     // sender as the user's yes/no answer rather than starting the LLM pipeline.
     let mut pending_agent_question: Option<tokio::sync::oneshot::Sender<String>> = None;
@@ -460,6 +463,7 @@ async fn async_main() -> Result<()> {
                 // If the active pipeline finished naturally, release it so we look idle.
                 if pipeline_handle.as_ref().map(|h| h.is_finished()).unwrap_or(false) {
                     pipeline_handle = None;
+                    current_agent_announcement = None;
                 }
 
                 // If idle and there are pending agent results, process the next one.
@@ -479,6 +483,9 @@ async fn async_main() -> Result<()> {
                         let llm_client_c  = llm_client.clone();
                         let db_c          = db.clone();
                         let tools_c       = Arc::clone(&tools);
+                        // Track what's being announced so we can re-queue it if a
+                        // barge-in cancels the pipeline before the user hears it.
+                        current_agent_announcement = Some((task, result));
                         pipeline_handle = Some(tokio::spawn(async move {
                             run_text_pipeline(
                                 notification, cancel_c, tts_c, audio_out_c,
@@ -569,6 +576,12 @@ async fn async_main() -> Result<()> {
                             info!(target: "pipeline", "Barge-in detected — cancelling active pipeline");
                             cancel.store(true, Ordering::SeqCst);
                             h.abort();
+                            // If we were announcing an agent result, re-queue it so
+                            // the user still hears it once they finish speaking.
+                            if let Some(announcement) = current_agent_announcement.take() {
+                                info!(target: "pipeline", "Barge-in interrupted agent result announcement — re-queueing");
+                                pending_agent_results.push_front(announcement);
+                            }
                         }
 
                         // If a turn was committed since the last clear, the
@@ -679,6 +692,12 @@ async fn async_main() -> Result<()> {
                         if let Some(h) = pipeline_handle.take() {
                             cancel.store(true, Ordering::SeqCst);
                             h.abort();
+                            // If we were announcing an agent result, re-queue it so
+                            // the user still hears it after their utterance is handled.
+                            if let Some(announcement) = current_agent_announcement.take() {
+                                info!(target: "pipeline", "SpeechEnd interrupted agent result announcement — re-queueing");
+                                pending_agent_results.push_front(announcement);
+                            }
                             // The CPAL audio callback runs every ~10ms. Give it at
                             // least two callback periods to see cancel=true and stop
                             // the spawn_blocking play_blocking thread (which abort()
