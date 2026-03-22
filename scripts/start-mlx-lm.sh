@@ -22,8 +22,8 @@ set -euo pipefail
 MODEL="${1:-${MLX_MODEL:-}}"
 HOST="${MLX_HOST:-127.0.0.1}"
 PORT="${MLX_PORT:-8000}"
-MAX_TOKENS="${MLX_MAX_TOKENS:-600}"
-TEMPERATURE="${MLX_TEMP:-0.7}"
+MAX_TOKENS="${MLX_MAX_TOKENS:-300}"
+TEMPERATURE="${MLX_TEMP:-0.5}"
 
 # KV-cache: 1 slot (mono-user). Size in bytes — 3 GB is enough for long
 # conversations at 8K–32K context with 7B–14B models. Raise if you see

@@ -183,17 +183,19 @@ impl LlamaClient {
             "messages": messages,
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
-            "top_p": 0.95,
+            "top_p": 0.90,
             "stream": true,
         });
         if self.llama_extensions {
             // llama.cpp extensions: reuse the KV-cache across turns for this slot.
+            // Sampling params (temp, top_p, top_k, min_p) are set server-side.
             payload["cache_prompt"] = serde_json::json!(true);
             payload["slot_id"] = serde_json::json!(self.slot_id);
         } else {
-            // mlx-lm: prevent the model from looping (repeating sentences).
-            // llama.cpp controls this via --repeat-penalty in server args.
+            // mlx-lm: sampling params must be sent per-request (no server-side config).
             payload["repetition_penalty"] = serde_json::json!(1.1);
+            payload["top_k"] = serde_json::json!(40);
+            payload["min_p"] = serde_json::json!(0.05);
         }
         // Disable Qwen3 thinking mode for all backends.
         //
