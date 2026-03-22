@@ -34,7 +34,7 @@ LLM_HOST="${LLM_HOST:-0.0.0.0}"
 LLM_PORT="${LLM_PORT:-8080}"
 
 # Context size in tokens
-LLM_CTX="${LLM_CTX:-12288}"
+LLM_CTX="${LLM_CTX:-8192}"
 
 # Number of CPU threads (leave 2 free for audio pipeline)
 LLM_THREADS="${LLM_THREADS:-$(( $(sysctl -n hw.logicalcpu 2>/dev/null || echo 8) - 2 ))}"
@@ -86,11 +86,12 @@ exec llama-server \
     --mlock \
     -b 2048 \
     --ubatch-size 2048 \
-    --parallel 16 \
+    --parallel 1 \
     --repeat-penalty 1.1 \
-    --temp 0.6 \
-    --top-p 0.95 \
-    --min-p 0.07 \
+    --temp 0.5 \
+    --top-p 0.90 \
+    --top-k 40 \
+    --min-p 0.05 \
     --reasoning-budget 0 \
     --reasoning-format none \
     --verbose
