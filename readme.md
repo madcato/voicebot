@@ -359,6 +359,15 @@ AUDIO_INPUT_DEVICE="Microphone"
 AUDIO_OUTPUT_DEVICE="Speaker"
 ```
 
+If a device appears multiple times (e.g. a headset with both USB and Bluetooth connections), the
+code automatically picks the first candidate whose configuration is valid. To force a specific
+match, append `#N` (0-based index) to the device name:
+
+```bash
+AUDIO_INPUT_DEVICE="Poly Sync 20-M#0"   # first match (USB)
+AUDIO_INPUT_DEVICE="Poly Sync 20-M#1"   # second match (Bluetooth)
+```
+
 ### TTS not working
 
 - macOS `say`: Check voice is installed: `say -v ?`
