@@ -625,17 +625,18 @@ async fn async_main() -> Result<()> {
                         t_speech_start = Some(Instant::now());
                         info!(target: "performance", "[+0ms] SpeechStart");
                         last_speech_at = Instant::now();
-                        // ── Barge-in: fire VAD_DETECTED immediately ───────────
-                        if shared.llm_busy.load(Ordering::SeqCst) {
-                            info!(target: "pipeline", "Barge-in detected at SpeechStart — firing VAD_DETECTED");
-                            events.cancel_tx.send(()).ok();
-                            play_cancel.store(true, Ordering::SeqCst);
-                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                            play_cancel.store(false, Ordering::SeqCst);
-                            if let Some(announcement) = current_agent_announcement.take() {
-                                info!(target: "pipeline", "Barge-in interrupted agent announcement — re-queueing");
-                                pending_agent_results.push_front(announcement);
-                            }
+                        // ── VAD_DETECTED: cancel any active LLM/TTS pipeline ──
+                        // Fired unconditionally: llm_busy becomes false when the LLM
+                        // finishes streaming, but TTS may still be playing sentences.
+                        // All tasks handle stale cancels gracefully.
+                        info!(target: "pipeline", "SpeechStart — firing VAD_DETECTED");
+                        events.cancel_tx.send(()).ok();
+                        play_cancel.store(true, Ordering::SeqCst);
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        play_cancel.store(false, Ordering::SeqCst);
+                        if let Some(announcement) = current_agent_announcement.take() {
+                            info!(target: "pipeline", "SpeechStart interrupted agent announcement — re-queueing");
+                            pending_agent_results.push_front(announcement);
                         }
 
                         // If a turn was committed since the last clear, start fresh.
@@ -1115,16 +1116,33 @@ async fn tts_task(
         let sentence_c = sentence.clone();
         let synth_handle = tokio::task::spawn_blocking(move || tts_c.synthesize(&sentence_c));
 
-        // Await previous playback while current sentence is being synthesized.
-        drain_play(&mut play_handle).await;
+        // Await previous playback, interruptible by cancel.
+        // play_cancel AtomicBool signals play_blocking to stop; cancel_rx wakes this select.
+        if let Some(h) = play_handle.take() {
+            let cancelled = tokio::select! {
+                result = h => {
+                    if let Ok(Err(e)) = result {
+                        error!(target: "audio", "Playback error: {}", e);
+                    }
+                    false
+                },
+                _ = cancel_rx.recv() => true,
+            };
+            if cancelled {
+                synth_handle.abort();
+                play_cancel.store(true, Ordering::SeqCst);
+                shared.sentences.lock().unwrap().clear();
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                play_cancel.store(false, Ordering::SeqCst);
+                while cancel_rx.try_recv().is_ok() {}
+                continue;
+            }
+        }
 
-        // Check for cancel that arrived during synthesis/drain.
+        // Check cancel once more before awaiting synthesis result.
         if cancel_rx.try_recv().is_ok() {
             synth_handle.abort();
-            play_cancel.store(true, Ordering::SeqCst);
             shared.sentences.lock().unwrap().clear();
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            play_cancel.store(false, Ordering::SeqCst);
             while cancel_rx.try_recv().is_ok() {}
             continue;
         }
