@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, StreamConfig};
 use rubato::{FftFixedIn, Resampler};
@@ -17,10 +17,7 @@ impl AudioOutput {
         let host = cpal::default_host();
 
         let device = if let Some(name) = device_name {
-            host.output_devices()
-                .context("Failed to enumerate output devices")?
-                .find(|d| d.description().map(|desc| desc.name().contains(name)).unwrap_or(false))
-                .with_context(|| format!("Output device '{}' not found", name))?
+            Self::find_output_device(&host, name)?
         } else {
             host.default_output_device()
                 .context("No output device available")?
@@ -49,6 +46,77 @@ impl AudioOutput {
         };
 
         Ok(Self { device: Some(device), config })
+    }
+
+    /// Find an output device by name, handling duplicates (e.g. USB vs Bluetooth).
+    ///
+    /// Supports `"Name#N"` suffix to select the Nth match (0-based). Without an index,
+    /// picks the first candidate whose `default_output_config()` succeeds.
+    fn find_output_device(host: &cpal::Host, name: &str) -> Result<Device> {
+        let (name_filter, index) = if let Some(pos) = name.rfind('#') {
+            if let Ok(idx) = name[pos + 1..].parse::<usize>() {
+                (&name[..pos], Some(idx))
+            } else {
+                (name, None)
+            }
+        } else {
+            (name, None)
+        };
+
+        let candidates: Vec<Device> = host
+            .output_devices()
+            .context("Failed to enumerate output devices")?
+            .filter(|d| {
+                d.description()
+                    .map(|desc| desc.name().contains(name_filter))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        if candidates.is_empty() {
+            return Err(anyhow!(
+                "Output device '{}' not found. Use LIST_AUDIO_DEVICES=1 to see available devices.",
+                name_filter
+            ));
+        }
+
+        info!(
+            target: "audio",
+            "Found {} output device(s) matching '{}'",
+            candidates.len(),
+            name_filter
+        );
+
+        if let Some(idx) = index {
+            return candidates
+                .into_iter()
+                .nth(idx)
+                .ok_or_else(|| anyhow!("Output device index #{} out of range for '{}'", idx, name_filter));
+        }
+
+        for device in candidates {
+            let desc = device.description().map(|d| d.name().to_string()).unwrap_or_default();
+            match device.default_output_config() {
+                Ok(cfg) => {
+                    info!(
+                        target: "audio",
+                        "Selected output device: {} ({} Hz, {} ch)",
+                        desc,
+                        cfg.sample_rate(),
+                        cfg.channels()
+                    );
+                    return Ok(device);
+                }
+                Err(e) => {
+                    info!(target: "audio", "Skipping output device '{}': {}", desc, e);
+                }
+            }
+        }
+
+        Err(anyhow!(
+            "No working output device found matching '{}'. Use LIST_AUDIO_DEVICES=1 to see available devices.",
+            name_filter
+        ))
     }
 
     /// Null/headless audio output — `play_blocking` discards all audio immediately.

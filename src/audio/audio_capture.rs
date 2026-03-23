@@ -61,26 +61,81 @@ impl AudioCapture {
         })
     }
 
-    /// Find an input device by name (case-insensitive partial match)
+    /// Parse a device name that may include an index suffix: "Name#N" → ("name", Some(N))
+    fn parse_device_name(name: &str) -> (&str, Option<usize>) {
+        if let Some(pos) = name.rfind('#') {
+            if let Ok(idx) = name[pos + 1..].parse::<usize>() {
+                return (&name[..pos], Some(idx));
+            }
+        }
+        (name, None)
+    }
+
+    /// Find an input device by name (case-insensitive partial match).
+    ///
+    /// When multiple devices share the same name (e.g. USB and Bluetooth variants of the
+    /// same headset), appending `#N` selects the Nth match (0-based). Without an index
+    /// suffix, the first candidate whose `default_input_config()` succeeds is used, which
+    /// skips Bluetooth HFP entries that advertise a config but fail on stream open.
     fn find_device_by_name(host: &cpal::Host, name: &str) -> Result<Device> {
-        let name_lower = name.to_lowercase();
+        let (name_filter, index) = Self::parse_device_name(name);
+        let name_lower = name_filter.to_lowercase();
 
-        let devices = host
+        let candidates: Vec<Device> = host
             .input_devices()
-            .context("Failed to enumerate input devices")?;
+            .context("Failed to enumerate input devices")?
+            .filter(|d| {
+                d.description()
+                    .map(|desc| desc.name().to_lowercase().contains(&name_lower))
+                    .unwrap_or(false)
+            })
+            .collect();
 
-        for device in devices {
-            if let Ok(device_name) = device.description() {
-                if device_name.name().to_lowercase().contains(&name_lower) {
-                    info!(target: "audio", "Found matching device: {}", device_name);
+        if candidates.is_empty() {
+            return Err(anyhow!(
+                "No input device found matching '{}'. Use LIST_AUDIO_DEVICES=1 to see available devices.",
+                name_filter
+            ));
+        }
+
+        info!(
+            target: "audio",
+            "Found {} input device(s) matching '{}'",
+            candidates.len(),
+            name_filter
+        );
+
+        if let Some(idx) = index {
+            // Explicit index — honour it directly
+            return candidates
+                .into_iter()
+                .nth(idx)
+                .ok_or_else(|| anyhow!("Device index #{} out of range for '{}'", idx, name_filter));
+        }
+
+        // No index — pick the first candidate whose default config succeeds
+        for device in candidates {
+            let desc = device.description().map(|d| d.name().to_string()).unwrap_or_default();
+            match device.default_input_config() {
+                Ok(cfg) => {
+                    info!(
+                        target: "audio",
+                        "Selected input device: {} ({} Hz, {} ch)",
+                        desc,
+                        cfg.sample_rate(),
+                        cfg.channels()
+                    );
                     return Ok(device);
+                }
+                Err(e) => {
+                    info!(target: "audio", "Skipping input device '{}': {}", desc, e);
                 }
             }
         }
 
         Err(anyhow!(
-            "No input device found matching '{}'. Use LIST_AUDIO_DEVICES=1 to see available devices.",
-            name
+            "No working input device found matching '{}'. Use LIST_AUDIO_DEVICES=1 to see available devices.",
+            name_filter
         ))
     }
 
