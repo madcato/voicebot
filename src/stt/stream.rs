@@ -71,6 +71,12 @@ impl SttStream {
         s
     }
 
+    /// Returns a cloned watch receiver for monitoring STT results.
+    /// Use this to detect when new transcriptions are produced.
+    pub fn result_receiver(&self) -> watch::Receiver<(u64, String)> {
+        self.result_rx.clone()
+    }
+
     /// Wait until a Whisper result for sequence >= `min_seq` is ready.
     pub async fn await_result(&self, min_seq: u64) -> String {
         let mut rx = self.result_rx.clone();
