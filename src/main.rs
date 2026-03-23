@@ -448,10 +448,6 @@ async fn async_main() -> Result<()> {
     let mut speech_buffer = AudioBuffer::new(source_sample_rate, MAX_SPEECH_BUFFER_SECS);
     let mut pre_roll: VecDeque<Vec<f32>> = VecDeque::with_capacity(PRE_ROLL_CHUNKS + 1);
     let mut t_speech_start: Option<Instant> = None;
-    // Tracks how many ms of audio were in the buffer the last time we submitted to SttStream.
-    let mut last_stt_submit_ms: u32 = 0;
-    // Sequence number of the last STT submission (updated in Silence to give worker a head start).
-    let mut last_stt_gen: u64 = 0;
 
     // ── Continuous audio accumulation ─────────────────────────────────────────
     // speech_buffer is no longer cleared at SpeechEnd; it accumulates audio
@@ -549,12 +545,6 @@ async fn async_main() -> Result<()> {
         events.vad_finish.notify_one();
     }
 
-    // ── STT result watcher (VAD_DETECTED) ────────────────────────────────────
-    // When Whisper produces a transcription, update shared.transliterated_text
-    // and fire the cancel broadcast to stop any active assistant response.
-    let mut stt_result_rx = stt_stream.result_receiver();
-    let mut last_stt_cancel_seq: u64 = 0;
-
     let mut proactive_rx = proactive_rx;
     tokio::select! {
         _ = async {
@@ -582,19 +572,6 @@ async fn async_main() -> Result<()> {
                     result = rx.recv() => match result {
                         Ok(c) => c,
                         Err(e) => { error!(target: "audio", "Audio channel closed: {}", e); break; }
-                    },
-                    _ = stt_result_rx.changed() => {
-                        // STT produced a new transcription — fire VAD_DETECTED.
-                        let (seq, text) = stt_result_rx.borrow_and_update().clone();
-                        if seq > last_stt_cancel_seq && !text.is_empty() {
-                            last_stt_cancel_seq = seq;
-                            *shared.transliterated_text.lock().unwrap() = text;
-                            events.cancel_tx.send(()).ok();
-                            play_cancel.store(true, Ordering::SeqCst);
-                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                            play_cancel.store(false, Ordering::SeqCst);
-                        }
-                        continue;
                     },
                     Some(event) = proactive_rx.recv() => {
                         match event {
@@ -647,13 +624,16 @@ async fn async_main() -> Result<()> {
                     VadResult::SpeechStart => {
                         t_speech_start = Some(Instant::now());
                         info!(target: "performance", "[+0ms] SpeechStart");
-                        last_stt_gen = 0;
                         last_speech_at = Instant::now();
-                        // Barge-in: STT will fire VAD_DETECTED when it transcribes text.
-                        // Re-queue any announcement that might be interrupted.
+                        // ── Barge-in: fire VAD_DETECTED immediately ───────────
                         if shared.llm_busy.load(Ordering::SeqCst) {
+                            info!(target: "pipeline", "Barge-in detected at SpeechStart — firing VAD_DETECTED");
+                            events.cancel_tx.send(()).ok();
+                            play_cancel.store(true, Ordering::SeqCst);
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                            play_cancel.store(false, Ordering::SeqCst);
                             if let Some(announcement) = current_agent_announcement.take() {
-                                info!(target: "pipeline", "SpeechStart interrupted agent announcement — re-queueing");
+                                info!(target: "pipeline", "Barge-in interrupted agent announcement — re-queueing");
                                 pending_agent_results.push_front(announcement);
                             }
                         }
@@ -670,17 +650,9 @@ async fn async_main() -> Result<()> {
                             speech_buffer.push(&pre);
                         }
                         speech_buffer.push(&mono);
-
-                        stt_stream.submit(speech_buffer.get_samples());
-                        last_stt_submit_ms = speech_buffer.duration_ms() as u32;
                     }
                     VadResult::Speech => {
                         speech_buffer.push(&mono);
-                        let buf_ms = speech_buffer.duration_ms() as u32;
-                        if buf_ms.saturating_sub(last_stt_submit_ms) >= 500 {
-                            stt_stream.submit(speech_buffer.get_samples());
-                            last_stt_submit_ms = buf_ms;
-                        }
                     }
                     VadResult::SpeechEnd => {
                         speech_buffer.push(&mono);
@@ -750,14 +722,8 @@ async fn async_main() -> Result<()> {
                         let ambient = *conv_mode.lock().unwrap() == ConversationMode::Ambient;
                         let wake_word_check = config.wake_word.clone();
 
-                        // Use the seq submitted at the first Silence frame (head start).
-                        let min_stt_gen = if last_stt_gen > 0 {
-                            last_stt_gen
-                        } else {
-                            stt_stream.submit(audio)
-                        };
-                        last_stt_submit_ms = 0;
-                        last_stt_gen = 0;
+                        // VAD detected end of speech — submit audio to Whisper now.
+                        let min_stt_gen = stt_stream.submit(audio);
 
                         // ── ACP permission gate ───────────────────────────────
                         if let Some(resp_tx) = pending_agent_question.take() {
@@ -802,11 +768,6 @@ async fn async_main() -> Result<()> {
                         pre_roll.push_back(mono);
                         if pre_roll.len() > PRE_ROLL_CHUNKS {
                             pre_roll.pop_front();
-                        }
-                        let buf_ms = speech_buffer.duration_ms() as u32;
-                        if buf_ms >= MIN_SPEECH_DURATION_MS && last_stt_submit_ms < buf_ms {
-                            last_stt_gen = stt_stream.submit(speech_buffer.get_samples());
-                            last_stt_submit_ms = buf_ms;
                         }
                         {
                             let mut mode = conv_mode.lock().unwrap();
@@ -1121,24 +1082,33 @@ async fn tts_task(
     let mut play_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
 
     loop {
-        let cancelled = tokio::select! {
-            _ = events.sentence_ready.notified() => false,
-            _ = cancel_rx.recv() => true,
-        };
-
-        if cancelled {
-            // Stop playback and discard queued sentences.
-            play_cancel.store(true, Ordering::SeqCst);
-            if let Some(h) = play_handle.take() { h.abort(); }
-            shared.sentences.lock().unwrap().clear();
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            play_cancel.store(false, Ordering::SeqCst);
-            while cancel_rx.try_recv().is_ok() {}
-            continue;
-        }
-
+        // Drain the queue immediately; only block when it's empty.
+        // `Notify` stores at most one permit, so multiple `notify_one()` calls
+        // while we're busy would be lost — we must re-check the queue first.
         let sentence = shared.sentences.lock().unwrap().pop_front();
-        let Some(sentence) = sentence else { continue; };
+        let sentence = if let Some(s) = sentence {
+            s
+        } else {
+            // Queue empty — wait for the next sentence or a cancel signal.
+            let cancelled = tokio::select! {
+                _ = events.sentence_ready.notified() => false,
+                _ = cancel_rx.recv() => true,
+            };
+            if cancelled {
+                // Stop playback and discard queued sentences.
+                play_cancel.store(true, Ordering::SeqCst);
+                if let Some(h) = play_handle.take() { h.abort(); }
+                shared.sentences.lock().unwrap().clear();
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                play_cancel.store(false, Ordering::SeqCst);
+                while cancel_rx.try_recv().is_ok() {}
+                continue;
+            }
+            match shared.sentences.lock().unwrap().pop_front() {
+                Some(s) => s,
+                None => continue,
+            }
+        };
 
         // Start synthesis while the previous sentence is still playing.
         let tts_c = Arc::clone(&tts);
