@@ -96,13 +96,19 @@ pub struct Config {
     /// Seconds between daemon checks (DAEMON_INTERVAL_SECS, default 300).
     pub daemon_interval_secs: u64,
 
-    // ── Vision ────────────────────────────────────────────────────────────────
-    /// Base URL of the vision model provider (VISION_URL). None = disabled.
-    pub vision_url: Option<String>,
-    /// Model name for vision requests (VISION_MODEL).
-    pub vision_model: String,
-    /// Max tokens for vision responses (VISION_MAX_TOKENS, default 512).
-    pub vision_max_tokens: u32,
+    // ── Secondary LLM (vision + background tasks) ────────────────────────────
+    /// Base URL of the secondary LLM provider (SECONDARY_LLM_URL). None = disabled.
+    /// When set, enables the vision tool and routes summarization + profile
+    /// extraction to this model instead of the primary.
+    pub secondary_llm_url: Option<String>,
+    /// Model name for secondary LLM requests (SECONDARY_LLM_MODEL).
+    pub secondary_llm_model: String,
+    /// Max tokens for secondary LLM responses (SECONDARY_LLM_MAX_TOKENS, default 512).
+    pub secondary_llm_max_tokens: u32,
+    /// Bearer token for secondary LLM API (SECONDARY_LLM_API_KEY, default empty).
+    pub secondary_llm_api_key: String,
+    /// Backend for secondary LLM: "llama" or "mlx" (SECONDARY_LLM_PROVIDER, default "llama").
+    pub secondary_llm_provider: String,
 
     // ── Shell tool ────────────────────────────────────────────────────────────
     /// Enable the `run_shell` tool (SHELL_ENABLED=1). Off by default.
@@ -257,14 +263,17 @@ impl Config {
                 .parse()
                 .context("Invalid DAEMON_INTERVAL_SECS")?,
 
-            // Vision
-            vision_url: env::var("VISION_URL").ok(),
-            vision_model: env::var("VISION_MODEL")
+            // Secondary LLM
+            secondary_llm_url: env::var("SECONDARY_LLM_URL").ok(),
+            secondary_llm_model: env::var("SECONDARY_LLM_MODEL")
                 .unwrap_or_else(|_| "local-model".to_string()),
-            vision_max_tokens: env::var("VISION_MAX_TOKENS")
+            secondary_llm_max_tokens: env::var("SECONDARY_LLM_MAX_TOKENS")
                 .unwrap_or_else(|_| "512".to_string())
                 .parse()
-                .context("Invalid VISION_MAX_TOKENS")?,
+                .context("Invalid SECONDARY_LLM_MAX_TOKENS")?,
+            secondary_llm_api_key: env::var("SECONDARY_LLM_API_KEY").unwrap_or_default(),
+            secondary_llm_provider: env::var("SECONDARY_LLM_PROVIDER")
+                .unwrap_or_else(|_| "llama".to_string()),
 
             // Shell tool
             shell_enabled: env::var("SHELL_ENABLED")

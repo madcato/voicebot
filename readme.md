@@ -275,6 +275,12 @@ Most configuration is done via environment variables (or `.env` file):
 | `AGENT_TIMEOUT_SECS` | `120` | Timeout for synchronous CLI agent calls |
 | `AGENT_MODE` | `cli` | `cli` = fire-and-forget subprocess; `acp` = persistent ACP bidirectional mode |
 | `AGENT_ACP_COMMAND` | `hermes acp` | Command to start the ACP process (ACP mode only) |
+| **Secondary LLM** || |
+| `SECONDARY_LLM_URL` | — | Base URL of secondary LLM. Enables `take_screenshot` tool and routes summarization + profile extraction to this model. |
+| `SECONDARY_LLM_MODEL` | `local-model` | Model name for secondary LLM requests. |
+| `SECONDARY_LLM_MAX_TOKENS` | `512` | Max tokens for secondary LLM responses (vision). |
+| `SECONDARY_LLM_API_KEY` | — | Bearer token for secondary LLM API. |
+| `SECONDARY_LLM_PROVIDER` | `llama` | Backend for secondary LLM: `llama` or `mlx`. |
 
 See [.env.example](.env.example) for complete environment variable reference.
 

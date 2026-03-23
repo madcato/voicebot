@@ -214,6 +214,28 @@ async fn async_main() -> Result<()> {
     // ── Proactive event channel ───────────────────────────────────────────────
     let (proactive_tx, proactive_rx) = mpsc::channel::<ProactiveEvent>(32);
 
+    // ── LLM client ────────────────────────────────────────────────────────────
+    // (Primary client is built further below; secondary is built here so tools
+    //  that need it can be registered before the rest of the pipeline starts.)
+    //
+    // Secondary LLM client — vision, summarization, profile extraction.
+    // Built early so TakeScreenshotTool can be registered in the tool registry.
+    let secondary_llm_client: Option<LlamaClient> =
+        config.secondary_llm_url.as_ref().map(|url| {
+            LlamaClient::new(url, &config.secondary_llm_model, config.secondary_llm_max_tokens, 0.3, 0, -1)
+                .with_provider(&config.secondary_llm_provider)
+                .with_api_key(&config.secondary_llm_api_key)
+        });
+    if secondary_llm_client.is_some() {
+        info!(
+            target: "llm",
+            "Secondary LLM endpoint: {} (model={}, provider={})",
+            config.secondary_llm_url.as_deref().unwrap_or(""),
+            config.secondary_llm_model,
+            config.secondary_llm_provider,
+        );
+    }
+
     // ── Tools ─────────────────────────────────────────────────────────────────
     // `shared_history` is updated after every user turn so the agent always
     // receives full conversational context via `hermes -q "{history}"`.
@@ -231,14 +253,14 @@ async fn async_main() -> Result<()> {
     tool_registry.register(OpenAppTool);
     tool_registry.register(SetConversationModeTool::new(Arc::clone(&conv_mode)));
 
-    // Vision (screenshot) — enabled when VISION_URL is set
-    if let Some(ref vision_url) = config.vision_url {
-        info!(target: "voicebot", "Vision tool enabled: {} (model={})", vision_url, config.vision_model);
-        tool_registry.register(TakeScreenshotTool::new(
-            vision_url,
-            &config.vision_model,
-            config.vision_max_tokens,
-        ));
+    // Vision (screenshot) — enabled when SECONDARY_LLM_URL is set
+    if let Some(ref sec_client) = secondary_llm_client {
+        info!(
+            target: "voicebot",
+            "Vision tool enabled via secondary LLM (model={})",
+            config.secondary_llm_model,
+        );
+        tool_registry.register(TakeScreenshotTool::new(sec_client.clone()));
     }
 
     // External agent delegation — unified RunAgentTool (CLI or ACP mode)
@@ -321,6 +343,11 @@ async fn async_main() -> Result<()> {
     .with_provider(&config.llm_provider)
     .with_api_key(&config.llm_api_key);
     info!(target: "llm", "LLM endpoint: {} (provider: {})", config.llm_url, config.llm_provider);
+
+    // Background tasks use the secondary client when available, otherwise
+    // fall back to the primary (preserves behavior when SECONDARY_LLM_URL is unset).
+    let background_client =
+        secondary_llm_client.clone().unwrap_or_else(|| llm_client.clone());
 
     // ── Inference daemon ──────────────────────────────────────────────────────
     if config.daemon_enabled {
@@ -521,12 +548,12 @@ async fn async_main() -> Result<()> {
         let shared_c      = Arc::clone(&shared);
         let events_c      = Arc::clone(&events);
         let llm_session_c = Arc::clone(&llm_session);
-        let llm_client_c  = llm_client.clone();
+        let background_client_c = background_client.clone();
         let db_c          = db.clone();
         let context_tokens = config.llm_context_tokens;
         let keep_turns    = config.llm_summary_keep_turns;
         tokio::spawn(async move {
-            sum_task(shared_c, events_c, llm_session_c, llm_client_c, db_c,
+            sum_task(shared_c, events_c, llm_session_c, background_client_c, db_c,
                      session_id, context_tokens, keep_turns).await;
         });
     }
@@ -1169,7 +1196,7 @@ async fn sum_task(
     shared: Arc<SharedSession>,
     events: Arc<PipelineEvents>,
     llm_session: Arc<Mutex<LlmSession>>,
-    llm_client: LlamaClient,
+    background_client: LlamaClient,
     db: Database,
     session_id: uuid::Uuid,
     context_tokens: usize,
@@ -1189,7 +1216,7 @@ async fn sum_task(
         // Run summarization (uses background slot — does not touch main cache).
         // Bail out early if a barge-in arrives.
         tokio::select! {
-            _ = maybe_summarize(&llm_session, &llm_client, &db, session_id, context_tokens, keep_turns, "", "") => {}
+            _ = maybe_summarize(&llm_session, &background_client, &db, session_id, context_tokens, keep_turns, "", "") => {}
             _ = cancel_rx.recv() => {
                 debug!(target: "llm", "Summarization cancelled by barge-in");
                 // Drop shared reference to suppress unused warning if not otherwise used.
@@ -1350,7 +1377,7 @@ fn map_answer_to_outcome(transcript: &str) -> String {
 /// restarts can restore the compact context.
 async fn maybe_summarize(
     llm_session: &Arc<Mutex<LlmSession>>,
-    llm_client: &LlamaClient,
+    background_client: &LlamaClient,
     db: &Database,
     session_id: Uuid,
     context_tokens: usize,
@@ -1365,7 +1392,7 @@ async fn maybe_summarize(
 
     // Extract user profile facts from the current turn before summarizing.
     // Only runs when summarization is needed, avoiding an LLM call every turn.
-    let facts = extract_facts(llm_client, user_text, assistant_text).await;
+    let facts = extract_facts(background_client, user_text, assistant_text).await;
     for fact in facts {
         if let Err(e) = db.upsert_profile_fact(&fact.key, &fact.value, fact.confidence).await {
             warn!(target: "profile", "Failed to save profile fact '{}': {}", fact.key, e);
@@ -1387,7 +1414,7 @@ async fn maybe_summarize(
 
     info!(target: "llm", "Context limit approaching — summarizing {} old turns...", turns_to_summarize);
 
-    let summary = match llm_client.complete(&prompt).await {
+    let summary = match background_client.complete(&prompt).await {
         Ok(s) if !s.is_empty() => s,
         Ok(_) => {
             warn!(target: "llm", "Summarization returned empty result, skipping");

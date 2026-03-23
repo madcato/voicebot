@@ -2,30 +2,24 @@ use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use tracing::{info, warn};
 
+use crate::llm::LlamaClient;
+
 use super::Tool;
 
 /// Tool that takes a screenshot and describes it using a vision model.
 ///
-/// Enabled when `VISION_URL` is set. Uses a separate LM Studio (or any
-/// OpenAI-compatible) endpoint so the vision call never evicts the
-/// main conversation KV-cache.
+/// Enabled when `SECONDARY_LLM_URL` is set. Delegates HTTP to the shared
+/// secondary `LlamaClient` so the vision call never evicts the main
+/// conversation KV-cache.
 ///
 /// macOS only: uses `screencapture -x -t png` for a silent capture.
 pub struct TakeScreenshotTool {
-    client: reqwest::Client,
-    chat_url: String,
-    model: String,
-    max_tokens: u32,
+    client: LlamaClient,
 }
 
 impl TakeScreenshotTool {
-    pub fn new(base_url: &str, model: &str, max_tokens: u32) -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            chat_url: format!("{}/v1/chat/completions", base_url.trim_end_matches('/')),
-            model: model.to_string(),
-            max_tokens,
-        }
+    pub fn new(client: LlamaClient) -> Self {
+        Self { client }
     }
 
     /// Capture the screen to a temp file and return its PNG bytes.
@@ -53,47 +47,11 @@ impl TakeScreenshotTool {
     async fn describe_image(&self, png_bytes: &[u8], prompt: &str) -> String {
         let b64 = B64.encode(png_bytes);
         let data_url = format!("data:image/png;base64,{b64}");
-
-        let payload = serde_json::json!({
-            "model": self.model,
-            "max_tokens": self.max_tokens,
-            "stream": false,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": { "url": data_url }
-                    },
-                    {
-                        "type": "text",
-                        "text": prompt
-                    }
-                ]
-            }]
-        });
-
-        match self.client.post(&self.chat_url).json(&payload).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                match resp.json::<serde_json::Value>().await {
-                    Ok(json) => json["choices"][0]["message"]["content"]
-                        .as_str()
-                        .unwrap_or("")
-                        .trim()
-                        .to_string(),
-                    Err(e) => {
-                        warn!("Vision response parse error: {}", e);
-                        format!("Vision parse error: {e}")
-                    }
-                }
-            }
-            Ok(resp) => {
-                warn!("Vision model returned HTTP {}", resp.status());
-                format!("Vision error: HTTP {}", resp.status())
-            }
+        match self.client.complete_multimodal(&data_url, prompt).await {
+            Ok(description) => description,
             Err(e) => {
-                warn!("Vision model unreachable: {}", e);
-                format!("Vision unreachable: {e}")
+                warn!("Vision model error: {}", e);
+                format!("Vision error: {e}")
             }
         }
     }
@@ -159,7 +117,7 @@ mod tests {
     use super::*;
 
     fn tool(base_url: &str) -> TakeScreenshotTool {
-        TakeScreenshotTool::new(base_url, "test-vision-model", 512)
+        TakeScreenshotTool::new(LlamaClient::new(base_url, "test-vision-model", 512, 0.0, 0, -1))
     }
 
     #[test]

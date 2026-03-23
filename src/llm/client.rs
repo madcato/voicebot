@@ -398,6 +398,50 @@ impl LlamaClient {
         Ok(json["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string())
     }
 
+    /// One-shot multimodal completion with a single image + text prompt.
+    ///
+    /// Sends an OpenAI-compatible content array with `image_url` and `text` parts.
+    /// Used by `TakeScreenshotTool`. Does not send llama.cpp-specific fields —
+    /// vision endpoints are always stateless.
+    pub async fn complete_multimodal(
+        &self,
+        image_data_url: &str,
+        text_prompt: &str,
+    ) -> Result<String> {
+        let payload = serde_json::json!({
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "stream": false,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "image_url", "image_url": { "url": image_data_url } },
+                    { "type": "text", "text": text_prompt }
+                ]
+            }]
+        });
+
+        let response = self
+            .post_chat()
+            .json(&payload)
+            .send()
+            .await
+            .context("Failed to reach vision model server")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Vision model error {}: {}", status, body);
+        }
+
+        let json: serde_json::Value = response.json().await?;
+        Ok(json["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string())
+    }
+
     /// Fire a speculative KV-cache warm-up request without waiting for tokens.
     ///
     /// Sends the current session messages (without the new user turn) so
@@ -534,6 +578,44 @@ mod tests {
         let client = LlamaClient::new(&server.uri(), "test-model", 256, 0.1, 0, -1);
         let result = client.complete_short(&make_messages()).await.unwrap();
         assert!(result.contains("Daniel"));
+    }
+
+    // ── complete_multimodal ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn complete_multimodal_returns_model_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "  A terminal window showing Rust code.  "}}]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = LlamaClient::new(&server.uri(), "vision-model", 512, 0.3, 0, -1);
+        let result = client
+            .complete_multimodal("data:image/png;base64,abc123", "What do you see?")
+            .await
+            .unwrap();
+        assert_eq!(result, "A terminal window showing Rust code.");
+    }
+
+    #[tokio::test]
+    async fn complete_multimodal_returns_error_on_server_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("unavailable"))
+            .mount(&server)
+            .await;
+
+        let client = LlamaClient::new(&server.uri(), "vision-model", 512, 0.3, 0, -1);
+        let result = client
+            .complete_multimodal("data:image/png;base64,abc123", "What do you see?")
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("503"));
     }
 
     // ── stream (SSE) ──────────────────────────────────────────────────────────
