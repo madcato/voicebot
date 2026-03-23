@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 use super::session::Message;
@@ -132,8 +133,14 @@ impl LlamaClient {
         slot_id: u8,
         background_slot_id: i32,
     ) -> Self {
+        let client = reqwest::Client::builder()
+            .tcp_keepalive(Duration::from_secs(60))
+            .pool_max_idle_per_host(4)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .build()
+            .expect("failed to build HTTP client");
         Self {
-            client: reqwest::Client::new(),
+            client,
             chat_url: format!("{}/v1/chat/completions", base_url.trim_end_matches('/')),
             model: model.to_string(),
             max_tokens,
