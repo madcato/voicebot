@@ -164,6 +164,15 @@ install_binary() {
     mv "$tmp_dir/voicebot" "$VOICEBOT_BIN_DIR/voicebot"
     chmod +x "$VOICEBOT_BIN_DIR/voicebot"
     info "  Binary installed: $VOICEBOT_BIN_DIR/voicebot"
+
+    # Linux tarballs include a lib/ directory with libonnxruntime.so bundled
+    # (kokorox links against ONNX Runtime dynamically — we ship the .so so
+    #  users don't need to install onnxruntime themselves).
+    if [ -d "$tmp_dir/lib" ]; then
+        mkdir -p "$VOICEBOT_HOME/lib"
+        cp "$tmp_dir/lib/"* "$VOICEBOT_HOME/lib/"
+        info "  Runtime libs installed: $VOICEBOT_HOME/lib/"
+    fi
 }
 
 # ── Step 4: Download Whisper STT model ───────────────────────────────────────
@@ -282,6 +291,12 @@ export DB_PATH="\${DB_PATH:-\$VOICEBOT_HOME/data/voicebot.db}"
 export KOKORO_MODEL="\${KOKORO_MODEL:-\$VOICEBOT_HOME/models/kokoro-v1.0.onnx}"
 export KOKORO_VOICES="\${KOKORO_VOICES:-\$VOICEBOT_HOME/models/voices-v1.0.bin}"
 export TTS_PROVIDER="\${TTS_PROVIDER:-$DEFAULT_TTS}"
+
+# Prepend bundled ONNX Runtime libs so kokorox finds libonnxruntime.so
+# (Linux only — macOS uses system frameworks, no extra libs needed)
+if [ -d "\$VOICEBOT_HOME/lib" ]; then
+    export LD_LIBRARY_PATH="\$VOICEBOT_HOME/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+fi
 
 # Load user configuration (values here override defaults above)
 if [ -f "\$VOICEBOT_HOME/.env" ]; then

@@ -7,115 +7,165 @@ on:
       - 'v[0-9]*.*.*'
 
 permissions:
-  contents: write   # needed to create the GitHub release
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Must match ARG ORT_VERSION in cross/Dockerfile.aarch64 and ort-sys Cargo.lock
+  ORT_VERSION: "1.22.0"
 
 jobs:
-  # ── Build matrix ─────────────────────────────────────────────────────────────
-  build:
+  # ── macOS — one Apple Silicon runner builds both macOS targets ────────────
+  build-macos:
     name: Build · ${{ matrix.target }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-latest      # GitHub's arm64 (M-series) runner
     strategy:
       fail-fast: false
       matrix:
         include:
-          # macOS — Apple Silicon (M1/M2/M3)
-          - target:   aarch64-apple-darwin
-            runner:   macos-latest         # GitHub's arm64 macOS runner
-            features: avspeech
-            os:       macos
-
-          # macOS — Intel
-          - target:   x86_64-apple-darwin
-            runner:   macos-13             # last Intel macOS runner
-            features: avspeech
-            os:       macos
-
-          # Linux — x86_64
-          - target:   x86_64-unknown-linux-gnu
-            runner:   ubuntu-latest
-            features: kokoro
-            os:       linux
-
-          # Linux — ARM64 (native runner, no cross-compilation needed)
-          - target:   aarch64-unknown-linux-gnu
-            runner:   ubuntu-24.04-arm64
-            features: kokoro
-            os:       linux
+          - target: aarch64-apple-darwin   # native
+          - target: x86_64-apple-darwin    # cross-compiled via Apple universal SDK
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # ── Rust toolchain ──────────────────────────────────────────────────────
-      - name: Install Rust stable
+      - name: Install Rust + target
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo registry + build
+      - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
-      # ── macOS system dependencies ───────────────────────────────────────────
-      # whisper-rs uses CoreML + Metal on macOS; both are system frameworks
-      # and are available on all GitHub macOS runners — nothing extra to install.
+      - name: Build
+        run: cargo build --release --bin voicebot --target ${{ matrix.target }} --features avspeech
 
-      # ── Linux system dependencies ───────────────────────────────────────────
-      - name: Install Linux build dependencies
-        if: matrix.os == 'linux'
+      - name: Package
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            libasound2-dev \
-            espeak-ng \
-            pkg-config \
-            build-essential \
-            libssl-dev \
-            cmake
+          BIN="target/${{ matrix.target }}/release/voicebot"
+          strip "$BIN"
+          tar -czf "voicebot-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" voicebot
+          shasum -a 256 "voicebot-${{ matrix.target }}.tar.gz" > "voicebot-${{ matrix.target }}.tar.gz.sha256"
 
-      # ── Build ───────────────────────────────────────────────────────────────
-      - name: Build release binary
-        run: |
-          cargo build --release --bin voicebot --features ${{ matrix.features }}
-
-      # ── Package ─────────────────────────────────────────────────────────────
-      - name: Strip and package binary
-        shell: bash
-        run: |
-          BIN="target/release/voicebot"
-          # Strip debug symbols to reduce binary size
-          strip "$BIN" 2>/dev/null || true
-          # Create tarball — install.sh expects a single `voicebot` file inside
-          tar -czf "voicebot-${{ matrix.target }}.tar.gz" -C target/release voicebot
-          sha256sum "voicebot-${{ matrix.target }}.tar.gz" > "voicebot-${{ matrix.target }}.tar.gz.sha256"
-          echo "Tarball size: $(du -sh voicebot-${{ matrix.target }}.tar.gz | cut -f1)"
-
-      # ── Upload artifact for the release job ─────────────────────────────────
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: voicebot-${{ matrix.target }}
-          path: |
-            voicebot-${{ matrix.target }}.tar.gz
-            voicebot-${{ matrix.target }}.tar.gz.sha256
+          path: voicebot-${{ matrix.target }}.tar.gz*
           if-no-files-found: error
           retention-days: 1
 
-  # ── Create GitHub release with all binaries ───────────────────────────────
+  # ── Linux — both targets built on ubuntu-latest ───────────────────────────
+  # x86_64: native build.  aarch64: cross-compile via `cross` + Docker.
+  # ONNX Runtime is pre-installed to /opt/onnxruntime and bundled in the tarball
+  # so users don't need to install it separately.
+  build-linux:
+    name: Build · ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            use_cross: false
+          - target: aarch64-unknown-linux-gnu
+            use_cross: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # ── x86_64 native: install deps + pre-built ORT ───────────────────────
+      - name: Install Linux build deps (x86_64)
+        if: matrix.use_cross == false
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev espeak-ng pkg-config build-essential libssl-dev cmake libclang-dev
+
+      - name: Download ONNX Runtime ${{ env.ORT_VERSION }} x86_64
+        if: matrix.use_cross == false
+        run: |
+          mkdir -p /opt/onnxruntime
+          curl -fsSL \
+            "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x86_64-${ORT_VERSION}.tgz" \
+            | tar -xz --strip-components=1 -C /opt/onnxruntime
+          ln -sf "/opt/onnxruntime/lib/libonnxruntime.so.${ORT_VERSION}" \
+                 /opt/onnxruntime/lib/libonnxruntime.so
+          echo "ORT_LIB_LOCATION=/opt/onnxruntime/lib" >> "$GITHUB_ENV"
+          echo "ORT_STRATEGY=system"                   >> "$GITHUB_ENV"
+
+      # ── aarch64 cross: install `cross` (Dockerfile handles the rest) ──────
+      - name: Install cross
+        if: matrix.use_cross == true
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      # ── Build ─────────────────────────────────────────────────────────────
+      - name: Build (native)
+        if: matrix.use_cross == false
+        run: cargo build --release --bin voicebot --target ${{ matrix.target }} --features kokoro
+
+      - name: Build (cross)
+        if: matrix.use_cross == true
+        run: cross build --release --bin voicebot --target ${{ matrix.target }} --features kokoro
+
+      # ── Package binary + ONNX Runtime .so ────────────────────────────────
+      - name: Package
+        run: |
+          BIN="target/${{ matrix.target }}/release/voicebot"
+          strip "$BIN" 2>/dev/null || true
+
+          # Determine where ORT libs live
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            # For the cross build, extract ORT from our Docker image
+            ORT_DIR="$(mktemp -d)"
+            curl -fsSL \
+              "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-aarch64-${ORT_VERSION}.tgz" \
+              | tar -xz --strip-components=1 -C "$ORT_DIR"
+            ORT_LIB_SRC="$ORT_DIR/lib"
+          else
+            ORT_LIB_SRC="/opt/onnxruntime/lib"
+          fi
+
+          # Build staging directory
+          mkdir -p staging/lib
+          cp "$BIN" staging/voicebot
+          cp "$ORT_LIB_SRC"/libonnxruntime.so.* staging/lib/
+          # Create unversioned symlink inside the tarball
+          (cd staging/lib && ln -sf "libonnxruntime.so.${ORT_VERSION}" libonnxruntime.so)
+
+          tar -czf "voicebot-${{ matrix.target }}.tar.gz" -C staging voicebot lib
+          sha256sum "voicebot-${{ matrix.target }}.tar.gz" > "voicebot-${{ matrix.target }}.tar.gz.sha256"
+          echo "Tarball contents:"
+          tar -tzf "voicebot-${{ matrix.target }}.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voicebot-${{ matrix.target }}
+          path: voicebot-${{ matrix.target }}.tar.gz*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── GitHub Release ────────────────────────────────────────────────────────
   release:
     name: GitHub Release
-    needs: build
+    needs: [build-macos, build-linux]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (for install.sh)
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Download all build artifacts
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -124,39 +174,31 @@ jobs:
       - name: List artifacts
         run: ls -lh artifacts/
 
-      - name: Extract release notes from tag annotation
-        id: notes
+      - name: Build release body
+        id: body
         run: |
-          # Use the annotated tag message if present; otherwise fall back to a template.
           TAG="${{ github.ref_name }}"
-          MSG="$(git tag -l --format='%(contents)' "$TAG" 2>/dev/null || true)"
-          if [ -z "$MSG" ]; then
-            MSG="Release $TAG"
-          fi
-          echo "body<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$MSG" >> "$GITHUB_OUTPUT"
-          echo "" >> "$GITHUB_OUTPUT"
-          echo "## Installation" >> "$GITHUB_OUTPUT"
-          echo "" >> "$GITHUB_OUTPUT"
-          echo '```sh' >> "$GITHUB_OUTPUT"
-          echo "curl -fsSL https://github.com/${{ github.repository }}/releases/latest/download/install.sh | sh" >> "$GITHUB_OUTPUT"
-          echo '```' >> "$GITHUB_OUTPUT"
-          echo "" >> "$GITHUB_OUTPUT"
-          echo "Or pin a specific version:" >> "$GITHUB_OUTPUT"
-          echo "" >> "$GITHUB_OUTPUT"
-          echo '```sh' >> "$GITHUB_OUTPUT"
-          echo "VOICEBOT_VERSION=$TAG curl -fsSL https://github.com/${{ github.repository }}/releases/latest/download/install.sh | sh" >> "$GITHUB_OUTPUT"
-          echo '```' >> "$GITHUB_OUTPUT"
-          echo "" >> "$GITHUB_OUTPUT"
-          echo "See [doc/PUBLISHING.md](doc/PUBLISHING.md) for full details." >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          {
+            echo 'body<<EOF'
+            echo "## Installation"
+            echo ""
+            echo '```sh'
+            echo "curl -fsSL https://github.com/${{ github.repository }}/releases/latest/download/install.sh | sh"
+            echo '```'
+            echo ""
+            echo "Pin a specific version:"
+            echo '```sh'
+            echo "VOICEBOT_VERSION=${TAG} \\"
+            echo "  curl -fsSL https://github.com/${{ github.repository }}/releases/latest/download/install.sh | sh"
+            echo '```'
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Voicebot ${{ github.ref_name }}
-          body: ${{ steps.notes.outputs.body }}
+          body: ${{ steps.body.outputs.body }}
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |

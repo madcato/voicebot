@@ -1,0 +1,48 @@
+# Cross-compilation image for aarch64-unknown-linux-gnu
+#
+# Based on the official cross-rs image which already contains:
+#   - aarch64-linux-gnu-gcc / g++ (cross-compiler)
+#   - clang + bindgen support
+#   - cmake
+#   - Rust sysroot for aarch64
+#
+# We add:
+#   - libasound2-dev:arm64          — CPAL audio (linked at build time)
+#   - libssl-dev:arm64              — reqwest TLS
+#   - ONNX Runtime 1.22.0 ARM64    — required by ort 2.0.0-rc.10 / kokorox
+#
+# Note: espeak-ng is NOT installed here — espeak-rs-sys compiles it from
+# bundled source using the cross-compiler, so no system package is needed.
+
+FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main
+
+# Keep in sync with ort-sys version in Cargo.lock (grep: ONNXRUNTIME_VERSION in ort-sys build.rs)
+ARG ORT_VERSION=1.22.0
+
+# ── ARM64 link-time libraries ─────────────────────────────────────────────────
+RUN dpkg --add-architecture arm64 \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+        libasound2-dev:arm64 \
+        libssl-dev:arm64 \
+        pkg-config \
+        curl \
+ && rm -rf /var/lib/apt/lists/*
+
+# ── ONNX Runtime ARM64 prebuilt ───────────────────────────────────────────────
+# Provides libonnxruntime.so.${ORT_VERSION} used by ort / kokorox at link time
+# and bundled into the release tarball for runtime use on target machines.
+RUN mkdir -p /opt/onnxruntime \
+ && curl -fsSL \
+    "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-aarch64-${ORT_VERSION}.tgz" \
+    | tar -xz --strip-components=1 -C /opt/onnxruntime \
+ && ln -sf /opt/onnxruntime/lib/libonnxruntime.so.${ORT_VERSION} \
+           /opt/onnxruntime/lib/libonnxruntime.so
+
+# Tell ort-sys to use the prebuilt library instead of downloading at build time
+ENV ORT_LIB_LOCATION=/opt/onnxruntime/lib
+ENV ORT_STRATEGY=system
+
+# pkg-config: tell pkg-config to look for arm64 packages
+ENV PKG_CONFIG_ALLOW_CROSS=1
+ENV PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig

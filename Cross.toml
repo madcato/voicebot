@@ -1,0 +1,18 @@
+# cross cross-compilation configuration
+# Used when building the Linux aarch64 target from a Linux x86_64 host.
+#
+# Install cross:  cargo install cross
+# Build:          cross build --release --target aarch64-unknown-linux-gnu --features kokoro
+#
+# The custom Docker image installs:
+#   - libasound2-dev:arm64   (CPAL audio)
+#   - ONNX Runtime 1.22.0 ARM64 (required by ort / kokorox)
+# espeak-ng is compiled from source by espeak-rs-sys — no system package needed.
+
+[target.aarch64-unknown-linux-gnu]
+image.dockerfile = "cross/Dockerfile.aarch64"
+image.context = "."
+
+[build.env]
+# Pass through so inner cargo build picks them up
+passthrough = ["ORT_LIB_LOCATION", "ORT_STRATEGY", "CARGO_TERM_COLOR"]
