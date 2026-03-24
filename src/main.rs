@@ -84,6 +84,7 @@ use crate::profile::extract_facts;
 use crate::audio::audio_capture::{AudioCapture, AudioChunk};
 use crate::audio::buffer::AudioBuffer;
 use crate::audio::output::AudioOutput;
+use crate::audio::ambient_buffer::AmbientBuffer;
 use crate::audio::speaker::{SpeakerVerdict, SpeakerVerifier};
 use crate::audio::vad::{VadResult, VoiceActivityDetector};
 use crate::config::Config;
@@ -384,6 +385,7 @@ async fn async_main() -> Result<()> {
                 model_path,
                 std::path::Path::new(&config.speaker_enrollment_path),
                 config.speaker_similarity_min,
+                config.speaker_max_profiles,
             ) {
                 Ok(sv) => {
                     info!(
@@ -406,6 +408,20 @@ async fn async_main() -> Result<()> {
             );
             None
         };
+
+    // ── Ambient context buffer ────────────────────────────────────────────────
+    // Always running: buffers transcripts from all non-main speakers (and the
+    // main user's non-wake-word utterances in Ambient mode) for LLM context.
+    let ambient_buffer = Arc::new(std::sync::Mutex::new(AmbientBuffer::new(
+        config.ambient_buffer_max_entries,
+        config.ambient_buffer_minutes,
+    )));
+    info!(
+        target: "pipeline",
+        "Ambient buffer: {}min / {} entries max",
+        config.ambient_buffer_minutes,
+        config.ambient_buffer_max_entries
+    );
 
     // ── TTS ───────────────────────────────────────────────────────────────────
     let tts: TtsEngine = match config.tts_provider.as_str() {
@@ -712,24 +728,61 @@ async fn async_main() -> Result<()> {
                         last_speech_at = Instant::now();
 
                         // ── Speaker verification ──────────────────────────────
+                        // Determines whether this segment is from the main user
+                        // (id=0) or someone else. Non-main speakers are buffered
+                        // for context but never routed to the LLM directly.
+                        let mut is_main_speaker = true;
+                        let mut speaker_label = "Usuario".to_string();
+
                         if let Some(ref mut sv) = speaker_verifier {
                             match sv.verify(config.sample_rate, &audio) {
-                                SpeakerVerdict::Enrolled => {
-                                    info!(target: "speaker", "Main speaker enrolled — processing utterance");
-                                    non_user_streak = 0;
+                                SpeakerVerdict::Enrolled { id, ref label } => {
+                                    speaker_label = label.clone();
+                                    if id == 0 {
+                                        info!(target: "speaker", "Main speaker enrolled — processing utterance");
+                                        non_user_streak = 0;
+                                    } else {
+                                        info!(target: "speaker", "Speaker {} enrolled — buffering", label);
+                                        is_main_speaker = false;
+                                    }
                                 }
-                                SpeakerVerdict::IsMainSpeaker { similarity } => {
-                                    debug!(target: "speaker", "Speaker verified (similarity={similarity:.3})");
-                                    non_user_streak = 0;
+                                SpeakerVerdict::Known { id, ref label, similarity } => {
+                                    speaker_label = label.clone();
+                                    if id == 0 {
+                                        debug!(target: "speaker", "Main speaker verified (similarity={similarity:.3})");
+                                        non_user_streak = 0;
+                                    } else {
+                                        info!(
+                                            target: "speaker",
+                                            "Speaker {} (similarity={similarity:.3}) — buffering \
+                                             (streak={}/{})",
+                                            label, non_user_streak, config.speaker_ambient_trigger
+                                        );
+                                        is_main_speaker = false;
+                                        non_user_streak = non_user_streak.saturating_add(1);
+                                        if non_user_streak >= config.speaker_ambient_trigger {
+                                            let mut mode = conv_mode.lock().unwrap();
+                                            if *mode == ConversationMode::Active {
+                                                *mode = ConversationMode::Ambient;
+                                                info!(
+                                                    target: "pipeline",
+                                                    "Ambient mode: {} consecutive non-user voices — switching automatically",
+                                                    non_user_streak
+                                                );
+                                            }
+                                        }
+                                    }
                                 }
-                                SpeakerVerdict::OtherSpeaker { similarity } => {
+                                SpeakerVerdict::Unknown { similarity } => {
+                                    speaker_label = "Ambiente".to_string();
                                     non_user_streak = non_user_streak.saturating_add(1);
                                     info!(
                                         target: "speaker",
-                                        "Unknown speaker (similarity={similarity:.3}) — discarding \
+                                        "Unknown speaker (similarity={similarity:.3}) — buffering \
                                          (streak={non_user_streak}/{})",
                                         config.speaker_ambient_trigger
                                     );
+                                    is_main_speaker = false;
                                     if non_user_streak >= config.speaker_ambient_trigger {
                                         let mut mode = conv_mode.lock().unwrap();
                                         if *mode == ConversationMode::Active {
@@ -741,17 +794,32 @@ async fn async_main() -> Result<()> {
                                             );
                                         }
                                     }
-                                    vad.reset();
-                                    continue;
                                 }
                             }
                         }
 
+                        // Submit audio to STT for all speakers — ambient buffer
+                        // needs transcripts from non-main speakers too.
+                        let min_stt_gen = stt_stream.submit(audio);
+
+                        // ── Non-main speaker: buffer transcript, skip LLM ─────
+                        if !is_main_speaker {
+                            let stt_c = Arc::clone(&stt_stream);
+                            let amb_c = Arc::clone(&ambient_buffer);
+                            let label = speaker_label.clone();
+                            tokio::spawn(async move {
+                                let text = stt_c.await_result(min_stt_gen).await;
+                                if !text.is_empty() {
+                                    amb_c.lock().unwrap().push(label.clone(), text.clone());
+                                    debug!(target: "pipeline", "Ambient buffer ← {label}: {text}");
+                                }
+                            });
+                            vad.reset();
+                            continue;
+                        }
+
                         let ambient = *conv_mode.lock().unwrap() == ConversationMode::Ambient;
                         let wake_word_check = config.wake_word.clone();
-
-                        // VAD detected end of speech — submit audio to Whisper now.
-                        let min_stt_gen = stt_stream.submit(audio);
 
                         // ── ACP permission gate ───────────────────────────────
                         if let Some(resp_tx) = pending_agent_question.take() {
@@ -770,25 +838,43 @@ async fn async_main() -> Result<()> {
                         let stt_c      = Arc::clone(&stt_stream);
                         let shared_c   = Arc::clone(&shared);
                         let events_c   = Arc::clone(&events);
-                        let conv_c     = Arc::clone(&conv_mode);
+                        let amb_c      = Arc::clone(&ambient_buffer);
                         tokio::spawn(async move {
                             let text = stt_c.await_result(min_stt_gen).await;
                             if text.is_empty() { return; }
 
-                            // Ambient mode: discard unless wake word found.
+                            // Ambient mode: buffer non-wake-word utterances from
+                            // the main user too (e.g. their side of a conversation).
+                            // Wake-word fires one response but does NOT change mode —
+                            // only an explicit "modo activo" command switches to Active.
                             if ambient {
                                 let lower = text.to_lowercase();
                                 if lower.contains(&wake_word_check) {
-                                    info!(target: "pipeline", "Ambient: wake word detected — activating");
-                                    *conv_c.lock().unwrap() = ConversationMode::Active;
+                                    info!(target: "pipeline", "Ambient: wake word detected — responding (staying Ambient)");
                                 } else {
-                                    debug!(target: "pipeline", "Ambient: no wake word — discarding");
+                                    // Buffer the main user's ambient utterance for context.
+                                    amb_c.lock().unwrap().push("Usuario".to_string(), text.clone());
+                                    debug!(target: "pipeline", "Ambient: no wake word — buffered as context");
                                     return;
                                 }
                             }
 
+                            // Inject ambient context when the query contains a referential.
+                            let final_text = {
+                                let buf = amb_c.lock().unwrap();
+                                if crate::audio::ambient_buffer::has_referential(&text) {
+                                    if let Some(ctx) = buf.format_context() {
+                                        format!("{ctx}\n---\n{text}")
+                                    } else {
+                                        text
+                                    }
+                                } else {
+                                    text
+                                }
+                            };
+
                             // Store final transcript and wake the LLM task.
-                            *shared_c.transliterated_text.lock().unwrap() = text;
+                            *shared_c.transliterated_text.lock().unwrap() = final_text;
                             events_c.vad_finish.notify_one();
                         });
                     }

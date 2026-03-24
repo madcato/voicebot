@@ -6,60 +6,94 @@ use tracing::{info, warn};
 #[cfg(feature = "speaker")]
 use sherpa_rs::speaker_id::{EmbeddingExtractor, ExtractorConfig};
 
+/// Result of a speaker verification check.
 #[derive(Debug, Clone, PartialEq)]
 #[allow(dead_code)]
 pub enum SpeakerVerdict {
-    IsMainSpeaker { similarity: f32 },
-    OtherSpeaker { similarity: f32 },
-    Enrolled,
+    /// Matched an enrolled profile. `id=0` is always the main user.
+    Known { id: u8, label: String, similarity: f32 },
+    /// No profile matched above the threshold.
+    Unknown { similarity: f32 },
+    /// First utterance from a new speaker — auto-enrolled as a new profile.
+    Enrolled { id: u8, label: String },
 }
 
+/// A single enrolled speaker profile.
+#[allow(dead_code)]
+pub struct SpeakerProfile {
+    pub id: u8,
+    pub label: String,
+    embedding: Vec<f32>,
+}
+
+/// Verifies and tracks multiple speaker identities.
+/// The first enrolled speaker (id=0) is always the "main user".
+/// Additional speakers are auto-enrolled up to `max_profiles`.
 #[allow(dead_code)]
 pub struct SpeakerVerifier {
     #[cfg(feature = "speaker")]
     extractor: EmbeddingExtractor,
-    enrollment: Option<Vec<f32>>,
-    enrollment_path: PathBuf,
+    profiles: Vec<SpeakerProfile>,
+    profiles_dir: PathBuf,
     threshold: f32,
+    max_profiles: u8,
 }
 
 impl SpeakerVerifier {
-    pub fn new(model_path: &str, enrollment_path: &Path, threshold: f32) -> Result<Self> {
+    /// `enrollment_path` is used to derive the profiles directory:
+    /// profiles are stored as `{parent}/speaker_0.emb`, `speaker_1.emb`, etc.
+    /// For backward compatibility, an existing `enrollment_path` file is
+    /// loaded as profile 0 on first run.
+    pub fn new(
+        model_path: &str,
+        enrollment_path: &Path,
+        threshold: f32,
+        max_profiles: u8,
+    ) -> Result<Self> {
+        let profiles_dir = enrollment_path
+            .parent()
+            .unwrap_or(Path::new("data"))
+            .to_path_buf();
+
         #[cfg(feature = "speaker")]
         {
             let config = ExtractorConfig {
                 model: model_path.to_string(),
                 debug: false,
                 num_threads: Some(1),
-                provider: None, // uses get_default_provider() internally
+                provider: None,
             };
             let extractor = EmbeddingExtractor::new(config)
                 .map_err(|e| anyhow::anyhow!("Failed to load speaker embedding model: {e}"))?;
-            let enrollment = Self::load_embedding(enrollment_path);
-            if enrollment.is_some() {
-                info!(target: "speaker", "Speaker enrollment loaded from {:?}", enrollment_path);
+
+            let profiles = Self::load_profiles(&profiles_dir, enrollment_path, max_profiles);
+            if profiles.is_empty() {
+                info!(target: "speaker", "No speaker profiles found — will auto-enroll first speaker");
             } else {
-                info!(target: "speaker", "No enrollment found — will auto-enroll first speaker");
+                info!(target: "speaker", "Loaded {} speaker profile(s) from {:?}", profiles.len(), profiles_dir);
             }
+
             Ok(Self {
                 extractor,
-                enrollment,
-                enrollment_path: enrollment_path.to_path_buf(),
+                profiles,
+                profiles_dir,
                 threshold,
+                max_profiles,
             })
         }
         #[cfg(not(feature = "speaker"))]
         {
-            let _ = (model_path, threshold);
+            let _ = (model_path, threshold, max_profiles);
             Ok(Self {
-                enrollment: None,
-                enrollment_path: enrollment_path.to_path_buf(),
+                profiles: Vec::new(),
+                profiles_dir,
                 threshold,
+                max_profiles,
             })
         }
     }
 
-    /// Verify mono f32 samples. sample_rate is the actual rate (usually 16000).
+    /// Verify mono f32 samples. Returns `Known`, `Unknown`, or `Enrolled`.
     pub fn verify(&mut self, sample_rate: u32, samples: &[f32]) -> SpeakerVerdict {
         #[cfg(feature = "speaker")]
         {
@@ -69,35 +103,86 @@ impl SpeakerVerifier {
             {
                 Ok(e) => e,
                 Err(e) => {
-                    warn!(target: "speaker", "Speaker embedding error: {e} — passing through");
-                    return SpeakerVerdict::IsMainSpeaker { similarity: 1.0 };
+                    warn!(target: "speaker", "Speaker embedding error: {e} — treating as main user");
+                    return SpeakerVerdict::Known {
+                        id: 0,
+                        label: "Usuario".to_string(),
+                        similarity: 1.0,
+                    };
                 }
             };
-            match &self.enrollment {
-                None => {
-                    if let Err(e) = Self::save_embedding(&self.enrollment_path, &embedding) {
-                        warn!(target: "speaker", "Failed to save enrollment: {e}");
-                    } else {
-                        info!(target: "speaker", "Speaker enrolled → {:?}", self.enrollment_path);
-                    }
-                    self.enrollment = Some(embedding);
-                    SpeakerVerdict::Enrolled
+
+            // Find the best matching profile.
+            let best = self
+                .profiles
+                .iter()
+                .map(|p| (p.id, p.label.clone(), cosine_similarity(&embedding, &p.embedding)))
+                .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+
+            match best {
+                Some((id, label, sim)) if sim >= self.threshold => {
+                    SpeakerVerdict::Known { id, label, similarity: sim }
                 }
-                Some(enrolled) => {
-                    let sim = cosine_similarity(&embedding, enrolled);
-                    if sim >= self.threshold {
-                        SpeakerVerdict::IsMainSpeaker { similarity: sim }
+                Some((_, _, sim)) if self.profiles.len() >= self.max_profiles as usize => {
+                    // No match and registry is full.
+                    SpeakerVerdict::Unknown { similarity: sim }
+                }
+                _ => {
+                    // No match (or no profiles yet) — auto-enroll as new profile.
+                    let id = self.profiles.len() as u8;
+                    let label = if id == 0 {
+                        "Usuario".to_string()
                     } else {
-                        SpeakerVerdict::OtherSpeaker { similarity: sim }
+                        format!("Speaker_{id}")
+                    };
+                    let path = self.profile_path(id);
+                    if let Err(e) = Self::save_embedding(&path, &embedding) {
+                        warn!(target: "speaker", "Failed to save profile {id}: {e}");
+                    } else {
+                        info!(target: "speaker", "Speaker {} enrolled → {:?}", label, path);
                     }
+                    self.profiles.push(SpeakerProfile { id, label: label.clone(), embedding });
+                    SpeakerVerdict::Enrolled { id, label }
                 }
             }
         }
         #[cfg(not(feature = "speaker"))]
         {
             let _ = (sample_rate, samples);
-            SpeakerVerdict::IsMainSpeaker { similarity: 1.0 }
+            SpeakerVerdict::Known { id: 0, label: "Usuario".to_string(), similarity: 1.0 }
         }
+    }
+
+    fn profile_path(&self, id: u8) -> PathBuf {
+        self.profiles_dir.join(format!("speaker_{id}.emb"))
+    }
+
+    /// Load all persisted profiles from `profiles_dir`.
+    /// Handles backward compatibility: if `speaker_0.emb` is missing but the
+    /// legacy `enrollment_path` file exists, it is treated as profile 0.
+    #[cfg(feature = "speaker")]
+    fn load_profiles(profiles_dir: &Path, legacy_path: &Path, max_profiles: u8) -> Vec<SpeakerProfile> {
+        let mut profiles = Vec::new();
+        for id in 0..max_profiles {
+            let path = profiles_dir.join(format!("speaker_{id}.emb"));
+            // Backward compat: try legacy single-file path for id=0.
+            let effective_path = if id == 0 && !path.exists() && legacy_path.exists() {
+                legacy_path.to_path_buf()
+            } else {
+                path
+            };
+            if let Some(embedding) = Self::load_embedding(&effective_path) {
+                let label = if id == 0 {
+                    "Usuario".to_string()
+                } else {
+                    format!("Speaker_{id}")
+                };
+                profiles.push(SpeakerProfile { id, label, embedding });
+            } else {
+                break; // IDs are contiguous — stop at first gap.
+            }
+        }
+        profiles
     }
 
     #[allow(dead_code)]
@@ -121,7 +206,7 @@ impl SpeakerVerifier {
         }
         let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
         std::fs::write(path, &bytes)
-            .with_context(|| format!("Failed to write enrollment to {path:?}"))
+            .with_context(|| format!("Failed to write profile to {path:?}"))
     }
 }
 
@@ -145,7 +230,7 @@ mod tests {
     #[test]
     fn embedding_round_trip_file() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("speaker.emb");
+        let path = dir.path().join("speaker_0.emb");
         let original: Vec<f32> = vec![0.1, 0.2, -0.3, 0.4, 0.5];
         SpeakerVerifier::save_embedding(&path, &original).unwrap();
         let loaded = SpeakerVerifier::load_embedding(&path).unwrap();
@@ -172,12 +257,15 @@ mod tests {
 
     #[cfg(not(feature = "speaker"))]
     #[test]
-    fn stub_always_passes() {
+    fn stub_always_passes_as_main_user() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("speaker.emb");
-        let mut sv = SpeakerVerifier::new("unused", &path, 0.5).unwrap();
+        let mut sv = SpeakerVerifier::new("unused", &path, 0.5, 5).unwrap();
         let samples: Vec<f32> = vec![0.0; 16000];
         let verdict = sv.verify(16000, &samples);
-        assert_eq!(verdict, SpeakerVerdict::IsMainSpeaker { similarity: 1.0 });
+        assert_eq!(
+            verdict,
+            SpeakerVerdict::Known { id: 0, label: "Usuario".to_string(), similarity: 1.0 }
+        );
     }
 }

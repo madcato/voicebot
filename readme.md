@@ -50,7 +50,9 @@ Hive is built from the ground up for voice interaction:
 - 👤 User profile extraction from conversations (injects into system prompt)
 - 🎭 Startup greeting with name recognition
 - 🛠️ Tool calling system (`current_time`, `take_screenshot`, `send_notification`, `read/set_clipboard`, `open_app`)
-- 🆔 Speaker verification (optional, ONNX-based embeddings)
+- 🆔 Multi-speaker registry (auto-enrolls up to N speakers, ONNX-based embeddings)
+- 🎙️ Ambient context buffer — transcribes all ambient speech (TV, others) for contextual responses
+- 💬 Two conversation modes: **Active** (respond freely to main user) / **Ambient** (wake-word only, with full context)
 
 ### Integration Options ✅
 
@@ -281,6 +283,18 @@ Most configuration is done via environment variables (or `.env` file):
 | `SECONDARY_LLM_MAX_TOKENS` | `512` | Max tokens for secondary LLM responses (vision). |
 | `SECONDARY_LLM_API_KEY` | — | Bearer token for secondary LLM API. |
 | `SECONDARY_LLM_PROVIDER` | `llama` | Backend for secondary LLM: `llama` or `mlx`. |
+| **Speaker Verification** || |
+| `SPEAKER_MODEL` | auto-detect | Path to sherpa-onnx speaker embedding ONNX model. Auto-detected at `models/speaker_embedding.onnx`; disabled if absent. |
+| `SPEAKER_ENROLLMENT_PATH` | `data/speaker.emb` | Base path for speaker profiles. Profiles saved as `speaker_0.emb`, `speaker_1.emb`, etc. in the same directory. |
+| `SPEAKER_SIMILARITY_MIN` | `0.45` | Cosine similarity threshold [0..1] for speaker matching. |
+| `SPEAKER_MAX_PROFILES` | `5` | Maximum number of speaker profiles to auto-enroll. The first speaker (id=0) is always the main user. |
+| `SPEAKER_AMBIENT_TRIGGER` | `1` | Consecutive non-main-user segments before auto-switching to Ambient mode. |
+| **Conversation Modes** || |
+| `WAKE_WORD` | `jarvis` | Case-insensitive substring match triggering a response in Ambient mode. |
+| `AMBIENT_CLEAR_SECS` | `300` | Seconds of silence before auto-switching from Active to Ambient mode. |
+| **Ambient Context Buffer** || |
+| `AMBIENT_BUFFER_MINUTES` | `3` | Rolling window duration for the ambient context buffer. |
+| `AMBIENT_BUFFER_MAX_ENTRIES` | `30` | Maximum buffered utterances. Oldest are evicted when full. |
 
 See [.env.example](.env.example) for complete environment variable reference.
 
