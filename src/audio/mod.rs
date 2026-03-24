@@ -1,3 +1,4 @@
+pub mod ambient_buffer;
 pub mod audio_capture;
 pub mod audio_transform;
 pub mod buffer;

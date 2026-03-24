@@ -137,6 +137,17 @@ pub struct Config {
     /// speaker verification is enabled.
     pub speaker_ambient_trigger: u8,
 
+    // ── Ambient context buffer ────────────────────────────────────────────────
+    /// Maximum number of speaker profiles to auto-enroll (SPEAKER_MAX_PROFILES, default 5).
+    /// The first enrolled speaker is always the "main user" (id=0).
+    pub speaker_max_profiles: u8,
+    /// Rolling window duration for the ambient context buffer in minutes
+    /// (AMBIENT_BUFFER_MINUTES, default 3).
+    pub ambient_buffer_minutes: u64,
+    /// Maximum number of utterances to keep in the ambient context buffer
+    /// (AMBIENT_BUFFER_MAX_ENTRIES, default 30).
+    pub ambient_buffer_max_entries: usize,
+
     // ── Persistence ───────────────────────────────────────────────────────────
     pub db_path: String,
 }
@@ -317,6 +328,20 @@ impl Config {
                 .unwrap_or_else(|_| "1".to_string())
                 .parse()
                 .context("Invalid SPEAKER_AMBIENT_TRIGGER")?,
+
+            // Ambient context buffer
+            speaker_max_profiles: env::var("SPEAKER_MAX_PROFILES")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse()
+                .context("Invalid SPEAKER_MAX_PROFILES")?,
+            ambient_buffer_minutes: env::var("AMBIENT_BUFFER_MINUTES")
+                .unwrap_or_else(|_| "3".to_string())
+                .parse()
+                .context("Invalid AMBIENT_BUFFER_MINUTES")?,
+            ambient_buffer_max_entries: env::var("AMBIENT_BUFFER_MAX_ENTRIES")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .context("Invalid AMBIENT_BUFFER_MAX_ENTRIES")?,
 
             // DB
             db_path: env::var("DB_PATH")
