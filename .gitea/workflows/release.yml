@@ -22,8 +22,6 @@ env:
   GITEA_URL: http://tesla.local:3000
   GITEA_REPO: danielvela/voicebot
   CARGO_TERM_COLOR: always
-  # Must match ARG ORT_VERSION in cross/Dockerfile.aarch64 and ort-sys in Cargo.lock
-  ORT_VERSION: "1.22.0"
 
 jobs:
   # ── macOS — one runner builds both macOS targets ───────────────────────────
@@ -78,7 +76,7 @@ jobs:
 
   # ── Linux — both targets built on ubuntu-latest ────────────────────────────
   # x86_64: native.  aarch64: cross-compile via `cross` + Docker.
-  # ONNX Runtime is bundled in the tarball so users don't need to install it.
+  # ort 2.x statically links ONNX Runtime — no .so to bundle.
   build-linux:
     name: Build · ${{ matrix.target }}
     runs-on: ubuntu-latest
@@ -121,18 +119,6 @@ jobs:
             libasound2-dev espeak-ng pkg-config build-essential \
             libssl-dev cmake libclang-dev
 
-      - name: Download ONNX Runtime ${{ env.ORT_VERSION }} x86_64
-        if: matrix.use_cross == false
-        run: |
-          mkdir -p /opt/onnxruntime
-          curl -fsSL \
-            "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x86_64-${ORT_VERSION}.tgz" \
-            | tar -xz --strip-components=1 -C /opt/onnxruntime
-          ln -sf "/opt/onnxruntime/lib/libonnxruntime.so.${ORT_VERSION}" \
-                 /opt/onnxruntime/lib/libonnxruntime.so
-          echo "ORT_LIB_LOCATION=/opt/onnxruntime/lib" >> "$GITHUB_ENV"
-          echo "ORT_STRATEGY=system"                   >> "$GITHUB_ENV"
-
       # ── aarch64: install cross ────────────────────────────────────────────
       - name: Install cross
         if: matrix.use_cross == true
@@ -147,29 +133,12 @@ jobs:
         if: matrix.use_cross == true
         run: cross build --release --bin voicebot --target ${{ matrix.target }} --features kokoro
 
-      # ── Package binary + ORT .so ──────────────────────────────────────────
+      # ── Package binary ────────────────────────────────────────────────────
       - name: Package
         run: |
           BIN="target/${{ matrix.target }}/release/voicebot"
           strip "$BIN" 2>/dev/null || true
-
-          # For cross builds, download the ARM64 ORT libs for bundling
-          if [ "${{ matrix.use_cross }}" = "true" ]; then
-            ORT_DIR="$(mktemp -d)"
-            curl -fsSL \
-              "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-aarch64-${ORT_VERSION}.tgz" \
-              | tar -xz --strip-components=1 -C "$ORT_DIR"
-            ORT_LIB_SRC="$ORT_DIR/lib"
-          else
-            ORT_LIB_SRC="/opt/onnxruntime/lib"
-          fi
-
-          mkdir -p staging/lib
-          cp "$BIN" staging/voicebot
-          cp "$ORT_LIB_SRC"/libonnxruntime.so.* staging/lib/
-          (cd staging/lib && ln -sf "libonnxruntime.so.${ORT_VERSION}" libonnxruntime.so)
-
-          tar -czf "voicebot-${{ matrix.target }}.tar.gz" -C staging voicebot lib
+          tar -czf "voicebot-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" voicebot
           sha256sum "voicebot-${{ matrix.target }}.tar.gz" > "voicebot-${{ matrix.target }}.tar.gz.sha256"
           echo "Tarball contents:"; tar -tzf "voicebot-${{ matrix.target }}.tar.gz"
 
