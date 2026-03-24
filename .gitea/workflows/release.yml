@@ -176,9 +176,25 @@ jobs:
       # ── aarch64: system cross-compiler + ARM64 libs ───────────────────────
       # Uses gcc-aarch64-linux-gnu directly with cargo --target.
       # No Docker-in-Docker, no volume mount issues.
+      #
+      # arm64 packages live on ports.ubuntu.com, not archive.ubuntu.com.
+      # Restrict existing sources to [arch=amd64] and add a ports.ubuntu.com
+      # source for arm64 before running dpkg --add-architecture arm64.
       - name: Install cross-compilation toolchain (aarch64)
         if: matrix.use_cross == true
         run: |
+          CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+
+          # Restrict default sources to amd64 so apt-get update doesn't 404
+          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
+          sudo find /etc/apt/sources.list.d/ -name "*.list" \
+            -exec sed -i 's/^deb /deb [arch=amd64] /' {} \; 2>/dev/null || true
+
+          # Add ports.ubuntu.com for arm64
+          printf "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports %s main restricted universe multiverse\n" \
+            "$CODENAME" "${CODENAME}-updates" "${CODENAME}-security" \
+            | sudo tee /etc/apt/sources.list.d/ports-arm64.list
+
           sudo dpkg --add-architecture arm64
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
