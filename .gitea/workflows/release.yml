@@ -123,7 +123,11 @@ jobs:
           done
 
   # ── Linux — both targets built on ubuntu-latest ────────────────────────────
-  # x86_64: native.  aarch64: cross-compile via `cross` + Docker.
+  # x86_64: native.
+  # aarch64: cross-compile using gcc-aarch64-linux-gnu (no Docker-in-Docker).
+  #   `cross` crate is avoided: when act_runner runs jobs inside Docker,
+  #   cross's volume mounts reference the HOST filesystem, not the container,
+  #   so ~/.cargo never lands inside the cross container → cargo: not found.
   # ort 2.x statically links ONNX Runtime — no .so to bundle.
   # Uploads go directly to the Gitea API (avoids upload-artifact DNS issues).
   build-linux:
@@ -161,7 +165,7 @@ jobs:
           restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
 
       # ── x86_64 native deps ────────────────────────────────────────────────
-      - name: Install Linux build deps (x86_64)
+      - name: Install build deps (x86_64)
         if: matrix.use_cross == false
         run: |
           sudo apt-get update -qq
@@ -169,23 +173,37 @@ jobs:
             libasound2-dev espeak-ng pkg-config build-essential \
             libssl-dev cmake libclang-dev
 
-      # ── aarch64: build Docker image then install cross ────────────────────
-      - name: Build cross Docker image
+      # ── aarch64: system cross-compiler + ARM64 libs ───────────────────────
+      # Uses gcc-aarch64-linux-gnu directly with cargo --target.
+      # No Docker-in-Docker, no volume mount issues.
+      - name: Install cross-compilation toolchain (aarch64)
         if: matrix.use_cross == true
-        run: docker build -t voicebot-cross-aarch64 -f cross/Dockerfile.aarch64 .
-
-      - name: Install cross
-        if: matrix.use_cross == true
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            libasound2-dev:arm64 libssl-dev:arm64 \
+            pkg-config cmake libclang-dev
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml << 'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
 
       # ── Build ─────────────────────────────────────────────────────────────
-      - name: Build (native)
+      - name: Build (x86_64)
         if: matrix.use_cross == false
         run: cargo build --release --bin voicebot --target ${{ matrix.target }} --features kokoro
 
-      - name: Build (cross)
+      - name: Build (aarch64 cross)
         if: matrix.use_cross == true
-        run: cross build --release --bin voicebot --target ${{ matrix.target }} --features kokoro
+        env:
+          PKG_CONFIG_ALLOW_CROSS: "1"
+          PKG_CONFIG_SYSROOT_DIR: "/"
+          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --bin voicebot --target ${{ matrix.target }} --features kokoro
 
       # ── Package binary ────────────────────────────────────────────────────
       - name: Package
@@ -197,8 +215,8 @@ jobs:
           echo "Tarball contents:"; tar -tzf "voicebot-${{ matrix.target }}.tar.gz"
 
       # ── Upload directly to Gitea release API ──────────────────────────────
-      # Uses http://gitea:3000 (Docker-internal hostname) to avoid tesla.local
-      # mDNS resolution failures inside job containers.
+      # Uses http://gitea:3000 (Docker-internal hostname) — tesla.local mDNS
+      # fails inside Docker containers but gitea:3000 resolves on the network.
       - name: Upload to release
         env:
           GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
