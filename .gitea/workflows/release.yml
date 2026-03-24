@@ -9,6 +9,14 @@ on:
 # Required act_runner labels:
 #   ubuntu-latest — Linux x86_64 (tesla.local itself)
 #   macos-latest  — Your Mac (builds both macOS targets)
+#
+# Targets currently enabled:
+#   x86_64-unknown-linux-gnu  ✅ (tesla.local, native)
+#   aarch64-apple-darwin      ⏳ (needs macOS runner)
+#   x86_64-apple-darwin       ⏳ (needs macOS runner)
+#
+# TODO: aarch64-unknown-linux-gnu — needs either a native ARM64 runner
+#   or a properly configured cross-compilation setup. Deferred.
 
 env:
   GITEA_URL: http://tesla.local:3000
@@ -122,36 +130,22 @@ jobs:
               "${GITEA_API}/repos/${GITEA_REPO}/releases/${RELEASE_ID}/assets"
           done
 
-  # ── Linux — both targets built on ubuntu-latest ────────────────────────────
-  # x86_64: native.
-  # aarch64: cross-compile using gcc-aarch64-linux-gnu (no Docker-in-Docker).
-  #   `cross` crate is avoided: when act_runner runs jobs inside Docker,
-  #   cross's volume mounts reference the HOST filesystem, not the container,
-  #   so ~/.cargo never lands inside the cross container → cargo: not found.
+  # ── Linux x86_64 — native build on ubuntu-latest ──────────────────────────
   # ort 2.x statically links ONNX Runtime — no .so to bundle.
   # Uploads go directly to the Gitea API (avoids upload-artifact DNS issues).
-  build-linux:
-    name: Build · ${{ matrix.target }}
+  build-linux-x86_64:
+    name: Build · x86_64-unknown-linux-gnu
     needs: [create-release]
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            use_cross: false
-          - target: aarch64-unknown-linux-gnu
-            use_cross: true
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust + target
+      - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-          target: ${{ matrix.target }}
           override: true
 
       - name: Cache cargo
@@ -161,110 +155,33 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
+          key: ${{ runner.os }}-x86_64-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-x86_64-cargo-
 
-      # ── x86_64 native deps ────────────────────────────────────────────────
-      - name: Install build deps (x86_64)
-        if: matrix.use_cross == false
+      - name: Install build deps
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             libasound2-dev espeak-ng pkg-config build-essential \
             libssl-dev cmake libclang-dev
 
-      # ── aarch64: system cross-compiler + ARM64 libs ───────────────────────
-      # Uses gcc-aarch64-linux-gnu directly with cargo --target.
-      # No Docker-in-Docker, no volume mount issues.
-      #
-      # arm64 packages live on ports.ubuntu.com, not archive.ubuntu.com.
-      # Restrict existing sources to [arch=amd64] and add a ports.ubuntu.com
-      # source for arm64 before running dpkg --add-architecture arm64.
-      - name: Install cross-compilation toolchain (aarch64)
-        if: matrix.use_cross == true
-        run: |
-          CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+      - name: Build
+        run: cargo build --release --bin voicebot --target x86_64-unknown-linux-gnu --features kokoro
 
-          # Restrict default sources to amd64 so apt-get update doesn't 404
-          # Ubuntu 24.04+ uses deb822 format (.sources files); older releases use
-          # one-line format (.list files). Handle both.
-
-          # deb822 format: add "Architectures: amd64" after each "Types: deb" line
-          for f in /etc/apt/sources.list.d/*.sources; do
-            [ -f "$f" ] || continue
-            if sudo grep -q "^Types: deb" "$f" && ! sudo grep -q "^Architectures:" "$f"; then
-              sudo sed -i '/^Types: deb/a Architectures: amd64' "$f"
-            fi
-          done
-
-          # one-line format: add [arch=amd64] only to lines without existing [...]
-          sudo sed -i -E '/^deb [^\[]/s/^deb /deb [arch=amd64] /' /etc/apt/sources.list 2>/dev/null || true
-          sudo find /etc/apt/sources.list.d/ -name "*.list" \
-            -exec sed -i -E '/^deb [^\[]/s/^deb /deb [arch=amd64] /' {} \; 2>/dev/null || true
-
-          # Add ports.ubuntu.com for arm64
-          {
-            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME} main restricted universe multiverse"
-            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME}-updates main restricted universe multiverse"
-            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME}-security main restricted universe multiverse"
-          } | sudo tee /etc/apt/sources.list.d/ports-arm64.list
-
-          sudo dpkg --add-architecture arm64
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            libasound2-dev:arm64 libssl-dev:arm64 \
-            pkg-config cmake libclang-dev
-
-          # Create a target-specific pkg-config wrapper for aarch64.
-          # Using PKG_CONFIG_AARCH64_UNKNOWN_LINUX_GNU (not PKG_CONFIG_PATH)
-          # ensures it is only used for the TARGET build, not for host build
-          # scripts (build.rs binaries) which must link against x86_64 libs.
-          cat > /tmp/aarch64-pkg-config << 'SCRIPT'
-          #!/bin/sh
-          export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
-          export PKG_CONFIG_SYSROOT_DIR=/
-          exec pkg-config "$@"
-          SCRIPT
-          chmod +x /tmp/aarch64-pkg-config
-
-          mkdir -p ~/.cargo
-          cat >> ~/.cargo/config.toml << 'EOF'
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
-          EOF
-
-      # ── Build ─────────────────────────────────────────────────────────────
-      - name: Build (x86_64)
-        if: matrix.use_cross == false
-        run: cargo build --release --bin voicebot --target ${{ matrix.target }} --features kokoro
-
-      - name: Build (aarch64 cross)
-        if: matrix.use_cross == true
-        env:
-          PKG_CONFIG_ALLOW_CROSS: "1"
-          PKG_CONFIG_AARCH64_UNKNOWN_LINUX_GNU: /tmp/aarch64-pkg-config
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --release --bin voicebot --target ${{ matrix.target }} --features kokoro
-
-      # ── Package binary ────────────────────────────────────────────────────
       - name: Package
         run: |
-          BIN="target/${{ matrix.target }}/release/voicebot"
-          strip "$BIN" 2>/dev/null || true
-          tar -czf "voicebot-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" voicebot
-          sha256sum "voicebot-${{ matrix.target }}.tar.gz" > "voicebot-${{ matrix.target }}.tar.gz.sha256"
-          echo "Tarball contents:"; tar -tzf "voicebot-${{ matrix.target }}.tar.gz"
+          BIN="target/x86_64-unknown-linux-gnu/release/voicebot"
+          strip "$BIN"
+          tar -czf "voicebot-x86_64-unknown-linux-gnu.tar.gz" -C "target/x86_64-unknown-linux-gnu/release" voicebot
+          sha256sum "voicebot-x86_64-unknown-linux-gnu.tar.gz" > "voicebot-x86_64-unknown-linux-gnu.tar.gz.sha256"
+          echo "Tarball contents:"; tar -tzf "voicebot-x86_64-unknown-linux-gnu.tar.gz"
 
-      # ── Upload directly to Gitea release API ──────────────────────────────
-      # Uses http://gitea:3000 (Docker-internal hostname) — tesla.local mDNS
-      # fails inside Docker containers but gitea:3000 resolves on the network.
       - name: Upload to release
         env:
           GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
         run: |
-          for ASSET in voicebot-${{ matrix.target }}.tar.gz voicebot-${{ matrix.target }}.tar.gz.sha256; do
+          for ASSET in voicebot-x86_64-unknown-linux-gnu.tar.gz voicebot-x86_64-unknown-linux-gnu.tar.gz.sha256; do
             echo "Uploading: $ASSET"
             curl -sf -X POST \
               -H "Authorization: token ${GITEA_TOKEN}" \
