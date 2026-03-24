@@ -6,13 +6,12 @@
 #
 # The custom Docker image installs:
 #   - libasound2-dev:arm64   (CPAL audio)
-#   - ONNX Runtime 1.22.0 ARM64 (required by ort / kokorox)
+#   - libssl-dev:arm64       (reqwest TLS)
 # espeak-ng is compiled from source by espeak-rs-sys — no system package needed.
+# ort 2.x statically links ONNX Runtime from pyke CDN — no system ORT needed.
 
 [target.aarch64-unknown-linux-gnu]
-image.dockerfile = "cross/Dockerfile.aarch64"
-image.context = "."
+image = { name = "voicebot-cross-aarch64", dockerfile = "cross/Dockerfile.aarch64" }
 
 [build.env]
-# Pass through so inner cargo build picks them up
-passthrough = ["ORT_LIB_LOCATION", "ORT_STRATEGY", "CARGO_TERM_COLOR"]
+passthrough = ["CARGO_TERM_COLOR"]
