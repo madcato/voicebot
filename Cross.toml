@@ -4,14 +4,17 @@
 # Install cross:  cargo install cross
 # Build:          cross build --release --target aarch64-unknown-linux-gnu --features kokoro
 #
-# The custom Docker image installs:
+# The CI workflow pre-builds the Docker image with:
+#   docker build -t voicebot-cross-aarch64 -f cross/Dockerfile.aarch64 .
+#
+# Dependencies in the image:
 #   - libasound2-dev:arm64   (CPAL audio)
 #   - libssl-dev:arm64       (reqwest TLS)
 # espeak-ng is compiled from source by espeak-rs-sys — no system package needed.
 # ort 2.x statically links ONNX Runtime from pyke CDN — no system ORT needed.
 
 [target.aarch64-unknown-linux-gnu]
-image = { name = "voicebot-cross-aarch64", dockerfile = "cross/Dockerfile.aarch64" }
+image = "voicebot-cross-aarch64"
 
 [build.env]
 passthrough = ["CARGO_TERM_COLOR"]

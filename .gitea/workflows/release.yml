@@ -7,26 +7,69 @@ on:
       - 'v[0-9]*.*.*'
 
 # Required act_runner labels:
-#   ubuntu-latest — Linux x86_64 (e.g. tesla.local itself)
-#   macos-latest  — Your Mac (builds both macOS targets + aarch64 Linux via cross)
-#
-# Register a runner:
-#   act_runner register --instance http://tesla.local:3000 \
-#     --token <token> --labels ubuntu-latest,linux
-#
-# Register the Mac runner:
-#   act_runner register --instance http://tesla.local:3000 \
-#     --token <token> --labels macos-latest,macos
+#   ubuntu-latest — Linux x86_64 (tesla.local itself)
+#   macos-latest  — Your Mac (builds both macOS targets)
 
 env:
   GITEA_URL: http://tesla.local:3000
+  # Inside Docker job containers, tesla.local doesn't resolve via mDNS.
+  # act_runner exposes Gitea under the hostname "gitea" inside Docker networks.
+  GITEA_API: http://gitea:3000/api/v1
   GITEA_REPO: danielvela/voicebot
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ── Create the Gitea release first ────────────────────────────────────────
+  # All build jobs depend on this so they have a release ID to upload to.
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.release_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create Gitea release and upload install script
+        id: create
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -e
+
+          IS_PRERELEASE="false"
+          case "$TAG" in *-*) IS_PRERELEASE="true" ;; esac
+
+          BODY="## Installation\n\n\`\`\`sh\ncurl -fsSL ${GITEA_URL}/${GITEA_REPO}/releases/download/${TAG}/install-gitea.sh | sh\n\`\`\`"
+
+          # Create release (may already exist if a previous attempt partially succeeded)
+          curl -s -X POST \
+            -H "Authorization: token ${GITEA_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\":\"${TAG}\",\"name\":\"Voicebot ${TAG}\",\"body\":\"${BODY}\",\"draft\":false,\"prerelease\":${IS_PRERELEASE}}" \
+            "${GITEA_API}/repos/${GITEA_REPO}/releases" || true
+
+          # Fetch the release ID (works whether just created or already existed)
+          RELEASE_ID=$(curl -sf \
+            -H "Authorization: token ${GITEA_TOKEN}" \
+            "${GITEA_API}/repos/${GITEA_REPO}/releases/tags/${TAG}" | \
+            python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+
+          echo "release_id=${RELEASE_ID}" >> "$GITHUB_OUTPUT"
+          echo "Release ID: ${RELEASE_ID}"
+
+          # Upload install-gitea.sh
+          curl -sf -X POST \
+            -H "Authorization: token ${GITEA_TOKEN}" \
+            -F "attachment=@install-gitea.sh;filename=install-gitea.sh" \
+            "${GITEA_API}/repos/${GITEA_REPO}/releases/${RELEASE_ID}/assets" \
+            && echo "Uploaded install-gitea.sh" || echo "Warning: install-gitea.sh upload failed (may already exist)"
+
   # ── macOS — one runner builds both macOS targets ───────────────────────────
   build-macos:
     name: Build · ${{ matrix.target }}
+    needs: [create-release]
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -66,19 +109,26 @@ jobs:
           tar -czf "voicebot-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" voicebot
           shasum -a 256 "voicebot-${{ matrix.target }}.tar.gz" > "voicebot-${{ matrix.target }}.tar.gz.sha256"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: voicebot-${{ matrix.target }}
-          path: voicebot-${{ matrix.target }}.tar.gz*
-          if-no-files-found: error
-          retention-days: 1
+      - name: Upload to release
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          for ASSET in voicebot-${{ matrix.target }}.tar.gz voicebot-${{ matrix.target }}.tar.gz.sha256; do
+            echo "Uploading: $ASSET"
+            curl -sf -X POST \
+              -H "Authorization: token ${GITEA_TOKEN}" \
+              -F "attachment=@${ASSET};filename=${ASSET}" \
+              "${GITEA_API}/repos/${GITEA_REPO}/releases/${RELEASE_ID}/assets"
+          done
 
   # ── Linux — both targets built on ubuntu-latest ────────────────────────────
   # x86_64: native.  aarch64: cross-compile via `cross` + Docker.
   # ort 2.x statically links ONNX Runtime — no .so to bundle.
+  # Uploads go directly to the Gitea API (avoids upload-artifact DNS issues).
   build-linux:
     name: Build · ${{ matrix.target }}
+    needs: [create-release]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -119,7 +169,11 @@ jobs:
             libasound2-dev espeak-ng pkg-config build-essential \
             libssl-dev cmake libclang-dev
 
-      # ── aarch64: install cross ────────────────────────────────────────────
+      # ── aarch64: build Docker image then install cross ────────────────────
+      - name: Build cross Docker image
+        if: matrix.use_cross == true
+        run: docker build -t voicebot-cross-aarch64 -f cross/Dockerfile.aarch64 .
+
       - name: Install cross
         if: matrix.use_cross == true
         run: cargo install cross --git https://github.com/cross-rs/cross
@@ -142,70 +196,19 @@ jobs:
           sha256sum "voicebot-${{ matrix.target }}.tar.gz" > "voicebot-${{ matrix.target }}.tar.gz.sha256"
           echo "Tarball contents:"; tar -tzf "voicebot-${{ matrix.target }}.tar.gz"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: voicebot-${{ matrix.target }}
-          path: voicebot-${{ matrix.target }}.tar.gz*
-          if-no-files-found: error
-          retention-days: 1
-
-  # ── Gitea Release ─────────────────────────────────────────────────────────
-  release:
-    name: Gitea Release
-    needs: [build-macos, build-linux]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout (for install-gitea.sh)
-        uses: actions/checkout@v4
-
-      # v3 downloads each artifact into its own subdirectory:
-      #   artifacts/voicebot-aarch64-apple-darwin/voicebot-aarch64-apple-darwin.tar.gz
-      #   artifacts/voicebot-x86_64-unknown-linux-gnu/voicebot-x86_64-unknown-linux-gnu.tar.gz  …
-      - name: Download all artifacts
-        uses: actions/download-artifact@v3
-        with:
-          path: artifacts
-
-      - name: List artifacts
-        run: find artifacts -type f | sort
-
-      - name: Create release and upload assets
+      # ── Upload directly to Gitea release API ──────────────────────────────
+      # Uses http://gitea:3000 (Docker-internal hostname) to avoid tesla.local
+      # mDNS resolution failures inside job containers.
+      - name: Upload to release
         env:
           GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
         run: |
-          set -e
-
-          IS_PRERELEASE="false"
-          case "$TAG" in *-*) IS_PRERELEASE="true" ;; esac
-
-          BODY="## Installation\n\n\`\`\`sh\ncurl -fsSL ${GITEA_URL}/${GITEA_REPO}/releases/download/${TAG}/install-gitea.sh | sh\n\`\`\`"
-
-          # 1. Create release via Gitea API
-          RESPONSE=$(curl -s -f -X POST \
-            -H "Authorization: token ${GITEA_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{\"tag_name\":\"${TAG}\",\"name\":\"Voicebot ${TAG}\",\"body\":\"${BODY}\",\"draft\":false,\"prerelease\":${IS_PRERELEASE}}" \
-            "${GITEA_URL}/api/v1/repos/${GITEA_REPO}/releases")
-
-          RELEASE_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
-          echo "Release ID: $RELEASE_ID"
-
-          # 2. Upload tarballs + checksums (v3 nests files in per-artifact subdirs)
-          find artifacts -type f \( -name "*.tar.gz" -o -name "*.sha256" \) | while read -r ASSET; do
-            FNAME="$(basename "$ASSET")"
-            echo "Uploading: $FNAME"
-            curl -s -f -X POST \
+          for ASSET in voicebot-${{ matrix.target }}.tar.gz voicebot-${{ matrix.target }}.tar.gz.sha256; do
+            echo "Uploading: $ASSET"
+            curl -sf -X POST \
               -H "Authorization: token ${GITEA_TOKEN}" \
-              -F "attachment=@${ASSET};filename=${FNAME}" \
-              "${GITEA_URL}/api/v1/repos/${GITEA_REPO}/releases/${RELEASE_ID}/assets"
+              -F "attachment=@${ASSET};filename=${ASSET}" \
+              "${GITEA_API}/repos/${GITEA_REPO}/releases/${RELEASE_ID}/assets"
           done
-
-          # 3. Upload install-gitea.sh from the checkout
-          curl -s -f -X POST \
-            -H "Authorization: token ${GITEA_TOKEN}" \
-            -F "attachment=@install-gitea.sh;filename=install-gitea.sh" \
-            "${GITEA_URL}/api/v1/repos/${GITEA_REPO}/releases/${RELEASE_ID}/assets"
-
-          echo "Done: ${GITEA_URL}/${GITEA_REPO}/releases/tag/${TAG}"
+          echo "Done: ${GITEA_URL}/${GITEA_REPO}/releases/tag/${{ github.ref_name }}"
