@@ -69,7 +69,7 @@ jobs:
           shasum -a 256 "voicebot-${{ matrix.target }}.tar.gz" > "voicebot-${{ matrix.target }}.tar.gz.sha256"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: voicebot-${{ matrix.target }}
           path: voicebot-${{ matrix.target }}.tar.gz*
@@ -174,7 +174,7 @@ jobs:
           echo "Tarball contents:"; tar -tzf "voicebot-${{ matrix.target }}.tar.gz"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: voicebot-${{ matrix.target }}
           path: voicebot-${{ matrix.target }}.tar.gz*
@@ -190,14 +190,16 @@ jobs:
       - name: Checkout (for install-gitea.sh)
         uses: actions/checkout@v4
 
+      # v3 downloads each artifact into its own subdirectory:
+      #   artifacts/voicebot-aarch64-apple-darwin/voicebot-aarch64-apple-darwin.tar.gz
+      #   artifacts/voicebot-x86_64-unknown-linux-gnu/voicebot-x86_64-unknown-linux-gnu.tar.gz  …
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v3
         with:
           path: artifacts
-          merge-multiple: true
 
       - name: List artifacts
-        run: ls -lh artifacts/
+        run: find artifacts -type f | sort
 
       - name: Create release and upload assets
         env:
@@ -221,9 +223,8 @@ jobs:
           RELEASE_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
           echo "Release ID: $RELEASE_ID"
 
-          # 2. Upload all assets
-          for ASSET in artifacts/*.tar.gz artifacts/*.sha256 install-gitea.sh; do
-            [ -f "$ASSET" ] || continue
+          # 2. Upload tarballs + checksums (v3 nests files in per-artifact subdirs)
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.sha256" \) | while read -r ASSET; do
             FNAME="$(basename "$ASSET")"
             echo "Uploading: $FNAME"
             curl -s -f -X POST \
@@ -231,5 +232,11 @@ jobs:
               -F "attachment=@${ASSET};filename=${FNAME}" \
               "${GITEA_URL}/api/v1/repos/${GITEA_REPO}/releases/${RELEASE_ID}/assets"
           done
+
+          # 3. Upload install-gitea.sh from the checkout
+          curl -s -f -X POST \
+            -H "Authorization: token ${GITEA_TOKEN}" \
+            -F "attachment=@install-gitea.sh;filename=install-gitea.sh" \
+            "${GITEA_URL}/api/v1/repos/${GITEA_REPO}/releases/${RELEASE_ID}/assets"
 
           echo "Done: ${GITEA_URL}/${GITEA_REPO}/releases/tag/${TAG}"
