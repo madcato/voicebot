@@ -1,0 +1,165 @@
+name: Release
+
+# Trigger: push a version tag like v1.0.0 or v1.0.0-beta.1
+on:
+  push:
+    tags:
+      - 'v[0-9]*.*.*'
+
+permissions:
+  contents: write   # needed to create the GitHub release
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Build matrix ─────────────────────────────────────────────────────────────
+  build:
+    name: Build · ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS — Apple Silicon (M1/M2/M3)
+          - target:   aarch64-apple-darwin
+            runner:   macos-latest         # GitHub's arm64 macOS runner
+            features: avspeech
+            os:       macos
+
+          # macOS — Intel
+          - target:   x86_64-apple-darwin
+            runner:   macos-13             # last Intel macOS runner
+            features: avspeech
+            os:       macos
+
+          # Linux — x86_64
+          - target:   x86_64-unknown-linux-gnu
+            runner:   ubuntu-latest
+            features: kokoro
+            os:       linux
+
+          # Linux — ARM64 (native runner, no cross-compilation needed)
+          - target:   aarch64-unknown-linux-gnu
+            runner:   ubuntu-24.04-arm64
+            features: kokoro
+            os:       linux
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Rust toolchain ──────────────────────────────────────────────────────
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # ── macOS system dependencies ───────────────────────────────────────────
+      # whisper-rs uses CoreML + Metal on macOS; both are system frameworks
+      # and are available on all GitHub macOS runners — nothing extra to install.
+
+      # ── Linux system dependencies ───────────────────────────────────────────
+      - name: Install Linux build dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev \
+            espeak-ng \
+            pkg-config \
+            build-essential \
+            libssl-dev \
+            cmake
+
+      # ── Build ───────────────────────────────────────────────────────────────
+      - name: Build release binary
+        run: |
+          cargo build --release --bin voicebot --features ${{ matrix.features }}
+
+      # ── Package ─────────────────────────────────────────────────────────────
+      - name: Strip and package binary
+        shell: bash
+        run: |
+          BIN="target/release/voicebot"
+          # Strip debug symbols to reduce binary size
+          strip "$BIN" 2>/dev/null || true
+          # Create tarball — install.sh expects a single `voicebot` file inside
+          tar -czf "voicebot-${{ matrix.target }}.tar.gz" -C target/release voicebot
+          sha256sum "voicebot-${{ matrix.target }}.tar.gz" > "voicebot-${{ matrix.target }}.tar.gz.sha256"
+          echo "Tarball size: $(du -sh voicebot-${{ matrix.target }}.tar.gz | cut -f1)"
+
+      # ── Upload artifact for the release job ─────────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: voicebot-${{ matrix.target }}
+          path: |
+            voicebot-${{ matrix.target }}.tar.gz
+            voicebot-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── Create GitHub release with all binaries ───────────────────────────────
+  release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for install.sh)
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh artifacts/
+
+      - name: Extract release notes from tag annotation
+        id: notes
+        run: |
+          # Use the annotated tag message if present; otherwise fall back to a template.
+          TAG="${{ github.ref_name }}"
+          MSG="$(git tag -l --format='%(contents)' "$TAG" 2>/dev/null || true)"
+          if [ -z "$MSG" ]; then
+            MSG="Release $TAG"
+          fi
+          echo "body<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$MSG" >> "$GITHUB_OUTPUT"
+          echo "" >> "$GITHUB_OUTPUT"
+          echo "## Installation" >> "$GITHUB_OUTPUT"
+          echo "" >> "$GITHUB_OUTPUT"
+          echo '```sh' >> "$GITHUB_OUTPUT"
+          echo "curl -fsSL https://github.com/${{ github.repository }}/releases/latest/download/install.sh | sh" >> "$GITHUB_OUTPUT"
+          echo '```' >> "$GITHUB_OUTPUT"
+          echo "" >> "$GITHUB_OUTPUT"
+          echo "Or pin a specific version:" >> "$GITHUB_OUTPUT"
+          echo "" >> "$GITHUB_OUTPUT"
+          echo '```sh' >> "$GITHUB_OUTPUT"
+          echo "VOICEBOT_VERSION=$TAG curl -fsSL https://github.com/${{ github.repository }}/releases/latest/download/install.sh | sh" >> "$GITHUB_OUTPUT"
+          echo '```' >> "$GITHUB_OUTPUT"
+          echo "" >> "$GITHUB_OUTPUT"
+          echo "See [doc/PUBLISHING.md](doc/PUBLISHING.md) for full details." >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Voicebot ${{ github.ref_name }}
+          body: ${{ steps.notes.outputs.body }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.sha256
+            install.sh

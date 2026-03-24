@@ -1,0 +1,188 @@
+name: Release
+
+# Trigger: push a version tag like v1.0.0 or v1.0.0-beta.1
+on:
+  push:
+    tags:
+      - 'v[0-9]*.*.*'
+
+# Required runner labels (register with act_runner):
+#   ubuntu-latest  — Linux x86_64 host  (e.g. the tesla.local server itself)
+#   linux-arm64    — Linux aarch64 host  (e.g. a Pi 5, Graviton, or second VM)
+#   macos-latest   — macOS host          (your Mac with act_runner installed)
+#
+# Register a runner:
+#   act_runner register --instance http://tesla.local:3000 --token <token> --labels ubuntu-latest,linux
+#
+# macOS runner (run on your Mac):
+#   act_runner register --instance http://tesla.local:3000 --token <token> --labels macos-latest,macos
+
+env:
+  GITEA_URL: http://tesla.local:3000
+  GITEA_REPO: danielvela/voicebot
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Build matrix ─────────────────────────────────────────────────────────────
+  build:
+    name: Build · ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS — Apple Silicon (M1/M2/M3)
+          - target:   aarch64-apple-darwin
+            runner:   macos-latest
+            features: avspeech
+            os:       macos
+
+          # macOS — Intel
+          - target:   x86_64-apple-darwin
+            runner:   macos-latest       # reuse same runner; Rosetta cross-compile
+            cross_target: x86_64-apple-darwin
+            features: avspeech
+            os:       macos
+
+          # Linux — x86_64
+          - target:   x86_64-unknown-linux-gnu
+            runner:   ubuntu-latest
+            features: kokoro
+            os:       linux
+
+          # Linux — ARM64
+          - target:   aarch64-unknown-linux-gnu
+            runner:   linux-arm64        # register an act_runner on an aarch64 host
+            features: kokoro
+            os:       linux
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Rust toolchain ──────────────────────────────────────────────────────
+      - name: Install Rust stable
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.cross_target || matrix.target }}
+          override: true
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      # ── System dependencies ─────────────────────────────────────────────────
+      - name: Install Linux build dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev \
+            espeak-ng \
+            pkg-config \
+            build-essential \
+            libssl-dev \
+            cmake \
+            libclang-dev
+
+      # macOS: Xcode CLT provides Metal + CoreML; nothing extra needed.
+
+      # ── Build ───────────────────────────────────────────────────────────────
+      - name: Build release binary
+        run: |
+          TARGET="${{ matrix.cross_target || matrix.target }}"
+          cargo build --release --bin voicebot \
+            --target "$TARGET" \
+            --features ${{ matrix.features }}
+
+      # ── Package ─────────────────────────────────────────────────────────────
+      - name: Strip and package binary
+        shell: bash
+        run: |
+          TARGET="${{ matrix.cross_target || matrix.target }}"
+          BIN="target/${TARGET}/release/voicebot"
+          strip "$BIN" 2>/dev/null || true
+          tar -czf "voicebot-${{ matrix.target }}.tar.gz" -C "target/${TARGET}/release" voicebot
+          sha256sum "voicebot-${{ matrix.target }}.tar.gz" \
+            > "voicebot-${{ matrix.target }}.tar.gz.sha256"
+          echo "Size: $(du -sh "voicebot-${{ matrix.target }}.tar.gz" | cut -f1)"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: voicebot-${{ matrix.target }}
+          path: |
+            voicebot-${{ matrix.target }}.tar.gz
+            voicebot-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── Create Gitea release ─────────────────────────────────────────────────────
+  release:
+    name: Gitea Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for install-gitea.sh)
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh artifacts/
+
+      # Create the release via Gitea API, then upload all assets.
+      # GITHUB_TOKEN is the Gitea built-in token — no extra secret needed.
+      - name: Create release and upload assets
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -e
+
+          IS_PRERELEASE="false"
+          case "$TAG" in *-*) IS_PRERELEASE="true" ;; esac
+
+          BODY="## Installation\n\n\`\`\`sh\ncurl -fsSL http://tesla.local:3000/danielvela/voicebot/releases/download/${TAG}/install-gitea.sh | sh\n\`\`\`\n\nOr pin this version:\n\`\`\`sh\nVOICEBOT_VERSION=${TAG} curl -fsSL http://tesla.local:3000/danielvela/voicebot/releases/download/${TAG}/install-gitea.sh | sh\n\`\`\`"
+
+          # 1. Create the release
+          RESPONSE=$(curl -s -f -X POST \
+            -H "Authorization: token ${GITEA_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"tag_name\":   \"${TAG}\",
+              \"name\":       \"Voicebot ${TAG}\",
+              \"body\":       \"${BODY}\",
+              \"draft\":      false,
+              \"prerelease\": ${IS_PRERELEASE}
+            }" \
+            "${GITEA_URL}/api/v1/repos/${GITEA_REPO}/releases")
+
+          echo "Create release response: $RESPONSE"
+          RELEASE_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          echo "Release ID: $RELEASE_ID"
+
+          # 2. Upload all tarballs, checksums, and install-gitea.sh
+          for ASSET in artifacts/*.tar.gz artifacts/*.sha256 install-gitea.sh; do
+            [ -f "$ASSET" ] || continue
+            FNAME="$(basename "$ASSET")"
+            echo "Uploading: $FNAME"
+            curl -s -f -X POST \
+              -H "Authorization: token ${GITEA_TOKEN}" \
+              -F "attachment=@${ASSET};filename=${FNAME}" \
+              "${GITEA_URL}/api/v1/repos/${GITEA_REPO}/releases/${RELEASE_ID}/assets"
+          done
+
+          echo "Release published: ${GITEA_URL}/${GITEA_REPO}/releases/tag/${TAG}"
