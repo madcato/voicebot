@@ -186,8 +186,19 @@ jobs:
           CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
 
           # Restrict default sources to amd64 so apt-get update doesn't 404
-          # Only modify lines that don't already have [arch=...] or [signed-by=...]
-          sudo sed -i -E '/^deb [^\[]/s/^deb /deb [arch=amd64] /' /etc/apt/sources.list
+          # Ubuntu 24.04+ uses deb822 format (.sources files); older releases use
+          # one-line format (.list files). Handle both.
+
+          # deb822 format: add "Architectures: amd64" after each "Types: deb" line
+          for f in /etc/apt/sources.list.d/*.sources; do
+            [ -f "$f" ] || continue
+            if sudo grep -q "^Types: deb" "$f" && ! sudo grep -q "^Architectures:" "$f"; then
+              sudo sed -i '/^Types: deb/a Architectures: amd64' "$f"
+            fi
+          done
+
+          # one-line format: add [arch=amd64] only to lines without existing [...]
+          sudo sed -i -E '/^deb [^\[]/s/^deb /deb [arch=amd64] /' /etc/apt/sources.list 2>/dev/null || true
           sudo find /etc/apt/sources.list.d/ -name "*.list" \
             -exec sed -i -E '/^deb [^\[]/s/^deb /deb [arch=amd64] /' {} \; 2>/dev/null || true
 
