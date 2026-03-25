@@ -176,8 +176,8 @@ impl LlamaClient {
     pub async fn complete(&self, messages: &[Message]) -> Result<String>;
     pub async fn complete_short(&self, messages: &[Message]) -> Result<String>;
 
-    // KV-cache prefill (max_tokens=0) — llama.cpp only; disabled for other providers
-    pub async fn prefill_cache(&self, messages: Vec<serde_json::Value>) -> Result<()>;
+    // KV-cache warm-up — llama.cpp only; disabled for other providers
+    pub async fn prefill_warm(&self, messages: Vec<serde_json::Value>) -> Result<()>;
     pub fn supports_prefill_warm(&self) -> bool;
 }
 ```
@@ -261,7 +261,7 @@ When `SpeechStart` fires while a pipeline is playing:
 |----------|-----------|
 | Single binary, tokio channels | No IPC overhead; easy to reason about cancellation |
 | Always-on Whisper (`SttStream`) | Transcript is ready ~0ms after SpeechEnd |
-| During-speech KV-cache prefill (`prefill_cache`) | llama.cpp: prefills partial user transcript during speech; cache warm by SpeechEnd |
+| KV-cache warm-up (`prefill_warm`) | llama.cpp: fire-and-forget prefill after vad_finish; saves ~300ms |
 | Sentence-by-sentence TTS | First word heard in <1s; synthesis of N overlaps playback of N-1 |
 | `TtsEngine` enum | Zero-cost dispatch; each variant owns its state; easy to add variants |
 | SQLite for history | Survives restarts; restored to `LlmSession` on startup |

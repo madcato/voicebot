@@ -184,7 +184,7 @@ impl LlamaClient {
         &self,
         messages: &[serde_json::Value],
         tools: &[serde_json::Value],
-    ) -> Result<mpsc::Receiver<StreamToken>> {
+    ) -> Result<(mpsc::Receiver<StreamToken>, tokio::task::JoinHandle<()>)> {
         let mut payload = serde_json::json!({
             "model": self.model,
             "messages": messages,
@@ -236,7 +236,7 @@ impl LlamaClient {
 
         let (tx, rx) = mpsc::channel::<StreamToken>(256);
 
-        tokio::spawn(async move {
+        let stream_handle = tokio::spawn(async move {
             let mut stream = response.bytes_stream();
             let mut buf = String::new();
             let mut think = ThinkFilter::new();
@@ -323,7 +323,7 @@ impl LlamaClient {
             }
         });
 
-        Ok(rx)
+        Ok((rx, stream_handle))
     }
 
     /// One-shot (non-streaming) completion. Used for summarization.
@@ -442,25 +442,25 @@ impl LlamaClient {
             .to_string())
     }
 
-    /// Prefill the KV-cache with the given messages without generating tokens.
+    /// Fire a speculative KV-cache warm-up request without waiting for tokens.
     ///
-    /// Sends `max_tokens=0` so llama.cpp only runs the prefill pass and caches
-    /// the KV vectors.  Uses `stream=false` — the response returns only after
-    /// the prefill is complete, guaranteeing the cache is warm.
-    ///
-    /// Called during speech with partial user transcripts so that by SpeechEnd
-    /// the cache already holds history + most of the user's words.
-    pub async fn prefill_cache(&self, messages: Vec<serde_json::Value>) -> Result<()> {
+    /// Sends the current session messages so llama.cpp starts computing KV
+    /// vectors.  The caller aborts the spawned task after a short timeout —
+    /// the server continues prefilling in the background.
+    pub async fn prefill_warm(&self, messages: Vec<serde_json::Value>) -> Result<()> {
         let mut payload = serde_json::json!({
             "model": self.model,
             "messages": messages,
-            "max_tokens": 0,
+            "max_tokens": 1,
             "temperature": self.temperature,
-            "stream": false,
+            "stream": true,
         });
         if self.llama_extensions {
             payload["cache_prompt"] = serde_json::json!(true);
             payload["slot_id"] = serde_json::json!(self.slot_id);
+        } else {
+            payload["enable_thinking"] = serde_json::json!(false);
+            payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
         }
 
         let response = self
@@ -468,15 +468,17 @@ impl LlamaClient {
             .json(&payload)
             .send()
             .await
-            .context("Prefill cache: failed to reach LLM server")?;
+            .context("Speculative prefill: failed to reach LLM server")?;
 
         if !response.status().is_success() {
             let status = response.status();
-            anyhow::bail!("Prefill cache error {}", status);
+            anyhow::bail!("Speculative prefill error {}", status);
         }
 
-        // Consume the response body.
-        let _ = response.bytes().await;
+        // Stream the body to keep the connection alive while the server prefills.
+        // tokio cancels this future when the JoinHandle is aborted by the caller.
+        let mut stream = response.bytes_stream();
+        while stream.next().await.is_some() {}
         Ok(())
     }
 
@@ -639,7 +641,7 @@ mod tests {
 
         let client = LlamaClient::new(&server.uri(), "test-model", 400, 0.7, 0, -1);
         let messages = make_messages();
-        let mut rx = client.stream(&messages_to_json(&messages), &[]).await.unwrap();
+        let (mut rx, _handle) = client.stream(&messages_to_json(&messages), &[]).await.unwrap();
 
         let mut collected = String::new();
         while let Some(token) = rx.recv().await {
@@ -668,7 +670,7 @@ mod tests {
 
         let client = LlamaClient::new(&server.uri(), "test-model", 400, 0.7, 0, -1);
         let messages = make_messages();
-        let mut rx = client.stream(&messages_to_json(&messages), &[]).await.unwrap();
+        let (mut rx, _handle) = client.stream(&messages_to_json(&messages), &[]).await.unwrap();
 
         let mut collected = String::new();
         while let Some(token) = rx.recv().await {
@@ -769,7 +771,7 @@ mod tests {
             .await;
 
         let client = LlamaClient::new(&server.uri(), "test-model", 400, 0.7, 0, -1);
-        let mut rx = client.stream(&[], &[]).await.unwrap();
+        let (mut rx, _handle) = client.stream(&[], &[]).await.unwrap();
 
         let token = rx.recv().await.expect("should receive a token");
         match token {
