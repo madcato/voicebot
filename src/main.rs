@@ -670,7 +670,12 @@ async fn async_main() -> Result<()> {
                 let chunk: AudioChunk = tokio::select! {
                     result = rx.recv() => match result {
                         Ok(c) => c,
-                        Err(e) => { error!(target: "audio", "Audio channel closed: {}", e); break; }
+                        Err(e) => {
+                            error!(target: "audio", "Audio channel closed: {}", e);
+                            #[cfg(feature = "tui")]
+                            tui_tx.send(tui::events::TuiEvent::Error(format!("Audio channel closed: {e}"))).ok();
+                            break;
+                        }
                     },
                     Some(event) = proactive_rx.recv() => {
                         match event {
@@ -1123,7 +1128,12 @@ async fn llm_task(
                 info!(target: "performance", "LLM request [pipe={}]", pipeline_id);
                 let (token_rx, stream_handle) = match llm_client.stream(&messages, &tool_defs).await {
                     Ok(r)  => r,
-                    Err(e) => { error!(target: "llm", "LLM error: {}", e); break 'pipeline; }
+                    Err(e) => {
+                        error!(target: "llm", "LLM error: {}", e);
+                        #[cfg(feature = "tui")]
+                        tui_tx.send(tui::events::TuiEvent::Error(format!("LLM error: {e}"))).ok();
+                        break 'pipeline;
+                    }
                 };
 
                 let mut token_rx = token_rx;
@@ -1386,8 +1396,18 @@ async fn tts_task(
 
         let samples = match synth_handle.await {
             Ok(Ok(s))  => s,
-            Ok(Err(e)) => { error!(target: "tts", "TTS synthesis error: {}", e); continue; }
-            Err(e)     => { error!(target: "tts", "TTS task panicked: {}", e); continue; }
+            Ok(Err(e)) => {
+                error!(target: "tts", "TTS synthesis error: {}", e);
+                #[cfg(feature = "tui")]
+                tui_tx.send(tui::events::TuiEvent::Error(format!("TTS synthesis error: {e}"))).ok();
+                continue;
+            }
+            Err(e) => {
+                error!(target: "tts", "TTS task panicked: {}", e);
+                #[cfg(feature = "tui")]
+                tui_tx.send(tui::events::TuiEvent::Error(format!("TTS task panicked: {e}"))).ok();
+                continue;
+            }
         };
 
         let out_c    = Arc::clone(&audio_output);

@@ -16,6 +16,7 @@ pub enum Role {
     User(InputSource),
     Assistant,
     Tool,
+    Error,
 }
 
 /// A single message in the conversation view.
@@ -87,6 +88,14 @@ impl App {
                         timestamp: chrono::Local::now(),
                     });
                 }
+                self.scroll = 0;
+            }
+            TuiEvent::Error(msg) => {
+                self.messages.push(ChatMessage {
+                    role: Role::Error,
+                    content: msg,
+                    timestamp: chrono::Local::now(),
+                });
                 self.scroll = 0;
             }
             TuiEvent::ToolCall { name, result } => {

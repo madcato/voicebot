@@ -30,6 +30,8 @@ pub enum TuiEvent {
     AssistantDone,
     /// A tool was called by the LLM.
     ToolCall { name: String, result: String },
+    /// A pipeline error occurred that the user should see.
+    Error(String),
 }
 
 pub type TuiEventTx = mpsc::UnboundedSender<TuiEvent>;
