@@ -12,4 +12,4 @@ if [[ -f "$SCRIPT_DIR/.env" ]]; then
     set +a
 fi
 
-exec cargo run --release --bin voicebot --features avspeech,tui -- "$@"
+RUST_LOG=debug exec cargo run --release --bin voicebot --features avspeech,tui -- "$@"

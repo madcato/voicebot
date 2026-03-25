@@ -553,6 +553,9 @@ async fn async_main() -> Result<()> {
     // sender as the user's yes/no answer rather than starting the LLM pipeline.
     let mut pending_agent_question: Option<tokio::sync::oneshot::Sender<String>> = None;
 
+    // During-speech KV-cache prefill: spawned on SpeechStart, aborted on SpeechEnd.
+    let mut prefill_handle: Option<tokio::task::JoinHandle<()>> = None;
+
     // ── Spawn permanent pipeline tasks ────────────────────────────────────────
     {
         let shared_c            = Arc::clone(&shared);
@@ -749,11 +752,47 @@ async fn async_main() -> Result<()> {
                             speech_buffer.push(&pre);
                         }
                         speech_buffer.push(&mono);
+
+                        // ── During-speech KV-cache prefill (Active mode, llama.cpp) ──
+                        // Abort any previous prefill task (e.g. from a prior utterance).
+                        if let Some(h) = prefill_handle.take() { h.abort(); }
+                        let is_active = *conv_mode.lock().unwrap() == ConversationMode::Active;
+                        if is_active && llm_client.supports_prefill_warm() {
+                            let pf_client  = llm_client.clone();
+                            let pf_session = Arc::clone(&llm_session);
+                            let mut pf_stt_rx = stt_stream.result_receiver();
+                            prefill_handle = Some(tokio::spawn(async move {
+                                let mut last_text = String::new();
+                                loop {
+                                    if pf_stt_rx.changed().await.is_err() { break; }
+                                    let (_seq, partial) = pf_stt_rx.borrow_and_update().clone();
+                                    if partial.is_empty() || partial == last_text { continue; }
+                                    last_text = partial.clone();
+
+                                    // Build history + temporary user turn with partial transcript.
+                                    let mut msgs = pf_session.lock().unwrap().all_messages_api();
+                                    msgs.push(serde_json::json!({"role": "user", "content": partial}));
+
+                                    debug!(
+                                        target: "llm",
+                                        "During-speech prefill ({} chars): {:?}",
+                                        last_text.len(),
+                                        &last_text[..last_text.len().min(60)]
+                                    );
+                                    if let Err(e) = pf_client.prefill_cache(msgs).await {
+                                        debug!(target: "llm", "During-speech prefill error: {e}");
+                                    }
+                                }
+                            }));
+                        }
                     }
                     VadResult::Speech => {
                         speech_buffer.push(&mono);
                     }
                     VadResult::SpeechEnd => {
+                        // Stop during-speech prefill — cache is already warm.
+                        if let Some(h) = prefill_handle.take() { h.abort(); }
+
                         speech_buffer.push(&mono);
                         pre_roll.clear();
 
@@ -1070,25 +1109,6 @@ async fn llm_task(
         // Reset post-finished flag and clear assistant text buffer for new turn.
         shared.llm_post_finished.store(false, Ordering::SeqCst);
         shared.assistant_text.lock().unwrap().clear();
-
-        // Speculative KV-cache prefill (llama.cpp only).
-        let use_prefill = llm_client.supports_prefill_warm();
-        let spec_msgs = if use_prefill { llm_session.lock().unwrap().all_messages_api() } else { vec![] };
-        let spec_client = llm_client.clone();
-        let mut spec_handle = tokio::spawn(async move {
-            if use_prefill {
-                if let Err(e) = spec_client.prefill_warm(spec_msgs).await {
-                    debug!(target: "llm", "Speculative prefill ended: {e}");
-                }
-            }
-        });
-        tokio::select! {
-            _ = &mut spec_handle => {}
-            _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {
-                spec_handle.abort();
-                let _ = spec_handle.await;
-            }
-        }
 
         // Tool call loop — allows the model to call tools before its spoken response.
         let mut messages = llm_session.lock().unwrap().all_messages_api();

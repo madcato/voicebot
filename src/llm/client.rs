@@ -442,25 +442,25 @@ impl LlamaClient {
             .to_string())
     }
 
-    /// Fire a speculative KV-cache warm-up request without waiting for tokens.
+    /// Prefill the KV-cache with the given messages without generating tokens.
     ///
-    /// Sends the current session messages (without the new user turn) so
-    /// llama.cpp starts computing KV vectors while Whisper STT runs in parallel.
-    /// The caller aborts the spawned task as soon as the transcript is ready.
-    pub async fn prefill_warm(&self, messages: Vec<serde_json::Value>) -> Result<()> {
+    /// Sends `max_tokens=0` so llama.cpp only runs the prefill pass and caches
+    /// the KV vectors.  Uses `stream=false` — the response returns only after
+    /// the prefill is complete, guaranteeing the cache is warm.
+    ///
+    /// Called during speech with partial user transcripts so that by SpeechEnd
+    /// the cache already holds history + most of the user's words.
+    pub async fn prefill_cache(&self, messages: Vec<serde_json::Value>) -> Result<()> {
         let mut payload = serde_json::json!({
             "model": self.model,
             "messages": messages,
-            "max_tokens": 1,
+            "max_tokens": 0,
             "temperature": self.temperature,
-            "stream": true,
+            "stream": false,
         });
         if self.llama_extensions {
             payload["cache_prompt"] = serde_json::json!(true);
             payload["slot_id"] = serde_json::json!(self.slot_id);
-        } else {
-            payload["enable_thinking"] = serde_json::json!(false);
-            payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
         }
 
         let response = self
@@ -468,17 +468,15 @@ impl LlamaClient {
             .json(&payload)
             .send()
             .await
-            .context("Speculative prefill: failed to reach LLM server")?;
+            .context("Prefill cache: failed to reach LLM server")?;
 
         if !response.status().is_success() {
             let status = response.status();
-            anyhow::bail!("Speculative prefill error {}", status);
+            anyhow::bail!("Prefill cache error {}", status);
         }
 
-        // Stream the body to keep the connection alive while the server prefills.
-        // tokio cancels this future when the JoinHandle is aborted by the caller.
-        let mut stream = response.bytes_stream();
-        while stream.next().await.is_some() {}
+        // Consume the response body.
+        let _ = response.bytes().await;
         Ok(())
     }
 

@@ -39,7 +39,7 @@ Hive is built from the ground up for voice interaction:
 
 - 🔊 Real-time voice capture (CPAL) with VAD (Silero) and pre-roll buffer
 - 🎤 Whisper STT (CoreML Neural Engine or Metal GPU, cached across utterances)
-- 🤖 Streaming LLM via llama.cpp or mlx-lm (KV-cache reuse, sub-second latency)
+- 🤖 Streaming LLM via llama.cpp or mlx-lm (KV-cache reuse, during-speech prefill, sub-second latency)
 - 🔊 Sentence-by-sentence TTS playback — speaks while generating next sentence
 - ⚡ **Barge-in** — user speech cancels active pipeline instantly
 - 💾 Persistent SQLite conversation history with session restoration
@@ -429,7 +429,8 @@ AUDIO_INPUT_DEVICE="Poly Sync 20-M#1"   # second match (Bluetooth)
 1. Reduce `VAD_SILENCE_MS` to 400ms
 2. Use CoreML STT (`WHISPER_COREML=1`)
 3. Verify LLM server has Metal acceleration: `-ngl 99 --flash-attn on`
-4. Check performance logs: `RUST_LOG=performance=debug`
+4. During-speech KV-cache prefill is active by default for llama.cpp in Active mode — partial transcripts are sent to the LLM with `max_tokens=0` while the user speaks, so the cache is warm by SpeechEnd
+5. Check performance logs: `RUST_LOG=performance=debug,llm=debug`
 
 <!-- See [doc/TROUBLESHOOTING.md](doc/TROUBLESHOOTING.md) for more issues. -->
 
