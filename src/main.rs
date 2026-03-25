@@ -7,6 +7,8 @@ mod llm;
 mod profile;
 mod stt;
 mod tools;
+#[cfg(feature = "tui")]
+mod tui;
 mod tts;
 
 use anyhow::Result;
@@ -25,9 +27,9 @@ use tracing_subscriber::EnvFilter;
 
 /// Shared state between the pipeline tasks.
 /// Properties documented in doc/PROCESS_ARCHITECTURE.md.
-struct SharedSession {
+pub(crate) struct SharedSession {
     /// Latest text transcribed by STT. Replaced on each new STT result.
-    transliterated_text: Mutex<String>,
+    pub(crate) transliterated_text: Mutex<String>,
     /// LLM token stream buffer — text not yet split into sentences.
     assistant_text: Mutex<String>,
     /// Sentences ready for TTS playback.
@@ -36,6 +38,8 @@ struct SharedSession {
     llm_post_finished: AtomicBool,
     /// True while the LLM task is actively processing a turn.
     llm_busy: AtomicBool,
+    /// True when the pending transliterated_text came from TUI text input (not voice).
+    pub(crate) text_input_pending: AtomicBool,
 }
 
 impl SharedSession {
@@ -46,17 +50,18 @@ impl SharedSession {
             sentences: Mutex::new(VecDeque::new()),
             llm_post_finished: AtomicBool::new(false),
             llm_busy: AtomicBool::new(false),
+            text_input_pending: AtomicBool::new(false),
         }
     }
 }
 
 /// Signals and events for inter-task communication.
 /// Documented in doc/PROCESS_ARCHITECTURE.md.
-struct PipelineEvents {
+pub(crate) struct PipelineEvents {
     /// VAD_DETECTED: broadcast cancellation. All tasks must stop immediately.
     cancel_tx: broadcast::Sender<()>,
     /// VAD_FINISH: silence detected; LLM task should start processing.
-    vad_finish: Arc<Notify>,
+    pub(crate) vad_finish: Arc<Notify>,
     /// LLM_POST_RECEIVED: a token arrived from the LLM stream.
     llm_post_received: Arc<Notify>,
     /// SENTENCE_READY: a sentence has been pushed to shared.sentences.
@@ -154,6 +159,19 @@ async fn async_main() -> Result<()> {
     // Disable whisper prints into console
     install_logging_hooks();
 
+    #[cfg(feature = "tui")]
+    {
+        let log_file = std::fs::File::create("voicebot.log")
+            .expect("failed to create voicebot.log");
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            )
+            .with_writer(std::sync::Mutex::new(log_file))
+            .with_ansi(false)
+            .init();
+    }
+    #[cfg(not(feature = "tui"))]
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -518,6 +536,13 @@ async fn async_main() -> Result<()> {
     // spawn_blocking and cannot be abort()'ed from async code directly.
     let play_cancel = Arc::new(AtomicBool::new(false));
 
+    // TTS mute toggle (controlled from TUI).
+    let tts_muted = Arc::new(AtomicBool::new(false));
+
+    // TUI event channel — pipeline tasks send events here for the TUI to render.
+    #[cfg(feature = "tui")]
+    let (tui_tx, tui_rx) = tokio::sync::mpsc::unbounded_channel::<tui::events::TuiEvent>();
+
     // Agent results that arrived while LLM was busy — processed in order when idle.
     let mut pending_agent_results: std::collections::VecDeque<(String, String)> =
         std::collections::VecDeque::new();
@@ -538,10 +563,14 @@ async fn async_main() -> Result<()> {
         let tools_c             = Arc::clone(&tools);
         let shared_history_c    = Arc::clone(&shared_history);
         let turn_commit_c       = Arc::clone(&turn_commit_counter);
+        #[cfg(feature = "tui")]
+        let tui_tx_c = tui_tx.clone();
         tokio::spawn(async move {
             llm_task(
                 shared_c, events_c, llm_session_c, llm_client_c,
                 db_c, session_id, tools_c, shared_history_c, turn_commit_c,
+                #[cfg(feature = "tui")]
+                tui_tx_c,
             ).await;
         });
     }
@@ -556,8 +585,15 @@ async fn async_main() -> Result<()> {
         let tts_c         = Arc::clone(&tts);
         let audio_out_c   = Arc::clone(&audio_output);
         let play_cancel_c = Arc::clone(&play_cancel);
+        let tts_muted_c   = Arc::clone(&tts_muted);
+        #[cfg(feature = "tui")]
+        let tui_tx_c = tui_tx.clone();
         tokio::spawn(async move {
-            tts_task(shared_c, events_c, tts_c, audio_out_c, tts_sample_rate, play_cancel_c).await;
+            tts_task(shared_c, events_c, tts_c, audio_out_c, tts_sample_rate, play_cancel_c,
+                     tts_muted_c,
+                     #[cfg(feature = "tui")]
+                     tui_tx_c,
+            ).await;
         });
     }
     {
@@ -575,6 +611,21 @@ async fn async_main() -> Result<()> {
     }
 
     info!(target: "voicebot", "Ready. Speak to interact...");
+
+    // ── TUI ─────────────────────────────────────────────────────────────────
+    #[cfg(feature = "tui")]
+    {
+        let shared_c = Arc::clone(&shared);
+        let events_c = Arc::clone(&events);
+        let tts_muted_c = Arc::clone(&tts_muted);
+        tokio::spawn(async move {
+            if let Err(e) = tui::run(tui_rx, shared_c, events_c, tts_muted_c).await {
+                tracing::error!("TUI error: {e}");
+            }
+            // TUI quit → exit process.
+            std::process::exit(0);
+        });
+    }
 
     // ── Startup greeting ──────────────────────────────────────────────────────
     {
@@ -667,6 +718,10 @@ async fn async_main() -> Result<()> {
                     VadResult::SpeechStart => {
                         t_speech_start = Some(Instant::now());
                         info!(target: "performance", "[+0ms] SpeechStart");
+                        #[cfg(feature = "tui")]
+                        tui_tx.send(tui::events::TuiEvent::StateChange(
+                            tui::events::PipelineState::Listening,
+                        )).ok();
                         last_speech_at = Instant::now();
                         // ── VAD_DETECTED: cancel any active LLM/TTS pipeline ──
                         // Fired unconditionally: llm_busy becomes false when the LLM
@@ -721,6 +776,10 @@ async fn async_main() -> Result<()> {
                         let duration_ms = audio.len() as u32 * 1000 / source_sample_rate;
 
                         info!(target: "pipeline", "Speech: {}ms (segment {}ms)", duration_ms, segment_duration_ms);
+                        #[cfg(feature = "tui")]
+                        tui_tx.send(tui::events::TuiEvent::StateChange(
+                            tui::events::PipelineState::Transcribing,
+                        )).ok();
                         let vad_elapsed = t_speech_start.take()
                             .map(|t| t.elapsed().as_millis()).unwrap_or(0);
                         info!(target: "performance", "[+{}ms] VAD end ({}ms speech)", vad_elapsed, duration_ms);
@@ -938,6 +997,8 @@ async fn llm_task(
     tools: Arc<ToolRegistry>,
     shared_history: Arc<RwLock<String>>,
     turn_commit_counter: Arc<AtomicU64>,
+    #[cfg(feature = "tui")]
+    tui_tx: tui::events::TuiEventTx,
 ) {
     let pipeline_id = PIPELINE_RUN_ID.fetch_add(1, Ordering::SeqCst);
     let mut cancel_rx = events.cancel_tx.subscribe();
@@ -966,6 +1027,22 @@ async fn llm_task(
         // because the audio loop already validated them before firing vad_finish.
         // (Voice utterances are filtered inside the SpeechEnd spawned task.)
         info!(target: "pipeline", "[pipe={}] User: {}", pipeline_id, text);
+
+        #[cfg(feature = "tui")]
+        {
+            let source = if shared.text_input_pending.swap(false, Ordering::SeqCst) {
+                tui::events::InputSource::Text
+            } else {
+                tui::events::InputSource::Voice
+            };
+            tui_tx.send(tui::events::TuiEvent::UserMessage {
+                text: text.clone(),
+                source,
+            }).ok();
+            tui_tx.send(tui::events::TuiEvent::StateChange(
+                tui::events::PipelineState::Thinking,
+            )).ok();
+        }
 
         let messages_snapshot = llm_session.lock().unwrap().messages.clone();
 
@@ -1042,6 +1119,8 @@ async fn llm_task(
                                     llm_text.push_str(&t);
                                     shared.assistant_text.lock().unwrap().push_str(&t);
                                     events.llm_post_received.notify_one();
+                                    #[cfg(feature = "tui")]
+                                    tui_tx.send(tui::events::TuiEvent::AssistantToken(t)).ok();
                                 }
                                 Some(StreamToken::ToolCall { name, args }) => {
                                     tool_call = Some((name, args));
@@ -1052,6 +1131,8 @@ async fn llm_task(
                                     shared.llm_post_finished.store(true, Ordering::SeqCst);
                                     events.llm_post_received.notify_one(); // wake SEN to flush
                                     events.llm_post_finished.notify_one(); // wake SUM
+                                    #[cfg(feature = "tui")]
+                                    tui_tx.send(tui::events::TuiEvent::AssistantDone).ok();
                                     break;
                                 }
                             }
@@ -1070,6 +1151,11 @@ async fn llm_task(
                     Some((name, args)) => {
                         let result = tools.execute(&name, &args).await;
                         info!(target: "pipeline", "Tool[{}] `{}` → {}", iter, name, result);
+                        #[cfg(feature = "tui")]
+                        tui_tx.send(tui::events::TuiEvent::ToolCall {
+                            name: name.clone(),
+                            result: result.clone(),
+                        }).ok();
 
                         let tool_call_id = format!("call_{}_{}", name, iter);
                         messages.push(serde_json::json!({
@@ -1131,6 +1217,10 @@ async fn llm_task(
         }
 
         shared.llm_busy.store(false, Ordering::SeqCst);
+        #[cfg(feature = "tui")]
+        tui_tx.send(tui::events::TuiEvent::StateChange(
+            tui::events::PipelineState::Idle,
+        )).ok();
 
         // Drain stale cancels before going back to sleep.
         while cancel_rx.try_recv().is_ok() {}
@@ -1191,6 +1281,9 @@ async fn tts_task(
     audio_output: Arc<AudioOutput>,
     tts_sample_rate: u32,
     play_cancel: Arc<AtomicBool>,
+    tts_muted: Arc<AtomicBool>,
+    #[cfg(feature = "tui")]
+    tui_tx: tui::events::TuiEventTx,
 ) {
     let mut cancel_rx = events.cancel_tx.subscribe();
     let mut play_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
@@ -1223,6 +1316,16 @@ async fn tts_task(
                 None => continue,
             }
         };
+
+        // If TTS is muted, skip synthesis and playback entirely.
+        if tts_muted.load(Ordering::SeqCst) {
+            continue;
+        }
+
+        #[cfg(feature = "tui")]
+        tui_tx.send(tui::events::TuiEvent::StateChange(
+            tui::events::PipelineState::Speaking,
+        )).ok();
 
         // Start synthesis while the previous sentence is still playing.
         let tts_c = Arc::clone(&tts);
@@ -1384,6 +1487,8 @@ async fn run_pipeline(
             llm_task(
                 shared_c, events_c, llm_session_c, llm_client_c,
                 db_c, session_id, tools_c, shared_history_c, turn_commit_c,
+                #[cfg(feature = "tui")]
+                { let (tx, _) = tokio::sync::mpsc::unbounded_channel(); tx },
             ).await;
         })
     };
@@ -1398,8 +1503,13 @@ async fn run_pipeline(
         let tts_c = Arc::clone(&tts);
         let audio_out_c = Arc::clone(&audio_output);
         let play_cancel_c = Arc::clone(&play_cancel);
+        let tts_muted_c = Arc::new(AtomicBool::new(false));
         tokio::spawn(async move {
-            tts_task(shared_c, events_c, tts_c, audio_out_c, tts_sample_rate, play_cancel_c).await;
+            tts_task(shared_c, events_c, tts_c, audio_out_c, tts_sample_rate, play_cancel_c,
+                     tts_muted_c,
+                     #[cfg(feature = "tui")]
+                     { let (tx, _) = tokio::sync::mpsc::unbounded_channel(); tx },
+            ).await;
         })
     };
     let h_sum = {

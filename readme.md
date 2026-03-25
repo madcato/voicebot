@@ -60,6 +60,17 @@ Hive is built from the ground up for voice interaction:
 - **LLM providers**: llama.cpp (local GGUF), mlx-lm (Apple MLX framework)
 - **Agent delegation**: `run_agent` / `run_agent_async` for complex tasks
 
+### Terminal UI (TUI) ✅
+
+- 💻 Full terminal interface with scrollable conversation view
+- ⌨️ Type queries alongside voice — both input modes work simultaneously
+- 🔊 Toggle TTS on/off with `Ctrl+T`
+- 🔧 Tool call display inline in conversation
+- 📊 Pipeline status indicator (Idle/Listening/Transcribing/Thinking/Speaking)
+- 📝 Logs redirected to `voicebot.log` when TUI is active
+
+Enable with: `cargo run --features tui`
+
 ### Roadmap 🚧
 
 - Calendar, email, file system access
@@ -308,8 +319,14 @@ See [.env.example](.env.example) for complete environment variable reference.
 # Standard build
 cargo build --release
 
+# Build with TUI (terminal user interface)
+cargo build --release --features tui
+
 # Run with debug
 cargo run
+
+# Run with TUI
+cargo run --features tui
 
 # Run tests (unit tests only)
 cargo test
@@ -334,6 +351,19 @@ RUST_LOG=tts=debug,audio=debug cargo run
 ```
 
 See [Documentation](doc/LOGGING.md) for all log targets.
+
+When running with `--features tui`, all logs are redirected to `voicebot.log` in the working directory.
+
+### TUI Key Bindings
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Send typed message |
+| `Ctrl+T` | Toggle TTS on/off |
+| `PageUp/PageDown` | Scroll conversation |
+| `Esc` / `Ctrl+C` | Quit |
+
+Voice input and text input work simultaneously — speak or type at any time.
 
 ### Benchmarks
 
