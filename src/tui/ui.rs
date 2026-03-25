@@ -104,6 +104,24 @@ fn render_conversation(frame: &mut Frame, app: &App, area: Rect) {
                     Style::default().fg(Color::DarkGray).italic(),
                 )]));
             }
+            Role::Error => {
+                let time = msg.timestamp.format("%H:%M:%S").to_string();
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "ERROR ",
+                        Style::default()
+                            .fg(Color::Red)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(time, Style::default().fg(Color::DarkGray)),
+                ]));
+                for content_line in msg.content.lines() {
+                    lines.push(Line::from(vec![Span::styled(
+                        format!("  {content_line}"),
+                        Style::default().fg(Color::Red),
+                    )]));
+                }
+            }
         }
     }
 
