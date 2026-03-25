@@ -69,7 +69,7 @@ fn render_conversation(frame: &mut Frame, app: &App, area: Rect) {
                     InputSource::Voice => " (voice)",
                     InputSource::Text => "",
                 };
-                let time = msg.timestamp.format("%H:%M").to_string();
+                let time = msg.timestamp.format("%H:%M:%S").to_string();
                 lines.push(Line::from(vec![
                     Span::styled(
                         format!("You{source_label} "),
@@ -84,7 +84,7 @@ fn render_conversation(frame: &mut Frame, app: &App, area: Rect) {
                 }
             }
             Role::Assistant => {
-                let time = msg.timestamp.format("%H:%M").to_string();
+                let time = msg.timestamp.format("%H:%M:%S").to_string();
                 lines.push(Line::from(vec![
                     Span::styled(
                         "Assistant ",

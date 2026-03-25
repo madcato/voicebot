@@ -170,7 +170,7 @@ async fn main() -> Result<()> {
         let messages = session.all_messages_api();
 
         let t = Instant::now();
-        let mut rx = llm_client.stream(&messages, &[]).await?;
+        let (mut rx, _stream_handle) = llm_client.stream(&messages, &[]).await?;
         let mut llm_ttft_ms: Option<u128> = None;
         let mut full_response = String::new();
 
