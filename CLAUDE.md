@@ -2,6 +2,14 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## ⚠️ Legal Notice
+
+**Jarvis® is a trademark of Marvel Studios/Disney.** This is an independent fan project with no commercial intent. See [LICENSE-VOICEBOT.md](LICENSE-VOICEBOT.md) for full details.
+
+## Project Name
+
+This project is called **Jarvis Voicebot**. All documentation and code should refer to it as "Jarvis" (not "Hive" or "Voicebot" alone).
+
 ## Commands
 
 ```bash
