@@ -1,4 +1,4 @@
-# Hive Voicebot
+# Jarvis Voicebot 🤖
 
 <div align="center">
 
@@ -10,19 +10,21 @@ Real-time voice interaction with natural conversation flow, proactive assistance
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 [![Platform](https://img.shields.io/badge/platform-macOS-red.svg)](https://www.apple.com/macos)
 
+> **⚠️ Legal Notice:** Jarvis® is a trademark of Marvel Studios/Disney. This is an independent fan project with no commercial intent. See [LICENSE-VOICEBOT.md](LICENSE-VOICEBOT.md) for full details.
+
 </div>
 
 ---
 
 ## Overview
 
-Hive Voicebot is a **voice-first AI assistant** designed for natural, real-time conversation with your computer. Unlike traditional chatbots that you type to, Hive listens and speaks — it runs as an always-on background daemon that responds instantly when you talk.
+Jarvis Voicebot is a **voice-first AI assistant** designed for natural, real-time conversation with your computer. Unlike traditional chatbots that you type to, Jarvis listens and speaks — it runs as an always-on background daemon that responds instantly when you talk.
 
-### What makes Hive different?
+### What makes Jarvis different?
 
 A chatbot answers questions. A butler anticipates needs.
 
-Hive is built from the ground up for voice interaction:
+Jarvis is built from the ground up for voice interaction:
 - **Always-listening** with automatic speech detection (no push-to-talk)
 - **Real-time responses** under 3 second latency
 - **Natural conversation flow** with context awareness and personality
@@ -225,7 +227,7 @@ The output depends on the `TTS_PROVIDER` setting:
 
 ## Architecture
 
-Hive Voicebot is intentionally **narrow in scope**: it owns the audio pipeline and conversational experience. Complex tasks are delegated to an external agent via stdin/stdout protocol.
+Jarvis Voicebot is intentionally **narrow in scope**: it owns the audio pipeline and conversational experience. Complex tasks are delegated to an external agent via stdin/stdout protocol.
 
 ### Why this separation?
 
@@ -233,7 +235,7 @@ Hive Voicebot is intentionally **narrow in scope**: it owns the audio pipeline a
 
 ```
 ┌─────────────────────────────────────────────┐
-│        HIVE VOICEBOT (fast layer)         │
+│         JARVIS VOICEBOT (fast layer)        │
 │                                             │
 │  • STT → LLM (7B) → TTS                    │
 │  • Barge-in, conversation awareness        │
@@ -244,7 +246,7 @@ Hive Voicebot is intentionally **narrow in scope**: it owns the audio pipeline a
 └─────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────┐
-│           EXTERNAL AGENT (power layer)     │
+│           EXTERNAL AGENT (power layer)      │
 │                                             │
 │  • Full tool suite                         │
 │  • File system, calendar, web, email       │
@@ -460,7 +462,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+This project is released under the **MIT License** with **commercialization restrictions**.
+
+⚠️ **Jarvis® is a trademark of Marvel Studios/Disney.** This is an independent fan project.
+
+See [LICENSE-VOICEBOT.md](LICENSE-VOICEBOT.md) for full legal details and license terms.
 
 ---
 
@@ -477,7 +483,7 @@ Built with:
 
 <div align="center">
 
-**Built with ❤️ by Daniel and the Hive Team**
+**Built with ❤️ by Daniel and the Jarvis Team**
 
 *Voice is the future of computing.*
 
