@@ -1,28 +1,38 @@
 #!/usr/bin/env python3
 """
-bench-omlx-models.py — omlx multi-model KV-cache benchmark
+bench-omlx-models.py — multi-model KV-cache benchmark (omlx / LM Studio / any OpenAI-compatible server)
 
 Tests TTFT, PP (prompt-processing rate), TG (token-generation rate), and KV-cache
-health for a list of models served by a running omlx instance.
+health for a list of models.
 
 For each model:
   1. Load request  — simple "Hola" to pull the model into GPU/RAM (not timed)
-  2. PP phase      — cold full-conversation prefill, max_tokens=1
+  2. PP phase      — cold full-conversation prefill (same params as hot trials)
                      measures cold TTFT and estimates PP rate (t/s)
-  3. KV warmup     — identical prompt, max_tokens=1, ensures cache is committed
-  4. N hot trials  — full generation with warm KV cache
-                     measures warm TTFT and TG rate
+  3. N hot trials  — identical repeated request, measures warm TTFT and TG rate
 
 KV-cache verdict: warm_TTFT << cold_TTFT  ⟹  cache is working.
 
 Usage:
-  python3 scripts/bench-omlx-models.py [omlx-model-dir]
+  python3 scripts/bench-omlx-models.py [model-dir]
+
+  # omlx (default)
+  BENCH_PORT=8001 python3 scripts/bench-omlx-models.py ~/models
+
+  # LM Studio
+  BENCH_PORT=1234 BENCH_TOKEN="" BENCH_PROVIDER=lmstudio python3 scripts/bench-omlx-models.py
 
 Env vars:
-  OMLX_PORT      omlx server port          (default 8001)
-  BENCH_TRIALS   hot measurement trials    (default 3)
-  BENCH_GEN      tokens to generate        (default 80)
-  OMLX_DIR       model directory           (default ~/.lmstudio/models)
+  BENCH_PORT       server port               (default 8000 for omlx, use 1234 for LM Studio)
+  BENCH_TOKEN      Bearer auth token         (default "asdf" for omlx, empty for LM Studio)
+  BENCH_PROVIDER   label shown in output     (default "omlx")
+  BENCH_TRIALS     hot measurement trials    (default 3)
+  BENCH_GEN        tokens to generate        (default 80)
+  OMLX_DIR         model directory for auto-start (default ~/.lmstudio/models)
+
+  # Legacy aliases (still accepted)
+  OMLX_PORT  →  BENCH_PORT
+  OMLX_TOKEN →  BENCH_TOKEN
 """
 
 import http.client
@@ -37,34 +47,73 @@ from statistics import mean, stdev
 
 # ── Model list ────────────────────────────────────────────────────────────────
 
+## OMLX
+# MODELS = [
+#     "Qwen3.5-27B-oQ3",
+#     "Qwen3.5-35B-A3B-MLX-oQ4",
+#     "GLM-4.7-Flash-MLX-4bit",
+#     "NVIDIA-Nemotron-3-Nano-30B-A3B-MLX-4bit",
+#     "Qwen3-30B-A3B-Instruct-2507-MLX-4bit",
+#     "Qwen3.5-27B-4bit",
+#     "Qwen3.5-2B-4bit",
+#     "Qwen3.5-2B-MLX-8bit",
+#     "Qwen3.5-35B-A3B-4bit",
+#     "Qwen3.5-35B-A3B-8bit",
+#     "Trinity-Mini-4bit",
+#     "Trinity-Nano-Preview-4bit",
+#     "Qwen3.5-4B-MLX-4bit",
+# ]
+
 MODELS = [
-    "Qwen3.5-27B-oQ3",
-    "Qwen3.5-35B-A3B-MLX-oQ4",
     "GLM-4.7-Flash-MLX-4bit",
-    "NVIDIA-Nemotron-3-Nano-30B-A3B-MLX-4bit",
-    "Qwen3-30B-A3B-Instruct-2507-MLX-4bit",
-    "Qwen3.5-27B-4bit",
-    "Qwen3.5-2B-4bit",
-    "Qwen3.5-2B-MLX-8bit",
-    "Qwen3.5-35B-A3B-4bit",
-    "Qwen3.5-35B-A3B-8bit",
-    "Trinity-Mini-4bit",
-    "Trinity-Nano-Preview-4bit",
-    "Qwen3.5-4B-MLX-4bit",
+    "nemotron-3-nano",
+    "qwen/qwen3-30b-a3b-2507",
+    "qwen3.5-35b-a3b@4bit",
+    "qwen3.5-35b-a3b@8bit",
+    "trinity-mini",
+    "trinity-nano-preview",
+    "qwen3.5-4b-mlx",
+    Qwen2.5-7B-Instruct — non-thinking Qwen, should cache fine
+  - Qwen2.5-14B-Instruct — bigger, still no thinking by default                                                      
+  - Phi-4-mini / Phi-4 — Microsoft, strong reasoning, no thinking overhead
+  - Gemma-3-4B-IT / Gemma-3-12B-IT — Google, fast, no thinking mode                                                  
+  - Mistral-7B-Instruct-v0.3 — reliable caching, well-tested                                                         
+  - Llama-3.2-3B-Instruct — tiny but surprisingly capable  
 ]
 
 # ── Conversation fixture ──────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = (
     "Eres Jarvis, el asistente personal de IA. Llevas años trabajando con él y le conoces bien.\n\n"
-    "CARÁCTER\nMezcla de Jarvis (Iron Man) y Alfred (Batman): profesional, ligeramente irónico, "
-    "humor seco y británico. Leal, discreto, eficiente. Nunca servil. Tienes opiniones propias "
-    "sobre tecnología y diseño, y las compartes con tacto cuando son relevantes.\n\n"
-    "FORMA DE HABLAR\n- Siempre en español salvo que el usuario cambie de idioma.\n"
+    "CARÁCTER\n"
+    "Mezcla de Jarvis (Iron Man) y Alfred (Batman): profesional, ligeramente irónico, humor seco "
+    "y británico. Leal, discreto, eficiente. Nunca servil. Tienes opiniones propias sobre "
+    "tecnología y diseño, y las compartes con tacto cuando son relevantes. Ocasionalmente haces "
+    "un comentario sarcástico, pero nunca a costa del usuario.\n\n"
+    "FORMA DE HABLAR\n"
+    "- Siempre en español salvo que el usuario cambie de idioma.\n"
     "- Llamas al usuario por \"señor\", nunca \"usuario\".\n"
     "- Respuestas concisas: 2-3 frases máximo salvo que pida más detalle.\n"
-    "- Hablas para ser escuchado: sin markdown, sin listas, sin símbolos.\n"
-    "- Cuando no sabes algo, lo dices. No inventas."
+    "- Hablas para ser escuchado: sin markdown, sin listas, sin símbolos, sin nada que un "
+    "sintetizador no pronuncie bien.\n"
+    "- Cuando no sabes algo, lo dices. No inventas.\n"
+    "- Antes de una acción irreversible, la describes y pides confirmación.\n\n"
+    "HERRAMIENTAS DISPONIBLES\n"
+    "- current_time: hora y fecha actuales.\n"
+    "- get_calendar_events: eventos del calendario para una fecha.\n"
+    "- create_calendar_event: crear evento o recordatorio en Calendar.app.\n"
+    "- read_clipboard / set_clipboard: leer o escribir el portapapeles.\n"
+    "- read_file: leer el contenido de un fichero (max 16 KB).\n"
+    "- open_app: abrir una aplicacion macOS por nombre.\n"
+    "- send_notification: enviar una notificacion macOS.\n"
+    "- run_shell: ejecutar un comando de terminal (disponible si SHELL_ENABLED=1).\n"
+    "- take_screenshot: capturar la pantalla y describir lo que hay en ella "
+    "(disponible si VISION_URL esta configurado).\n"
+    "- run_agent_async: delegar una tarea compleja al agente externo "
+    "(disponible si AGENT_COMMAND esta configurado). El agente trabaja en segundo plano "
+    "y el resultado llega en breve.\n\n"
+    "Usa las herramientas directamente cuando puedas. Para tareas complejas de multiples "
+    "pasos usa run_agent_async. No afirmes tener capacidades que no tienes."
 )
 
 HISTORY = [
@@ -92,10 +141,12 @@ NEW_QUESTION = (
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-OMLX_PORT  = int(os.environ.get("OMLX_PORT",    "8001"))
-TRIALS     = int(os.environ.get("BENCH_TRIALS", "3"))
-GEN_TOKENS = int(os.environ.get("BENCH_GEN",    "80"))
-OMLX_TOKEN = (os.environ.get("OMLX_TOKEN",    "asdf"))
+# BENCH_PORT / BENCH_TOKEN take precedence; OMLX_PORT / OMLX_TOKEN are legacy aliases.
+SERVER_PORT  = int(os.environ.get("BENCH_PORT",  os.environ.get("OMLX_PORT",  "8000")))
+SERVER_TOKEN =     os.environ.get("BENCH_TOKEN", os.environ.get("OMLX_TOKEN", "asdf"))
+PROVIDER     =     os.environ.get("BENCH_PROVIDER", "omlx")
+TRIALS       = int(os.environ.get("BENCH_TRIALS", "3"))
+GEN_TOKENS   = int(os.environ.get("BENCH_GEN",    "80"))
 
 HOST = "127.0.0.1"
 
@@ -111,8 +162,8 @@ ESTIMATED_PROMPT_TOKENS = max(1, int(len(_PROMPT_TEXT) / 3.5))
 
 def _auth_headers():
     h = {"Content-Type": "application/json"}
-    if OMLX_TOKEN:
-        h["Authorization"] = f"Bearer {OMLX_TOKEN}"
+    if SERVER_TOKEN:
+        h["Authorization"] = f"Bearer {SERVER_TOKEN}"
     return h
 
 
@@ -209,7 +260,13 @@ def _base_payload(model_id, max_tokens, stream):
         "max_tokens":           max_tokens,
         "temperature":          0.0,
         "stream":               stream,
+        # Disable reasoning/thinking via all known API conventions:
+        # - top-level field (omlx, some mlx-lm builds)
+        # - chat_template_kwargs (mlx-lm, omlx)
+        # - thinking budget = 0 (LM Studio / some OpenAI-compat servers)
+        "enable_thinking":      False,
         "chat_template_kwargs": {"enable_thinking": False},
+        "thinking":             {"type": "disabled"},
     }
 
 
@@ -231,18 +288,18 @@ def load_model(port, model_id):
 
 def measure_pp(port, model_id):
     """
-    Cold full-conversation prefill.
-    Sends the complete history (KV cache is empty for this prompt after the load
-    request used a different prompt).  max_tokens=1 so nearly all elapsed time
-    is prompt-processing.
+    Cold full-conversation prefill — identical parameters to the hot trials.
+    Using the same max_tokens as the hot trials ensures the server allocates
+    the same number of output KV slots, making the cold/warm TTFT comparison
+    valid.  The TTFT here is dominated by prompt-processing (840 tokens >> 1
+    output token), so it is still a good proxy for PP rate.
 
     Returns (cold_ttft_ms, pp_tps, prompt_tokens):
       cold_ttft_ms  — time from request start to first content token
       pp_tps        — estimated prompt-processing rate (tokens/s)
       prompt_tokens — from usage field if available, else estimated
     """
-    payload = _base_payload(model_id, max_tokens=1, stream=True)
-    payload["temperature"] = 0.0
+    payload = _base_payload(model_id, max_tokens=GEN_TOKENS, stream=True)
 
     t_start = time.perf_counter()
     t_first = None
@@ -386,7 +443,7 @@ def run_model(port, model_id, label, W):
 
     # KV-cache verdict: warm TTFT should be much lower than cold TTFT
     speedup = cold_ttft / avg_ttft if avg_ttft > 0 else 0.0
-    cache_ok = speedup >= 2.0  # at least 2× faster means cache is helping
+    cache_ok = speedup >= 3.0  # omlx block cache: ≥1 full block cached → >>3× TTFT speedup
 
     return {
         "label":      label,
@@ -413,11 +470,11 @@ def start_omlx(model_dir):
         "omlx", "serve",
         "--model-dir", model_dir,
         "--host",      HOST,
-        "--port",      str(OMLX_PORT),
+        "--port",      str(SERVER_PORT),
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        _wait_ready(OMLX_PORT, timeout=180)
+        _wait_ready(SERVER_PORT, timeout=180)
     except TimeoutError:
         proc.terminate()
         raise
@@ -443,24 +500,30 @@ def main():
     W = 72
     print()
     print("═" * W)
-    print("  omlx Multi-Model KV-Cache Benchmark")
+    print(f"  {PROVIDER.upper()} Multi-Model KV-Cache Benchmark")
     print("═" * W)
-    print(f"  Model dir   : {omlx_dir}")
+    print(f"  Provider    : {PROVIDER}  (port {SERVER_PORT})")
     print(f"  Models      : {len(MODELS)}")
     print(f"  History     : {len(HISTORY)} turns  →  warm KV cache  →  new question")
-    print(f"  New question: \"{NEW_QUESTION}\"")
+    print(f"  New question: \"{NEW_QUESTION[:60]}...\"")
     print(f"  Generate    : {GEN_TOKENS} tokens   Trials: {TRIALS}")
     print(f"  Est. prompt : ~{ESTIMATED_PROMPT_TOKENS} tokens")
 
-    # ── Start omlx or connect to existing instance ───────────────────────────
+    # ── Connect to or start the server ───────────────────────────────────────
     proc = None
     try:
-        _wait_ready(OMLX_PORT, timeout=3)
-        print(f"\n  omlx already running on port {OMLX_PORT} — using existing instance.")
+        _wait_ready(SERVER_PORT, timeout=3)
+        print(f"\n  {PROVIDER} already running on port {SERVER_PORT} — using existing instance.")
     except TimeoutError:
+        if PROVIDER.lower() in ("lmstudio", "lms"):
+            sys.exit(
+                f"Error: {PROVIDER} not reachable on port {SERVER_PORT}.\n"
+                f"Start LM Studio and enable the local server first."
+            )
+        # Fall back to launching omlx
         if not os.path.isdir(omlx_dir):
             sys.exit(f"Error: model directory not found: {omlx_dir}")
-        print(f"\n  Starting omlx (port {OMLX_PORT}) ... ", end="", flush=True)
+        print(f"\n  Starting omlx (port {SERVER_PORT}) ... ", end="", flush=True)
         try:
             proc = start_omlx(omlx_dir)
             print("ready")
@@ -468,7 +531,7 @@ def main():
             sys.exit(f"Failed to start omlx: {e}")
 
     # ── Discover available models ─────────────────────────────────────────────
-    available = _get_models(OMLX_PORT)
+    available = _get_models(SERVER_PORT)
     print(f"\n  Available models ({len(available)}):")
     for mid in available:
         print(f"    • {mid}")
@@ -486,7 +549,7 @@ def main():
         if model_id != target:
             print(f"  Matched model ID: {model_id}")
 
-        result = run_model(OMLX_PORT, model_id, label, W)
+        result = run_model(SERVER_PORT, model_id, label, W)
         if result:
             all_results.append(result)
 
@@ -549,7 +612,7 @@ def main():
                 print(f"    • {r['label']}  (cold {r['cold_ttft']:.0f} ms  →  warm {r['ttft']:.0f} ms  speedup {r['speedup']:.1f}×)")
         else:
             print()
-            print("  KV cache: all models show ≥2× TTFT speedup  ✓")
+            print("  KV cache: all models show ≥3× TTFT speedup  ✓")
 
     print()
     print("═" * W)
