@@ -442,52 +442,6 @@ impl LlamaClient {
             .to_string())
     }
 
-    /// Fire a speculative KV-cache warm-up request without waiting for tokens.
-    ///
-    /// Sends the current session messages so llama.cpp starts computing KV
-    /// vectors.  The caller aborts the spawned task after a short timeout —
-    /// the server continues prefilling in the background.
-    pub async fn prefill_warm(&self, messages: Vec<serde_json::Value>) -> Result<()> {
-        let mut payload = serde_json::json!({
-            "model": self.model,
-            "messages": messages,
-            "max_tokens": 1,
-            "temperature": self.temperature,
-            "stream": true,
-        });
-        if self.llama_extensions {
-            payload["cache_prompt"] = serde_json::json!(true);
-            payload["slot_id"] = serde_json::json!(self.slot_id);
-        } else {
-            payload["enable_thinking"] = serde_json::json!(false);
-            payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
-        }
-
-        let response = self
-            .post_chat()
-            .json(&payload)
-            .send()
-            .await
-            .context("Speculative prefill: failed to reach LLM server")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            anyhow::bail!("Speculative prefill error {}", status);
-        }
-
-        // Stream the body to keep the connection alive while the server prefills.
-        // tokio cancels this future when the JoinHandle is aborted by the caller.
-        let mut stream = response.bytes_stream();
-        while stream.next().await.is_some() {}
-        Ok(())
-    }
-
-    /// Returns true if the backend supports speculative KV-cache prefill.
-    /// Only llama.cpp (`cache_prompt=true` + `slot_id`) benefits from this.
-    pub fn supports_prefill_warm(&self) -> bool {
-        self.llama_extensions
-    }
-
     /// Check if the server is reachable.
     #[allow(dead_code)]
     pub async fn health_check(&self, base_url: &str) -> bool {

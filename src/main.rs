@@ -40,6 +40,10 @@ pub(crate) struct SharedSession {
     llm_busy: AtomicBool,
     /// True when the pending transliterated_text came from TUI text input (not voice).
     pub(crate) text_input_pending: AtomicBool,
+    /// Timestamp of the most recent VAD SpeechEnd — used for end-to-end latency logging.
+    pub(crate) t_vad_end: Mutex<Option<Instant>>,
+    /// Timestamp of the POST sent to LLM - used to calculate TTFT
+    pub(crate) t_llm_post_send: Mutex<Option<Instant>>,
 }
 
 impl SharedSession {
@@ -51,6 +55,8 @@ impl SharedSession {
             llm_post_finished: AtomicBool::new(false),
             llm_busy: AtomicBool::new(false),
             text_input_pending: AtomicBool::new(false),
+            t_vad_end: Mutex::new(None),
+            t_llm_post_send: Mutex::new(None),
         }
     }
 }
@@ -796,6 +802,7 @@ async fn async_main() -> Result<()> {
                         let vad_elapsed = t_speech_start.take()
                             .map(|t| t.elapsed().as_millis()).unwrap_or(0);
                         info!(target: "performance", "[+{}ms] VAD end ({}ms speech)", vad_elapsed, duration_ms);
+                        *shared.t_vad_end.lock().unwrap() = Some(Instant::now());
 
                         last_speech_at = Instant::now();
 
@@ -956,6 +963,9 @@ async fn async_main() -> Result<()> {
 
                             // Store final transcript and wake the LLM task.
                             *shared_c.transliterated_text.lock().unwrap() = final_text;
+                            if let Some(t0) = shared_c.t_vad_end.lock().unwrap().as_ref() {
+                                info!(target: "performance", "[+{}ms] STT done → VAD_FINISH", t0.elapsed().as_millis());
+                            }
                             events_c.vad_finish.notify_one();
                         });
                     }
@@ -1093,35 +1103,14 @@ async fn llm_task(
         shared.llm_post_finished.store(false, Ordering::SeqCst);
         shared.assistant_text.lock().unwrap().clear();
 
-        // Speculative KV-cache prefill (llama.cpp only).
-        // Fire-and-forget: initiate the request so llama.cpp starts prefilling
-        // the full prompt (with user turn), then abort after 5ms — the server
-        // continues prefilling in the background while we set up the real stream.
-        let use_prefill = llm_client.supports_prefill_warm();
-        let spec_msgs = if use_prefill { llm_session.lock().unwrap().all_messages_api() } else { vec![] };
-        let spec_client = llm_client.clone();
-        let mut spec_handle = tokio::spawn(async move {
-            if use_prefill {
-                if let Err(e) = spec_client.prefill_warm(spec_msgs).await {
-                    debug!(target: "llm", "Speculative prefill ended: {e}");
-                }
-            }
-        });
-        tokio::select! {
-            _ = &mut spec_handle => {}
-            _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {
-                spec_handle.abort();
-                let _ = spec_handle.await;
-            }
-        }
-
         // Tool call loop — allows the model to call tools before its spoken response.
+        let tool_defs = tools.tool_definitions();
         let mut messages = llm_session.lock().unwrap().all_messages_api();
         let base_msg_len = messages.len();
-        let tool_defs = tools.tool_definitions();
         let mut final_response = String::new();
         let mut committed = false;
         let mut cancelled = false;
+        let mut first_token_logged = false;
 
         'pipeline: {
             'tool_loop: for iter in 0..MAX_TOOL_ITERATIONS {
@@ -1136,6 +1125,8 @@ async fn llm_task(
                     }
                 };
 
+                *shared.t_llm_post_send.lock().unwrap() = Some(Instant::now());
+
                 let mut token_rx = token_rx;
                 let mut llm_text = String::new();
                 let mut tool_call: Option<(String, String)> = None;
@@ -1146,6 +1137,12 @@ async fn llm_task(
                         token = token_rx.recv() => {
                             match token {
                                 Some(StreamToken::Content(t)) => {
+                                    if !first_token_logged {
+                                        first_token_logged = true;
+                                        if let Some(t0) = shared.t_llm_post_send.lock().unwrap().as_ref() {
+                                            info!(target: "performance", "[+{}ms] LLM first token (TTFT)", t0.elapsed().as_millis());
+                                        }
+                                    }
                                     llm_text.push_str(&t);
                                     shared.assistant_text.lock().unwrap().push_str(&t);
                                     events.llm_post_received.notify_one();
@@ -1264,6 +1261,7 @@ async fn llm_task(
 async fn sen_task(shared: Arc<SharedSession>, events: Arc<PipelineEvents>) {
     let mut cancel_rx = events.cancel_tx.subscribe();
     let mut splitter = SentenceSplitter::new();
+    let mut first_sentence_logged = false;
 
     loop {
         let cancelled = tokio::select! {
@@ -1274,6 +1272,7 @@ async fn sen_task(shared: Arc<SharedSession>, events: Arc<PipelineEvents>) {
         if cancelled {
             shared.assistant_text.lock().unwrap().clear();
             splitter = SentenceSplitter::new();
+            first_sentence_logged = false;
             while cancel_rx.try_recv().is_ok() {}
             continue;
         }
@@ -1296,6 +1295,12 @@ async fn sen_task(shared: Arc<SharedSession>, events: Arc<PipelineEvents>) {
         }
 
         for sentence in ready_sentences {
+            if !first_sentence_logged {
+                first_sentence_logged = true;
+                if let Some(t0) = shared.t_vad_end.lock().unwrap().as_ref() {
+                    info!(target: "performance", "[+{}ms] first sentence ready → TTS queue", t0.elapsed().as_millis());
+                }
+            }
             shared.sentences.lock().unwrap().push_back(sentence);
             events.sentence_ready.notify_one();
         }
@@ -1318,6 +1323,7 @@ async fn tts_task(
 ) {
     let mut cancel_rx = events.cancel_tx.subscribe();
     let mut play_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
+    let mut first_sentence = true;
 
     loop {
         // Drain the queue immediately; only block when it's empty.
@@ -1339,6 +1345,7 @@ async fn tts_task(
                 shared.sentences.lock().unwrap().clear();
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 play_cancel.store(false, Ordering::SeqCst);
+                first_sentence = true;
                 while cancel_rx.try_recv().is_ok() {}
                 continue;
             }
@@ -1381,6 +1388,7 @@ async fn tts_task(
                 shared.sentences.lock().unwrap().clear();
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 play_cancel.store(false, Ordering::SeqCst);
+                first_sentence = true;
                 while cancel_rx.try_recv().is_ok() {}
                 continue;
             }
@@ -1390,6 +1398,7 @@ async fn tts_task(
         if cancel_rx.try_recv().is_ok() {
             synth_handle.abort();
             shared.sentences.lock().unwrap().clear();
+            first_sentence = true;
             while cancel_rx.try_recv().is_ok() {}
             continue;
         }
@@ -1410,6 +1419,12 @@ async fn tts_task(
             }
         };
 
+        if first_sentence {
+            first_sentence = false;
+            if let Some(t0) = shared.t_vad_end.lock().unwrap().as_ref() {
+                info!(target: "performance", "[+{}ms] Latency s2s", t0.elapsed().as_millis());
+            }
+        }
         let out_c    = Arc::clone(&audio_output);
         let cancel_c = Arc::clone(&play_cancel);
         play_handle = Some(tokio::task::spawn_blocking(move || {
