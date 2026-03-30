@@ -203,8 +203,12 @@ impl AudioOutput {
         // Drain tail: silence frames served after all audio content has been
         // written into CPAL's buffer. This keeps the stream alive long enough
         // for CoreAudio/ALSA to flush its internal buffers to the DAC.
-        // 400 ms is conservative but harmless — it falls entirely in silence.
-        let drain_samples = (self.sample_rate() as usize * self.channels() as usize) * 400 / 1000;
+        // 150ms is sufficient for CoreAudio; reduces inter-sentence gap vs 400ms.
+        let drain_ms: usize = std::env::var("AUDIO_DRAIN_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(150);
+        let drain_samples = (self.sample_rate() as usize * self.channels() as usize) * drain_ms / 1000;
         let stop_pos = total + drain_samples;
 
         let buf = Arc::new(prepared);

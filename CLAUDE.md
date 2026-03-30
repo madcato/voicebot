@@ -87,7 +87,7 @@ Microphone
 **`src/tts/`** — Text-to-Speech
 - `say.rs`: macOS `say` subprocess wrapper; outputs raw i16 PCM at 22050 Hz via `--data-format=LEI16@22050 -o /dev/stdout`; voice configured via `SAY_VOICE` env var (default `"Marisol (Enhanced)"`)
 - `piper.rs`: Piper subprocess wrapper (kept for reference; not active)
-- `sentence.rs`: buffers incoming token stream; emits complete sentences on punctuation boundaries (`. ! ? ; :` followed by space or end)
+- `sentence.rs`: buffers incoming token stream; emits complete sentences on punctuation boundaries (`. ! ? ; :` followed by space or end). First sentence of each response uses aggressive early splitting (commas, dashes, or word-count threshold) to minimize time-to-first-audio.
 - **Planned**: `kokoro.rs` — Kokoro TTS via onnxruntime (higher quality, offline ONNX model)
 
 **`src/session/`** — Conversation state (simplified)
@@ -96,9 +96,11 @@ Microphone
 **`src/config.rs`** — Environment-based config
 - `AUDIO_SAMPLE_RATE` (default 16000), `AUDIO_CHANNELS` (default 1), `AUDIO_DEVICE`, `LIST_AUDIO_DEVICES`
 - `VOICEBOT_LANGUAGE` — `es` (default) or `en`
-- `LLM_URL` — llama.cpp server URL (default `http://localhost:8080`)
+- `LLM_URL` — llama.cpp server URL (default `http://127.0.0.1:8080`)
 - `LLM_SLOT_ID` — llama.cpp KV-cache slot (default 0)
-- `LLM_MAX_TOKENS` — max tokens per response (default 400)
+- `LLM_MAX_TOKENS` — max tokens per response (default 200)
+- `WHISPER_THREADS` — CPU threads for Whisper decoding (default 0 = auto)
+- `AUDIO_DRAIN_MS` — silence tail after playback in ms (default 150)
 - `LLM_SYSTEM_PROMPT` — system prompt text
 - `WHISPER_MODEL` — path to whisper GGML model file (default `models/ggml-large-v3-turbo.bin`)
 - `SAY_VOICE` — macOS voice name (default `"Marisol (Enhanced)"`); list voices with `say -v ?`

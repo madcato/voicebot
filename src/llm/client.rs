@@ -135,6 +135,8 @@ impl LlamaClient {
     ) -> Self {
         let client = reqwest::Client::builder()
             .tcp_keepalive(Duration::from_secs(60))
+            .tcp_nodelay(true) // Disable Nagle — send SSE tokens immediately
+            .connect_timeout(Duration::from_secs(5)) // Fail fast on unreachable server
             .pool_max_idle_per_host(4)
             .pool_idle_timeout(Duration::from_secs(90))
             .build()

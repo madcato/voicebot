@@ -26,6 +26,9 @@ pub struct Config {
     // ── STT ──────────────────────────────────────────────────────────────────
     /// Path to whisper.cpp GGML model file (.bin)
     pub whisper_model: String,
+    /// Number of CPU threads for Whisper decoding (0 = auto).
+    /// Set to physical core count for best throughput.
+    pub whisper_threads: u32,
 
     // ── LLM ──────────────────────────────────────────────────────────────────
     /// LLM server base URL (OpenAI-compatible)
@@ -189,10 +192,14 @@ impl Config {
             // STT
             whisper_model: env::var("WHISPER_MODEL")
                 .unwrap_or_else(|_| "models/ggml-large-v3-turbo.bin".to_string()),
+            whisper_threads: env::var("WHISPER_THREADS")
+                .unwrap_or_else(|_| "0".to_string())
+                .parse()
+                .context("Invalid WHISPER_THREADS")?,
 
             // LLM
             llm_url: env::var("LLM_URL")
-                .unwrap_or_else(|_| "http://localhost:8080".to_string()),
+                .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string()),
             llm_api_key: env::var("LLM_API_KEY").unwrap_or_default(),
             llm_model: env::var("LLM_MODEL")
                 .unwrap_or_else(|_| "local-model".to_string()),
@@ -207,13 +214,15 @@ impl Config {
                 .parse()
                 .context("Invalid LLM_BACKGROUND_SLOT_ID")?,
             llm_max_tokens: env::var("LLM_MAX_TOKENS")
-                .unwrap_or_else(|_| "400".to_string())
+                .unwrap_or_else(|_| "200".to_string())
                 .parse()
                 .context("Invalid LLM_MAX_TOKENS")?,
             llm_system_prompt: env::var("LLM_SYSTEM_PROMPT").unwrap_or_else(|_| {
                 "Eres un asistente de voz útil y conciso. \
                  Responde siempre en el mismo idioma que el usuario. \
-                 Habla de forma natural y directa, sin listas ni formato markdown."
+                 Habla de forma natural y directa, sin listas ni formato markdown. \
+                 Empieza siempre con la respuesta directa, sin preámbulos. \
+                 Limita tus respuestas a 2-3 frases cortas."
                     .to_string()
             }),
             llm_temperature: env::var("LLM_TEMPERATURE")

@@ -85,9 +85,10 @@ async fn main() -> Result<()> {
     // ── STT init ─────────────────────────────────────────────────────────────
     let whisper_model = config.whisper_model.clone();
     let whisper_lang = config.language.clone();
+    let whisper_threads = config.whisper_threads;
     println!("Loading Whisper model: {whisper_model}");
     let stt = Arc::new(
-        tokio::task::spawn_blocking(move || WhisperStt::new(&whisper_model, &whisper_lang)).await??,
+        tokio::task::spawn_blocking(move || WhisperStt::new(&whisper_model, &whisper_lang, whisper_threads)).await??,
     );
 
     // ── LLM init ─────────────────────────────────────────────────────────────

@@ -393,8 +393,9 @@ async fn async_main() -> Result<()> {
     // ── STT (whisper) ─────────────────────────────────────────────────────────
     let whisper_model = config.whisper_model.clone();
     let whisper_language = config.language.clone();
+    let whisper_threads = config.whisper_threads;
     let stt = tokio::task::spawn_blocking(move || {
-        WhisperStt::new(&whisper_model, &whisper_language)
+        WhisperStt::new(&whisper_model, &whisper_language, whisper_threads)
     })
     .await??;
     let stt = Arc::new(stt);

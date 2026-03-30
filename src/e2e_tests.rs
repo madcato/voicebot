@@ -334,7 +334,7 @@ async fn stt_transcribes_wav_file() {
         return;
     }
 
-    let stt = crate::stt::WhisperStt::new(&model_path, "es")
+    let stt = crate::stt::WhisperStt::new(&model_path, "es", 0)
         .expect("failed to load Whisper model");
 
     let audio = load_wav_as_f32(wav_path).expect("failed to load WAV fixture");
@@ -370,7 +370,7 @@ async fn full_pipeline_wav_to_db() {
     }
 
     // Run real STT first to get the transcript
-    let stt = crate::stt::WhisperStt::new(&model_path, "es").unwrap();
+    let stt = crate::stt::WhisperStt::new(&model_path, "es", 0).unwrap();
     let audio = load_wav_as_f32(wav_path).unwrap();
     let transcript = tokio::task::spawn_blocking(move || stt.transcribe(&audio))
         .await

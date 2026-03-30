@@ -33,10 +33,12 @@ pub struct WhisperStt {
     /// Reusable inference state — owns Metal buffers and KV caches.
     state: Mutex<WhisperState>,
     language: String,
+    /// Number of CPU threads for whisper decoding. 0 = let whisper.cpp decide.
+    threads: u32,
 }
 
 impl WhisperStt {
-    pub fn new(model_path: &str, language: &str) -> Result<Self> {
+    pub fn new(model_path: &str, language: &str, threads: u32) -> Result<Self> {
         let ctx = WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
             .context("Failed to load Whisper model")?;
 
@@ -44,15 +46,17 @@ impl WhisperStt {
 
         tracing::info!(
             target: "stt",
-            "Whisper model loaded: {} (language: {}) — Metal state cached",
+            "Whisper model loaded: {} (language: {}, threads: {}) — Metal state cached",
             model_path,
-            language
+            language,
+            if threads == 0 { "auto".to_string() } else { threads.to_string() }
         );
 
         Ok(Self {
             _ctx: ctx,
             state: Mutex::new(state),
             language: language.to_string(),
+            threads,
         })
     }
 
@@ -67,11 +71,19 @@ impl WhisperStt {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
-        params.set_single_segment(false);
+        // Single segment mode: skip the "should I split?" heuristic — voice
+        // utterances are short enough that a single decoder pass suffices.
+        // Saves ~20-50ms by avoiding the segment-boundary search.
+        params.set_single_segment(true);
         // Don't predict timestamp tokens between words — saves decoder steps.
         params.set_no_timestamps(true);
         // Skip the word-level timestamp alignment post-processing pass.
         params.set_token_timestamps(false);
+        // Explicit thread count: match physical cores for optimal throughput.
+        // Default 0 lets whisper.cpp pick, which may over-subscribe on HT CPUs.
+        if self.threads > 0 {
+            params.set_n_threads(self.threads as i32);
+        }
 
         let audio = pad_to_min_duration(audio, MIN_AUDIO_SAMPLES);
         state

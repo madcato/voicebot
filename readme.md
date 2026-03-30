@@ -155,7 +155,7 @@ nano .env
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WHISPER_MODEL` | — | Path to Whisper `.bin` model (e.g., `./models/ggml-small.bin`) |
-| `LLM_URL` | `http://localhost:8080` | LLM server URL |
+| `LLM_URL` | `http://127.0.0.1:8080` | LLM server URL |
 | `LLM_MODEL` | `local-model` | Model name/path for the LLM provider |
 
 **Example `.env`:**
@@ -164,7 +164,7 @@ nano .env
 WHISPER_MODEL=./models/ggml-small.bin
 WHISPER_COREML=0
 LLM_PROVIDER=llama
-LLM_URL=http://localhost:8080
+LLM_URL=http://127.0.0.1:8080
 LLM_MODEL=./models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
 TTS_PROVIDER=say
 SAY_VOICE="Jorge (Enhanced)"
@@ -180,6 +180,29 @@ VOICEBOT_LANGUAGE=es
 # Then start the server with your model:
 ./scripts/start-llm.sh ./models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
 ```
+
+**Recommended llama-server flags for low latency:**
+
+```bash
+llama-server \
+  --model ./models/Qwen2.5-7B-Instruct-Q4_K_M.gguf \
+  --host 127.0.0.1 --port 8080 \
+  --flash-attn \                     # GPU-accelerated attention (faster prefill)
+  --cache-type-k q8_0 \             # Quantized KV cache (less VRAM, same quality)
+  --cache-type-v q8_0 \
+  --ctx-size 4096 \                  # Match LLM_CONTEXT_TOKENS (smaller = faster)
+  --threads $(sysctl -n hw.perflevel0.physicalcpu) \  # Physical perf cores only
+  --parallel 2 \                     # 2 slots: main conversation + background tasks
+  --cont-batching \                  # Continuous batching for parallel slots
+  --slots                            # Enable slot management
+```
+
+Key flags explained:
+- `--flash-attn`: Enables flash attention for faster prefill, especially on longer contexts.
+- `--cache-type-k/v q8_0`: Quantized KV cache reduces memory ~50% with negligible quality loss.
+- `--ctx-size`: Keep small (4096-8192) — larger contexts increase prefill latency linearly.
+- `--threads`: Use physical **performance** core count (not hyperthreads). On Apple Silicon: `sysctl -n hw.perflevel0.physicalcpu`.
+- `--parallel 2`: Separate slots for conversation (slot 0) and background tasks (slot 1). Set `LLM_BACKGROUND_SLOT_ID=1` in `.env`.
 
 **Using mlx-lm (alternative):**
 
@@ -271,14 +294,15 @@ Most configuration is done via environment variables (or `.env` file):
 | `VAD_SILENCE_MS` | `500` | Silence threshold (ms) before processing speech |
 | **STT (Whisper)** || |
 | `WHISPER_MODEL` | _required_ | Path to Whisper `.bin` model |
+| `WHISPER_THREADS` | `0` (auto) | CPU threads for Whisper decoding. Set to physical core count for best throughput. |
 | `WHISPER_COREML` | `0` | Use CoreML encoder (Neural Engine) |
 | **LLM** || |
 | `LLM_PROVIDER` | `llama` | Backend: `llama` or `mlx` |
-| `LLM_URL` | `http://localhost:8080` | LLM server URL |
+| `LLM_URL` | `http://127.0.0.1:8080` | LLM server URL (use IP, not `localhost`, to avoid DNS latency) |
 | `LLM_MODEL` | `local-model` | Model name or path |
 | `LLM_SYSTEM_PROMPT` | — | System prompt for the LLM |
-| `LLM_MAX_TOKENS` | `400` | Max response tokens |
-| `LLM_TEMPERATURE` | `0.7` | Sampling temperature |
+| `LLM_MAX_TOKENS` | `200` | Max response tokens |
+| `LLM_TEMPERATURE` | `0.3` | Sampling temperature |
 | `LLM_CONTEXT_TOKENS` | `4096` | Context window size |
 | **TTS** || |
 | `TTS_PROVIDER` | `avspeech` | Provider: `avspeech`, `say`, or `kokoro` |
