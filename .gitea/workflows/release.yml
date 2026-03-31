@@ -79,6 +79,9 @@ jobs:
     name: Build · ${{ matrix.target }}
     needs: [create-release]
     runs-on: macos-latest
+    env:
+      # macOS runner is native (not Docker) — use mDNS hostname instead of Docker alias
+      GITEA_API: http://tesla.local:3000/api/v1
     strategy:
       fail-fast: false
       matrix:
