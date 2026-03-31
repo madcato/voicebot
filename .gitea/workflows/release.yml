@@ -87,7 +87,7 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin   # native on M-series
-          - target: x86_64-apple-darwin    # cross via Apple universal SDK
+          # - target: x86_64-apple-darwin    # cross via Apple universal SDK
 
     steps:
       - name: Checkout
