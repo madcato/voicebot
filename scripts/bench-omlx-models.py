@@ -48,38 +48,38 @@ from statistics import mean, stdev
 # ── Model list ────────────────────────────────────────────────────────────────
 
 ## OMLX
+MODELS = [
+    "Bonsai-8B-mlx-1bit",
+    "LFM2-24B-A2B-MLX-4bit",
+    "LFM2.5-350M-MLX-8bit",
+    "Qwen3-30B-A3B-Instruct-2507-MLX-4bit",
+    "Qwen3.5-27B-oQ3",
+    "Qwen3.5-2B-4bit",
+    "Qwen3.5-35B-A3B-4bit",
+    "Qwen3.5-35B-A3B-MLX-oQ4",
+]
+
+## LM Studio
 # MODELS = [
-#     "Qwen3.5-27B-oQ3",
-#     "Qwen3.5-35B-A3B-MLX-oQ4",
-#     "GLM-4.7-Flash-MLX-4bit",
-#     "NVIDIA-Nemotron-3-Nano-30B-A3B-MLX-4bit",
-#     "Qwen3-30B-A3B-Instruct-2507-MLX-4bit",
-#     "Qwen3.5-27B-4bit",
-#     "Qwen3.5-2B-4bit",
-#     "Qwen3.5-2B-MLX-8bit",
-#     "Qwen3.5-35B-A3B-4bit",
-#     "Qwen3.5-35B-A3B-8bit",
-#     "Trinity-Mini-4bit",
-#     "Trinity-Nano-Preview-4bit",
-#     "Qwen3.5-4B-MLX-4bit",
+#     # "GLM-4.7-Flash-MLX-4bit",
+#     # "nemotron-3-nano",
+#     "qwen/qwen3-30b-a3b-2507",
+#     "qwen3.5-35b-a3b@4bit",
+#     # "qwen3.5-35b-a3b@8bit",
+#     # "trinity-mini",
+#     # "trinity-nano-preview",
+#     # "qwen3.5-4b-mlx",
+#     "liquid/lfm2-24b-a2b"
 # ]
 
-MODELS = [
-    "GLM-4.7-Flash-MLX-4bit",
-    "nemotron-3-nano",
-    "qwen/qwen3-30b-a3b-2507",
-    "qwen3.5-35b-a3b@4bit",
-    "qwen3.5-35b-a3b@8bit",
-    "trinity-mini",
-    "trinity-nano-preview",
-    "qwen3.5-4b-mlx",
-    Qwen2.5-7B-Instruct — non-thinking Qwen, should cache fine
-  - Qwen2.5-14B-Instruct — bigger, still no thinking by default                                                      
-  - Phi-4-mini / Phi-4 — Microsoft, strong reasoning, no thinking overhead
-  - Gemma-3-4B-IT / Gemma-3-12B-IT — Google, fast, no thinking mode                                                  
-  - Mistral-7B-Instruct-v0.3 — reliable caching, well-tested                                                         
-  - Llama-3.2-3B-Instruct — tiny but surprisingly capable  
-]
+## Ollama local
+# MODELS = [
+#     "lfm2:24b",
+#     "qwen3:30b-a3b-instruct-2507-q4_K_M",
+#     "qwen3.5:4b-nvfp4",
+#     "qwen3.5:35b-a3b-coding-nvfp4",
+#     "qwen3.5:35b-a3b-int4",
+# ]
 
 # ── Conversation fixture ──────────────────────────────────────────────────────
 
@@ -142,7 +142,7 @@ NEW_QUESTION = (
 # ── Config ────────────────────────────────────────────────────────────────────
 
 # BENCH_PORT / BENCH_TOKEN take precedence; OMLX_PORT / OMLX_TOKEN are legacy aliases.
-SERVER_PORT  = int(os.environ.get("BENCH_PORT",  os.environ.get("OMLX_PORT",  "8000")))
+SERVER_PORT  = int(os.environ.get("BENCH_PORT",  os.environ.get("OMLX_PORT",  "1234")))
 SERVER_TOKEN =     os.environ.get("BENCH_TOKEN", os.environ.get("OMLX_TOKEN", "asdf"))
 PROVIDER     =     os.environ.get("BENCH_PROVIDER", "omlx")
 TRIALS       = int(os.environ.get("BENCH_TRIALS", "3"))
@@ -264,9 +264,11 @@ def _base_payload(model_id, max_tokens, stream):
         # - top-level field (omlx, some mlx-lm builds)
         # - chat_template_kwargs (mlx-lm, omlx)
         # - thinking budget = 0 (LM Studio / some OpenAI-compat servers)
+        # - think: false (Ollama)
         "enable_thinking":      False,
         "chat_template_kwargs": {"enable_thinking": False},
         "thinking":             {"type": "disabled"},
+        "think":                False,
     }
 
 
@@ -321,7 +323,8 @@ def measure_pp(port, model_id):
             prompt_tokens_api = chunk["usage"].get("prompt_tokens")
 
         delta = (chunk.get("choices") or [{}])[0].get("delta", {})
-        token = delta.get("content") or delta.get("reasoning_content") or ""
+        token = (delta.get("content") or delta.get("reasoning_content")
+                 or delta.get("reasoning") or delta.get("thinking") or "")
         if token and t_first is None:
             t_first = time.perf_counter()
 
@@ -362,7 +365,8 @@ def measure_hot(port, model_id):
         except json.JSONDecodeError:
             continue
         delta   = (chunk.get("choices") or [{}])[0].get("delta", {})
-        content = delta.get("content") or delta.get("reasoning_content") or ""
+        content = (delta.get("content") or delta.get("reasoning_content")
+                   or delta.get("reasoning") or delta.get("thinking") or "")
         if content:
             now = time.perf_counter()
             if t_first is None:
@@ -525,7 +529,7 @@ def main():
             sys.exit(f"Error: model directory not found: {omlx_dir}")
         print(f"\n  Starting omlx (port {SERVER_PORT}) ... ", end="", flush=True)
         try:
-            proc = start_omlx(omlx_dir)
+            ##proc = start_omlx(omlx_dir)
             print("ready")
         except Exception as e:
             sys.exit(f"Failed to start omlx: {e}")
