@@ -233,7 +233,7 @@ impl RunAgentTool {
             Some(c) => c.clone(),
             None => return "Error: CLI agent command not configured.".to_string(),
         };
-        let query = self.history.read().map(|h| h.clone()).unwrap_or_else(|_| task.clone());
+        let query = build_agent_query(&self.history, &task);
         let proactive_tx = self.proactive_tx.clone();
 
         tokio::spawn(async move {
@@ -263,7 +263,7 @@ impl RunAgentTool {
             }
         }
 
-        let query = self.history.read().map(|h| h.clone()).unwrap_or_else(|_| task.clone());
+        let query = build_agent_query(&self.history, &task);
         let task_c = task.clone();
         let acp_writer = Arc::clone(&self.acp_writer);
         let acp_inbound = Arc::clone(&self.acp_inbound);
@@ -444,6 +444,19 @@ impl Tool for RunAgentTool {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Build the prompt sent to the agent.
+///
+/// Always includes the delegated `task` so the agent knows exactly what to do.
+/// Prepends the conversation history when available so the agent has context.
+fn build_agent_query(history: &std::sync::RwLock<String>, task: &str) -> String {
+    let history = history.read().map(|h| h.clone()).unwrap_or_default();
+    if history.is_empty() {
+        task.to_string()
+    } else {
+        format!("{history}\n\n[Tarea delegada: {task}]")
+    }
+}
 
 fn parse_task(args: &str) -> String {
     serde_json::from_str::<serde_json::Value>(args)
