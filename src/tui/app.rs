@@ -1,5 +1,5 @@
 use super::events::{InputSource, PipelineState, TuiEvent};
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 
 /// Action returned by key event handling.
 pub enum Action {
@@ -117,6 +117,19 @@ impl App {
 
     /// Process a crossterm key event. Returns an Action if one should be taken.
     pub fn handle_key_event(&mut self, event: Event) -> Option<Action> {
+        if let Event::Mouse(mouse) = event {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.scroll = self.scroll.saturating_add(3);
+                }
+                MouseEventKind::ScrollDown => {
+                    self.scroll = self.scroll.saturating_sub(3);
+                }
+                _ => {}
+            }
+            return None;
+        }
+
         let Event::Key(KeyEvent {
             code, modifiers, ..
         }) = event
