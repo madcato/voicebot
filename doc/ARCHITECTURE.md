@@ -60,7 +60,7 @@ src/
 │   ├── open_app.rs
 │   ├── run_shell.rs           # Enabled via SHELL_ENABLED=1
 │   ├── send_notification.rs
-│   ├── take_screenshot.rs     # Enabled via VISION_URL
+│   ├── take_screenshot.rs     # Enabled via 
 │   ├── run_agent.rs           # Delegates to external agent binary (AGENT_COMMAND)
 │   └── conversation_mode.rs   # SetConversationModeTool (Active / Ambient)
 │
@@ -298,7 +298,6 @@ All config is loaded from environment variables (`.env` file supported via `dote
 | `KOKORO_LANGUAGE` | `en-us` | BCP-47 language for espeak-ng |
 | `DB_PATH` | `voicebot.db` | SQLite database file |
 | `SHELL_ENABLED` | `0` | `1` to enable the `run_shell` tool |
-| `VISION_URL` | — | Enable screenshot tool; base URL of vision model |
 | `AGENT_COMMAND` | — | External agent CLI command (enables `run_agent_async`) |
 | `DAEMON_ENABLED` | `0` | `1` to enable background inference daemon |
 | `SPEAKER_MODEL` | — | Path to speaker embedding ONNX model |
