@@ -237,7 +237,9 @@ impl Config {
                  Responde siempre en el mismo idioma que el usuario. \
                  Habla de forma natural y directa, sin listas ni formato markdown. \
                  Empieza siempre con la respuesta directa, sin preámbulos. \
-                 Limita tus respuestas a 2-3 frases cortas."
+                 Por defecto, limita tus respuestas a 2-3 frases cortas. \
+                 Si el usuario pide expresamente más detalle, una explicación completa \
+                 o un resumen extenso, responde con la profundidad necesaria."
                     .to_string()
             }),
             llm_temperature: env::var("LLM_TEMPERATURE")
