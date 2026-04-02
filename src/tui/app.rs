@@ -39,7 +39,7 @@ pub struct App {
     pub input: String,
     /// Cursor position within input.
     pub cursor: usize,
-    /// Scroll offset in conversation view (0 = bottom).
+    /// Scroll offset in conversation view (0 = bottom, positive = lines above bottom).
     pub scroll: u16,
     /// TTS enabled.
     pub tts_enabled: bool,

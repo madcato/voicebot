@@ -143,24 +143,20 @@ fn render_conversation(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let text = Text::from(lines);
-    let visible_height = area.height.saturating_sub(2); // account for borders
+    let visible_height = area.height.saturating_sub(2) as usize; // minus borders
+    let visible_width = area.width.saturating_sub(2) as usize; // minus borders
 
-    // With Wrap enabled, actual rendered height can exceed text.lines.len().
-    // Estimate wrapped height: sum of ceil(line_width / visible_width) for each line.
-    let visible_width = area.width.saturating_sub(2) as usize; // account for borders
-    let content_height: u16 = if visible_width == 0 {
-        text.lines.len() as u16
-    } else {
-        text.lines
-            .iter()
-            .map(|line| {
-                let w: usize = line.width();
-                if w == 0 { 1 } else { w.div_ceil(visible_width) as u16 }
-            })
-            .sum()
-    };
+    // Count wrapped lines accurately using a word-wrap simulation that matches
+    // ratatui's Wrap { trim: false } algorithm (greedy word packing per row).
+    // The old div_ceil estimate was always too low because word-wrap wastes space
+    // at row boundaries, making content_height > char_count / width.
+    let content_height: usize = text.lines.iter()
+        .map(|line| count_wrapped_lines(line, visible_width))
+        .sum();
 
-    let max_scroll = content_height.saturating_sub(visible_height);
+    let max_scroll = content_height.saturating_sub(visible_height) as u16;
+
+    // app.scroll == 0 → show bottom; app.scroll > 0 → N lines above bottom.
     let scroll = if app.scroll == 0 {
         max_scroll
     } else {
@@ -195,4 +191,118 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect) {
     let cursor_x = area.x + 1 + char_pos;
     let cursor_y = area.y + 1;
     frame.set_cursor_position((cursor_x, cursor_y));
+}
+
+/// Count how many terminal rows `line` occupies when word-wrapped to `width`.
+///
+/// Simulates ratatui's `Wrap { trim: false }` greedy word-packing algorithm.
+/// Key detail: uses `split_whitespace()` (not `split(' ')`) so that leading
+/// spaces ("  message content") and consecutive spaces don't produce empty
+/// tokens that incorrectly increment the row counter.
+/// Leading whitespace is accounted for separately as initial row width.
+fn count_wrapped_lines(line: &Line<'_>, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    if text.is_empty() {
+        return 1;
+    }
+
+    // Leading whitespace consumes space on the first row before any word.
+    let trimmed = text.trim_start_matches(' ');
+    let leading = text.len() - trimmed.len();
+
+    let mut rows = 1usize; // always at least one row
+    let mut row_width = leading.min(width);
+    if leading >= width {
+        rows += leading / width;
+        row_width = leading % width;
+    }
+
+    for word in trimmed.split_whitespace() {
+        let ww = word.chars().count();
+
+        if row_width == 0 {
+            // New row already counted — place the word (hard-wrap if needed).
+            let extra = ww.saturating_sub(1) / width;
+            rows += extra;
+            row_width = ww - extra * width;
+            if row_width == 0 {
+                row_width = width;
+            }
+        } else if row_width + 1 + ww <= width {
+            row_width += 1 + ww;
+        } else {
+            // Word doesn't fit — start a new row.
+            rows += 1;
+            let extra = ww.saturating_sub(1) / width;
+            rows += extra;
+            row_width = ww - extra * width;
+            if row_width == 0 {
+                row_width = width;
+            }
+        }
+    }
+
+    rows
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::text::Span;
+    use super::*;
+
+    fn line(s: &str) -> Line<'static> {
+        Line::from(vec![Span::raw(s.to_string())])
+    }
+
+    #[test]
+    fn empty_line_is_one_row() {
+        assert_eq!(count_wrapped_lines(&Line::raw(""), 80), 1);
+    }
+
+    #[test]
+    fn short_line_fits_in_one_row() {
+        assert_eq!(count_wrapped_lines(&line("hello world"), 80), 1);
+    }
+
+    #[test]
+    fn line_exactly_at_width_is_one_row() {
+        // "ab cd" = 5 chars, width 5
+        assert_eq!(count_wrapped_lines(&line("ab cd"), 5), 1);
+    }
+
+    #[test]
+    fn line_one_char_over_wraps_to_two_rows() {
+        // "ab cde" = 6 chars, width 5 → "ab" fits, "cde" doesn't fit with space → row 2
+        assert_eq!(count_wrapped_lines(&line("ab cde"), 5), 2);
+    }
+
+    #[test]
+    fn long_line_wraps_correctly() {
+        // 10 words of 4 chars each at width 20: "aaaa bbbb cccc dddd" = 19 fits, next word wraps
+        let text = "aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj";
+        // width=20: "aaaa bbbb cccc dddd" = 19 chars → fits; "eeee" = need 24 → row 2; etc.
+        assert_eq!(count_wrapped_lines(&line(text), 20), 3);
+    }
+
+    #[test]
+    fn word_wider_than_width_is_hard_wrapped() {
+        // one 10-char word, width 4 → ceil(10/4) = 3 rows
+        assert_eq!(count_wrapped_lines(&line("abcdefghij"), 4), 3);
+    }
+
+    #[test]
+    fn indented_line_does_not_add_extra_rows() {
+        // "  hello" has 2 leading spaces — must NOT produce phantom rows for them.
+        assert_eq!(count_wrapped_lines(&line("  hello"), 80), 1);
+        assert_eq!(count_wrapped_lines(&line("  hello world"), 80), 1);
+    }
+
+    #[test]
+    fn indented_line_accounts_for_leading_spaces_in_width() {
+        // "  ab cd" = 2 spaces + "ab cd"; width=6: "  ab c" fits (6), "d" wraps → 2 rows
+        assert_eq!(count_wrapped_lines(&line("  ab cd"), 6), 2);
+    }
 }
