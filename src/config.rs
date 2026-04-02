@@ -85,6 +85,10 @@ pub struct Config {
     /// Seconds of user inactivity after which a silent consolidation is triggered
     /// (if context needs it). 0 = disabled. Default: 900 (15 minutes).
     pub llm_idle_consolidation_secs: u64,
+    /// Minimum context fill percentage required for an idle-triggered consolidation to run.
+    /// If the current context is below this threshold, idle consolidation is skipped.
+    /// Default: 20. Set to 0 to disable the minimum check.
+    pub llm_idle_min_context_pct: usize,
 
     // ── Agent delegation ──────────────────────────────────────────────────────
     /// CLI command used to invoke the agent (e.g. "hermes chat"). May include arguments.
@@ -277,6 +281,10 @@ impl Config {
                 .unwrap_or_else(|_| "900".to_string())
                 .parse()
                 .context("Invalid LLM_IDLE_CONSOLIDATION_SECS")?,
+            llm_idle_min_context_pct: env::var("LLM_IDLE_MIN_CONTEXT_PCT")
+                .unwrap_or_else(|_| "20".to_string())
+                .parse()
+                .context("Invalid LLM_IDLE_MIN_CONTEXT_PCT")?,
 
             // Agent delegation
             agent_command: env::var("AGENT_COMMAND").ok(),

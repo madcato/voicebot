@@ -293,7 +293,7 @@ There are two consolidation modes:
 5. **Rebuild system prompt** — The system prompt is rebuilt with updated `[USER PROFILE]`, `[MEMORIES]`, and `[CONVERSATION SUMMARY]` sections
 6. **Announce back online** — Jarvis announces it's available again and tells the user the current time
 
-**Silent (idle):** Triggered when the user hasn't spoken for `LLM_IDLE_CONSOLIDATION_SECS` (default 15 minutes) and the context threshold is reached. Runs the same extraction and rebuild steps transparently, without any voice announcements.
+**Silent (idle):** Triggered when the user hasn't spoken for `LLM_IDLE_CONSOLIDATION_SECS` (default 15 minutes). Uses `LLM_IDLE_MIN_CONTEXT_PCT` (default 20%) as its threshold — lower than the hard limit — so the context is kept well below `LLM_CONSOLIDATION_THRESHOLD_PCT` while the user is away. Runs transparently, without any voice announcements.
 
 Memories and profile facts persist across sessions via SQLite. On startup, they are loaded and injected into the system prompt so the LLM has full context from previous conversations.
 
@@ -324,6 +324,7 @@ Most configuration is done via environment variables (or `.env` file):
 | `LLM_CONTEXT_TOKENS` | `8192` | Context window size in tokens. Set to match your model's context length. |
 | `LLM_CONSOLIDATION_THRESHOLD_PCT` | `80` | Percentage of context window that triggers memory consolidation (see below). |
 | `LLM_IDLE_CONSOLIDATION_SECS` | `900` | Seconds of user inactivity before a silent consolidation runs (0 = disabled). |
+| `LLM_IDLE_MIN_CONTEXT_PCT` | `50` | Context fill % threshold used by idle-triggered consolidation. Consolidates proactively while idle to stay below the hard limit (0 = disabled). |
 | **TTS** || |
 | `TTS_PROVIDER` | `avspeech` | Provider: `avspeech`, `say`, or `kokoro` |
 | `SAY_VOICE` | `Jorge (Enhanced)` | macOS voice name |

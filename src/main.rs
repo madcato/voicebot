@@ -649,12 +649,13 @@ async fn async_main() -> Result<()> {
         let keep_turns    = config.llm_summary_keep_turns;
         let threshold_pct = config.llm_consolidation_threshold_pct;
         let idle_secs     = config.llm_idle_consolidation_secs;
+        let idle_min_pct  = config.llm_idle_min_context_pct;
         let base_prompt   = config.llm_system_prompt.clone();
         let tool_section_c = tool_section.clone();
         tokio::spawn(async move {
             consolidation_task(
                 shared_c, events_c, llm_session_c, background_client_c, db_c,
-                session_id, context_tokens, keep_turns, threshold_pct, idle_secs,
+                session_id, context_tokens, keep_turns, threshold_pct, idle_secs, idle_min_pct,
                 base_prompt, tool_section_c,
             ).await;
         });
@@ -1501,6 +1502,7 @@ async fn consolidation_task(
     keep_turns: usize,
     threshold_pct: usize,
     idle_consolidation_secs: u64,
+    idle_min_context_pct: usize,
     base_prompt: String,
     tool_section: String,
 ) {
@@ -1540,20 +1542,24 @@ async fn consolidation_task(
         };
 
         // ── Context check ────────────────────────────────────────────────────
-        let (needs, approx_tokens, current_pct, msg_count) = {
+        // Post-turn: consolidate when context >= threshold_pct (hard limit, always enforced).
+        // Idle:      consolidate when context >= idle_min_context_pct (proactive, lower bar).
+        //            This keeps the context well below the hard limit while the user is away.
+        let (needs, approx_tokens, current_pct, msg_count, effective_threshold) = {
             let s = llm_session.lock().unwrap();
             let approx = s.approx_tokens();
             let pct = if context_tokens > 0 { approx * 100 / context_tokens } else { 0 };
-            let needs = s.needs_consolidation(context_tokens, threshold_pct);
-            (needs, approx, pct, s.messages.len())
+            let effective = if triggered_by_idle { idle_min_context_pct } else { threshold_pct };
+            let needs = s.needs_consolidation(context_tokens, effective);
+            (needs, approx, pct, s.messages.len(), effective)
         };
         info!(
             target: "memory",
             "Context check ({}): ~{} tokens / {} max ({}%) — threshold {}% — {} msgs — consolidation {}",
             if triggered_by_idle { "idle" } else { "post-turn" },
-            approx_tokens, context_tokens, current_pct, threshold_pct,
+            approx_tokens, context_tokens, current_pct, effective_threshold,
             msg_count,
-            if needs { "TRIGGERED" } else { "not needed" }
+            if needs { "TRIGGERED" } else { "not needed" },
         );
         if !needs {
             while cancel_rx.try_recv().is_ok() {}
@@ -1822,7 +1828,7 @@ async fn run_pipeline(
         tokio::spawn(async move {
             consolidation_task(
                 shared_c, events_c, llm_session_c, llm_client_c, db_c,
-                session_id, context_tokens, summary_keep_turns, 80,
+                session_id, context_tokens, summary_keep_turns, 80, 0, 0,
                 String::new(), String::new(),
             ).await;
         })
