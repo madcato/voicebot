@@ -109,6 +109,11 @@ pub struct Config {
     /// Seconds between daemon checks (DAEMON_INTERVAL_SECS, default 300).
     pub daemon_interval_secs: u64,
 
+    // ── EYES (visual awareness) ───────────────────────────────────────────────
+    /// Seconds between screen-capture checks for EYES (EYES_INTERVAL_SECS).
+    /// 0 = disabled (default). Requires SECONDARY_LLM_URL to be set.
+    pub eyes_interval_secs: u64,
+
     // ── Secondary LLM (vision + background tasks) ────────────────────────────
     /// Base URL of the secondary LLM provider (SECONDARY_LLM_URL). None = disabled.
     /// When set, enables the vision tool and routes summarization + profile
@@ -304,6 +309,12 @@ impl Config {
                 .unwrap_or_else(|_| "300".to_string())
                 .parse()
                 .context("Invalid DAEMON_INTERVAL_SECS")?,
+
+            // EYES
+            eyes_interval_secs: env::var("EYES_INTERVAL_SECS")
+                .unwrap_or_else(|_| "0".to_string())
+                .parse()
+                .context("Invalid EYES_INTERVAL_SECS")?,
 
             // Secondary LLM
             secondary_llm_url: env::var("SECONDARY_LLM_URL").ok(),

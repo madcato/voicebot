@@ -3,6 +3,7 @@ mod audio;
 mod config;
 mod daemon;
 mod db;
+mod eyes;
 mod llm;
 mod memory;
 mod profile;
@@ -419,6 +420,30 @@ async fn async_main() -> Result<()> {
             proactive_tx: proactive_tx.clone(),
         }
         .spawn();
+    }
+
+    // ── EYES (visual awareness) ───────────────────────────────────────────────
+    if config.eyes_interval_secs > 0 {
+        if let Some(ref sec_client) = secondary_llm_client {
+            info!(
+                target: "eyes",
+                "EYES enabled (interval={}s, model={})",
+                config.eyes_interval_secs,
+                config.secondary_llm_model,
+            );
+            eyes::EyesDaemon {
+                interval_secs: config.eyes_interval_secs,
+                vision_client: sec_client.clone(),
+                proactive_tx: proactive_tx.clone(),
+            }
+            .spawn();
+        } else {
+            warn!(
+                target: "eyes",
+                "EYES_INTERVAL_SECS={} but SECONDARY_LLM_URL is not set — EYES disabled",
+                config.eyes_interval_secs
+            );
+        }
     }
 
     // ── STT (whisper) ─────────────────────────────────────────────────────────

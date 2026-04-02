@@ -336,11 +336,13 @@ Most configuration is done via environment variables (or `.env` file):
 | `AGENT_MODE` | `cli` | `cli` = fire-and-forget subprocess; `acp` = persistent ACP bidirectional mode |
 | `AGENT_ACP_COMMAND` | `hermes acp` | Command to start the ACP process (ACP mode only) |
 | **Secondary LLM** || |
-| `SECONDARY_LLM_URL` | — | Base URL of secondary LLM. Enables `take_screenshot` tool and routes summarization + profile extraction to this model. |
+| `SECONDARY_LLM_URL` | — | Base URL of secondary LLM. Enables `take_screenshot` tool, EYES visual awareness, and routes summarization + profile extraction to this model. |
 | `SECONDARY_LLM_MODEL` | `local-model` | Model name for secondary LLM requests. |
 | `SECONDARY_LLM_MAX_TOKENS` | `512` | Max tokens for secondary LLM responses (vision). |
 | `SECONDARY_LLM_API_KEY` | — | Bearer token for secondary LLM API. |
 | `SECONDARY_LLM_PROVIDER` | `llama` | Backend for secondary LLM: `llama` or `mlx`. |
+| **EYES (visual awareness)** || |
+| `EYES_INTERVAL_SECS` | `0` (disabled) | Seconds between automatic screen captures. Set to e.g. `15` to enable. Requires `SECONDARY_LLM_URL` (vision model). Jarvis speaks when something important is detected on screen. |
 | **Speaker Verification** || |
 | `SPEAKER_MODEL` | auto-detect | Path to sherpa-onnx speaker embedding ONNX model. Auto-detected at `models/speaker_embedding.onnx`; disabled if absent. |
 | `SPEAKER_ENROLLMENT_PATH` | `data/speaker.emb` | Base path for speaker profiles. Profiles saved as `speaker_0.emb`, `speaker_1.emb`, etc. in the same directory. |
