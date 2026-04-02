@@ -73,12 +73,18 @@ pub struct Config {
     /// BCP-47 language code for espeak-ng, e.g. "en-us" or "es" (KOKORO_LANGUAGE)
     pub kokoro_language: String,
 
-    // ── Context summarization ─────────────────────────────────────────────────
+    // ── Context consolidation ────────────────────────────────────────────────
     /// Approximate context window of the LLM model in tokens.
-    /// Summarization triggers when the prompt exceeds 75% of this limit.
+    /// Context consolidation triggers when the prompt exceeds the configured
+    /// threshold percentage of this limit.
     pub llm_context_tokens: usize,
-    /// Number of most-recent (role, content) turns to keep verbatim after summarization.
+    /// Number of most-recent (role, content) turns to keep verbatim after consolidation.
     pub llm_summary_keep_turns: usize,
+    /// Percentage of the context window that triggers consolidation (default 80).
+    pub llm_consolidation_threshold_pct: usize,
+    /// Seconds of user inactivity after which a silent consolidation is triggered
+    /// (if context needs it). 0 = disabled. Default: 900 (15 minutes).
+    pub llm_idle_consolidation_secs: u64,
 
     // ── Agent delegation ──────────────────────────────────────────────────────
     /// CLI command used to invoke the agent (e.g. "hermes chat"). May include arguments.
@@ -254,15 +260,23 @@ impl Config {
             kokoro_language: env::var("KOKORO_LANGUAGE")
                 .unwrap_or_else(|_| "en-us".to_string()),
 
-            // Context summarization
+            // Context consolidation
             llm_context_tokens: env::var("LLM_CONTEXT_TOKENS")
-                .unwrap_or_else(|_| "4096".to_string())
+                .unwrap_or_else(|_| "8192".to_string())
                 .parse()
                 .context("Invalid LLM_CONTEXT_TOKENS")?,
             llm_summary_keep_turns: env::var("LLM_SUMMARY_KEEP_TURNS")
                 .unwrap_or_else(|_| "6".to_string())
                 .parse()
                 .context("Invalid LLM_SUMMARY_KEEP_TURNS")?,
+            llm_consolidation_threshold_pct: env::var("LLM_CONSOLIDATION_THRESHOLD_PCT")
+                .unwrap_or_else(|_| "80".to_string())
+                .parse()
+                .context("Invalid LLM_CONSOLIDATION_THRESHOLD_PCT")?,
+            llm_idle_consolidation_secs: env::var("LLM_IDLE_CONSOLIDATION_SECS")
+                .unwrap_or_else(|_| "900".to_string())
+                .parse()
+                .context("Invalid LLM_IDLE_CONSOLIDATION_SECS")?,
 
             // Agent delegation
             agent_command: env::var("AGENT_COMMAND").ok(),

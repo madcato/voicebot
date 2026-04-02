@@ -32,7 +32,7 @@ impl Message {
 /// learn to respond verbally without calling tools.
 #[derive(Clone)]
 pub struct LlmSession {
-    /// Base system prompt (never modified after construction).
+    /// Base system prompt — updated at runtime after context consolidation.
     original_system_prompt: String,
     /// Current conversation summary, injected into the system message when present.
     summary: Option<String>,
@@ -40,12 +40,26 @@ pub struct LlmSession {
     pub messages: Vec<serde_json::Value>,
     #[allow(dead_code)]
     pub slot_id: u8,
+    /// When true, the KV-cache is stale (e.g. system prompt changed) and the next
+    /// streaming call must use `cache_prompt=false` to force a full rebuild.
+    cache_stale: bool,
 }
 
 impl LlmSession {
     /// Returns the base system prompt (before any summary injection).
     pub fn system_prompt(&self) -> &str {
         &self.original_system_prompt
+    }
+
+    /// Returns the approximate token count of the current session content.
+    pub fn approx_tokens(&self) -> usize {
+        let total_chars: usize = self.messages.iter().map(|m| {
+            m["content"].as_str().map_or(0, str::len)
+                + m.get("tool_calls").map_or(0, |tc| tc.to_string().len())
+        }).sum::<usize>()
+            + self.original_system_prompt.len()
+            + self.summary.as_deref().map_or(0, str::len);
+        total_chars * 10 / 35
     }
 
     /// Create a fresh session.
@@ -56,6 +70,7 @@ impl LlmSession {
             summary: None,
             messages: Vec::new(),
             slot_id,
+            cache_stale: false,
         }
     }
 
@@ -74,6 +89,7 @@ impl LlmSession {
             summary: summary.map(String::from),
             messages: Vec::new(),
             slot_id,
+            cache_stale: false,
         };
         for (role, content) in history {
             match role.as_str() {
@@ -152,18 +168,10 @@ impl LlmSession {
     /// True when the total content size approaches the context limit.
     ///
     /// Uses chars/3.5 as a rough token estimate. Triggers at 75% of the limit.
+    /// Kept for backward compatibility — prefer [`needs_consolidation`] with an
+    /// explicit threshold percentage.
     pub fn needs_summarization(&self, context_limit_tokens: usize) -> bool {
-        if self.messages.len() < 4 {
-            return false;
-        }
-        let total_chars: usize = self.messages.iter().map(|m| {
-            m["content"].as_str().map_or(0, str::len)
-                + m.get("tool_calls").map_or(0, |tc| tc.to_string().len())
-        }).sum::<usize>()
-            + self.original_system_prompt.len()
-            + self.summary.as_deref().map_or(0, str::len);
-        let approx_tokens = total_chars * 10 / 35;
-        approx_tokens > context_limit_tokens * 3 / 4
+        self.needs_consolidation(context_limit_tokens, 75)
     }
 
     /// How many messages would be summarized if we keep the last `keep_n`.
@@ -207,6 +215,48 @@ impl LlmSession {
         let keep_start = self.messages.len().saturating_sub(keep_n);
         self.messages = self.messages[keep_start..].to_vec();
         self.summary = Some(summary.to_string());
+    }
+
+    // ── Context consolidation ────────────────────────────────────────────────
+
+    /// True when the total content size approaches the context limit.
+    ///
+    /// Uses chars/3.5 as a rough token estimate. `threshold_pct` controls
+    /// what percentage of the context window triggers consolidation (e.g. 80).
+    pub fn needs_consolidation(&self, context_limit_tokens: usize, threshold_pct: usize) -> bool {
+        if self.messages.len() < 4 {
+            return false;
+        }
+        let total_chars: usize = self.messages.iter().map(|m| {
+            m["content"].as_str().map_or(0, str::len)
+                + m.get("tool_calls").map_or(0, |tc| tc.to_string().len())
+        }).sum::<usize>()
+            + self.original_system_prompt.len()
+            + self.summary.as_deref().map_or(0, str::len);
+        let approx_tokens = total_chars * 10 / 35;
+        approx_tokens > context_limit_tokens * threshold_pct / 100
+    }
+
+    /// Replace the base system prompt at runtime.
+    ///
+    /// Used after context consolidation to inject updated memories, profile,
+    /// and summary. The next API call will send the new system message.
+    pub fn set_system_prompt(&mut self, new_prompt: String) {
+        self.original_system_prompt = new_prompt;
+    }
+
+    /// Mark the KV-cache as stale. The next streaming call should use
+    /// `cache_prompt=false` to force a full rebuild.
+    pub fn invalidate_cache(&mut self) {
+        self.cache_stale = true;
+    }
+
+    /// Return (and clear) the cache-stale flag.
+    ///
+    /// Called by `llm_task` before streaming to decide whether to send
+    /// `cache_prompt=false` for one turn.
+    pub fn consume_cache_stale(&mut self) -> bool {
+        std::mem::replace(&mut self.cache_stale, false)
     }
 
     // ── Private helpers ────────────────────────────────────────────────────────
@@ -465,5 +515,80 @@ mod tests {
 
         // After compaction, needs_summarization resets (assuming large context)
         assert!(!s.needs_summarization(100_000));
+    }
+
+    // ── needs_consolidation ──────────────────────────────────────────────────
+
+    #[test]
+    fn needs_consolidation_respects_threshold_percentage() {
+        let long = "x".repeat(50);
+        let mut s = LlmSession::new("sys", 0);
+        for _ in 0..6 {
+            s.add_user_turn(&long);
+            s.add_assistant_turn(&long);
+        }
+        // At 75% threshold, 100 context tokens should trigger
+        assert!(s.needs_consolidation(100, 75));
+        // At 100% threshold with a generous limit, should not trigger
+        assert!(!s.needs_consolidation(100_000, 80));
+    }
+
+    #[test]
+    fn needs_consolidation_false_when_few_messages() {
+        let mut s = LlmSession::new("System.", 0);
+        s.add_user_turn("Hello");
+        s.add_assistant_turn("Hi");
+        assert!(!s.needs_consolidation(1, 50));
+    }
+
+    // ── set_system_prompt ────────────────────────────────────────────────────
+
+    #[test]
+    fn set_system_prompt_replaces_original() {
+        let mut s = LlmSession::new("Old prompt.", 0);
+        s.add_user_turn("Hello");
+        s.set_system_prompt("New prompt with [MEMORIES].".to_string());
+
+        let msgs = s.all_messages();
+        assert_eq!(msgs[0].content, "New prompt with [MEMORIES].");
+        assert!(!msgs[0].content.contains("Old prompt"));
+    }
+
+    #[test]
+    fn set_system_prompt_preserves_summary() {
+        let mut s = LlmSession::new("Base.", 0);
+        s.add_user_turn("Hello");
+        s.add_assistant_turn("Hi");
+        s.apply_summary("Summary text.", 2);
+        s.set_system_prompt("New base.".to_string());
+
+        let msgs = s.all_messages();
+        assert!(msgs[0].content.starts_with("New base."));
+        assert!(msgs[0].content.contains("[CONVERSATION SUMMARY]"));
+        assert!(msgs[0].content.contains("Summary text."));
+    }
+
+    // ── cache_stale lifecycle ────────────────────────────────────────────────
+
+    #[test]
+    fn cache_stale_default_false() {
+        let mut s = LlmSession::new("System.", 0);
+        assert!(!s.consume_cache_stale());
+    }
+
+    #[test]
+    fn invalidate_then_consume_cache() {
+        let mut s = LlmSession::new("System.", 0);
+        s.invalidate_cache();
+        assert!(s.consume_cache_stale(), "first consume should return true");
+        assert!(!s.consume_cache_stale(), "second consume should return false");
+    }
+
+    #[test]
+    fn set_system_prompt_does_not_auto_invalidate() {
+        let mut s = LlmSession::new("Old.", 0);
+        s.set_system_prompt("New.".to_string());
+        // Caller must explicitly invalidate — set_system_prompt does not auto-set
+        assert!(!s.consume_cache_stale());
     }
 }

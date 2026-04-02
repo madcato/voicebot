@@ -4,6 +4,7 @@ mod config;
 mod daemon;
 mod db;
 mod llm;
+mod memory;
 mod profile;
 mod stt;
 mod tools;
@@ -16,7 +17,7 @@ use async_channel::bounded;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
@@ -44,6 +45,9 @@ pub(crate) struct SharedSession {
     pub(crate) t_vad_end: Mutex<Option<Instant>>,
     /// Timestamp of the POST sent to LLM - used to calculate TTFT
     pub(crate) t_llm_post_send: Mutex<Option<Instant>>,
+    /// True while the consolidation task is running. The LLM task will not
+    /// process new input until this flag is cleared.
+    pub(crate) consolidation_active: AtomicBool,
 }
 
 impl SharedSession {
@@ -57,6 +61,7 @@ impl SharedSession {
             text_input_pending: AtomicBool::new(false),
             t_vad_end: Mutex::new(None),
             t_llm_post_send: Mutex::new(None),
+            consolidation_active: AtomicBool::new(false),
         }
     }
 }
@@ -99,8 +104,9 @@ use crate::audio::ambient_buffer::AmbientBuffer;
 use crate::audio::speaker::{SpeakerVerdict, SpeakerVerifier};
 use crate::audio::vad::{VadResult, VoiceActivityDetector};
 use crate::config::Config;
-use crate::db::Database;
+use crate::db::{Database, Memory};
 use crate::llm::{LlamaClient, LlmSession, StreamToken};
+use crate::memory::{build_memory_context, extract_memories};
 use crate::profile::{build_profile_context, ProfileFact};
 use crate::stt::{WhisperStt, SttStream};
 use whisper_rs::install_logging_hooks;
@@ -159,6 +165,25 @@ fn main() {
 #[tokio::main]
 async fn main() -> Result<()> {
     async_main().await
+}
+
+/// Assemble the full system prompt from its components.
+///
+/// Order: base prompt → [USER PROFILE] → [MEMORIES] → tool instructions.
+/// Used at startup and after each context consolidation cycle.
+fn build_system_prompt(
+    base_prompt: &str,
+    profile_facts: &[crate::profile::ProfileFact],
+    memories: &[Memory],
+    tool_section: &str,
+) -> String {
+    format!(
+        "{}{}{}{}",
+        base_prompt,
+        build_profile_context(profile_facts),
+        build_memory_context(memories),
+        tool_section,
+    )
 }
 
 async fn async_main() -> Result<()> {
@@ -341,13 +366,19 @@ async fn async_main() -> Result<()> {
         info!(target: "profile", "Loaded {} user profile facts", profile_facts.len());
     }
 
+    // ── Persistent memories ──────────────────────────────────────────────────
+    let memories: Vec<Memory> = db.load_active_memories().await?;
+    if !memories.is_empty() {
+        info!(target: "memory", "Loaded {} persistent memories", memories.len());
+    }
+
     // ── LLM session ───────────────────────────────────────────────────────────
-    // System prompt = base + user profile context + tool instructions.
-    let system_prompt = format!(
-        "{}{}{}",
-        config.llm_system_prompt,
-        build_profile_context(&profile_facts),
-        tools.system_prompt_section()
+    let tool_section = tools.system_prompt_section();
+    let system_prompt = build_system_prompt(
+        &config.llm_system_prompt,
+        &profile_facts,
+        &memories,
+        &tool_section,
     );
     let llm_session = Arc::new(Mutex::new(LlmSession::from_history(
         &system_prompt,
@@ -616,9 +647,16 @@ async fn async_main() -> Result<()> {
         let db_c          = db.clone();
         let context_tokens = config.llm_context_tokens;
         let keep_turns    = config.llm_summary_keep_turns;
+        let threshold_pct = config.llm_consolidation_threshold_pct;
+        let idle_secs     = config.llm_idle_consolidation_secs;
+        let base_prompt   = config.llm_system_prompt.clone();
+        let tool_section_c = tool_section.clone();
         tokio::spawn(async move {
-            sum_task(shared_c, events_c, llm_session_c, background_client_c, db_c,
-                     session_id, context_tokens, keep_turns).await;
+            consolidation_task(
+                shared_c, events_c, llm_session_c, background_client_c, db_c,
+                session_id, context_tokens, keep_turns, threshold_pct, idle_secs,
+                base_prompt, tool_section_c,
+            ).await;
         });
     }
 
@@ -1045,6 +1083,13 @@ async fn llm_task(
             }
         }
 
+        // If context consolidation is in progress, wait for it to finish before
+        // processing the next user turn. Audio capture and STT continue — the
+        // transcript stays in transliterated_text until we drain it below.
+        while shared.consolidation_active.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
         shared.llm_busy.store(true, Ordering::SeqCst);
 
         // Drain accumulated transcription.
@@ -1116,7 +1161,12 @@ async fn llm_task(
         'pipeline: {
             'tool_loop: for iter in 0..MAX_TOOL_ITERATIONS {
                 info!(target: "performance", "LLM request [pipe={}]", pipeline_id);
-                let (token_rx, stream_handle) = match llm_client.stream(&messages, &tool_defs).await {
+                let force_no_cache = if iter == 0 {
+                    llm_session.lock().unwrap().consume_cache_stale()
+                } else {
+                    false
+                };
+                let (token_rx, stream_handle) = match llm_client.stream(&messages, &tool_defs, force_no_cache).await {
                     Ok(r)  => r,
                     Err(e) => {
                         error!(target: "llm", "LLM error: {}", e);
@@ -1434,11 +1484,13 @@ async fn tts_task(
     }
 }
 
-/// SUM task: blocks on LLM_POST_FINISHED, runs summarization when needed.
+/// Context consolidation task: blocks on LLM_POST_FINISHED, runs a full
+/// memory consolidation cycle when the context window approaches its limit.
 ///
-/// Corresponds to the SUM thread in doc/PROCESS_ARCHITECTURE.md.
+/// Replaces the old `sum_task`. Announces to the user via voice before and
+/// after the process so they know the bot is temporarily unavailable.
 #[allow(clippy::too_many_arguments)]
-async fn sum_task(
+async fn consolidation_task(
     shared: Arc<SharedSession>,
     events: Arc<PipelineEvents>,
     llm_session: Arc<Mutex<LlmSession>>,
@@ -1447,29 +1499,221 @@ async fn sum_task(
     session_id: uuid::Uuid,
     context_tokens: usize,
     keep_turns: usize,
+    threshold_pct: usize,
+    idle_consolidation_secs: u64,
+    base_prompt: String,
+    tool_section: String,
 ) {
     let mut cancel_rx = events.cancel_tx.subscribe();
+    let mut last_turn_at = Instant::now();
 
     loop {
-        // Block until LLM finishes a response; ignore cancels while idle.
-        loop {
+        // Wait for either: LLM finishes a turn OR idle timeout expires.
+        // Cancels are drained but don't interrupt — we're idle anyway.
+        let triggered_by_idle = loop {
+            let idle_wait = if idle_consolidation_secs > 0 {
+                let elapsed = last_turn_at.elapsed().as_secs();
+                let remaining = idle_consolidation_secs.saturating_sub(elapsed);
+                // Check at most every 60s so we don't spin tight.
+                Duration::from_secs(remaining.min(60).max(1))
+            } else {
+                Duration::from_secs(3600) // effectively disabled
+            };
+
             tokio::select! {
-                _ = events.llm_post_finished.notified() => { break; }
+                _ = events.llm_post_finished.notified() => {
+                    last_turn_at = Instant::now();
+                    break false;
+                }
+                _ = tokio::time::sleep(idle_wait) => {
+                    let elapsed = last_turn_at.elapsed().as_secs();
+                    if idle_consolidation_secs > 0
+                        && elapsed >= idle_consolidation_secs
+                        && !shared.llm_busy.load(Ordering::SeqCst)
+                    {
+                        break true;
+                    }
+                    // Not idle enough yet — loop and recalculate wait.
+                }
                 _ = cancel_rx.recv() => {}
             }
+        };
+
+        // ── Context check ────────────────────────────────────────────────────
+        let (needs, approx_tokens, current_pct, msg_count) = {
+            let s = llm_session.lock().unwrap();
+            let approx = s.approx_tokens();
+            let pct = if context_tokens > 0 { approx * 100 / context_tokens } else { 0 };
+            let needs = s.needs_consolidation(context_tokens, threshold_pct);
+            (needs, approx, pct, s.messages.len())
+        };
+        info!(
+            target: "memory",
+            "Context check ({}): ~{} tokens / {} max ({}%) — threshold {}% — {} msgs — consolidation {}",
+            if triggered_by_idle { "idle" } else { "post-turn" },
+            approx_tokens, context_tokens, current_pct, threshold_pct,
+            msg_count,
+            if needs { "TRIGGERED" } else { "not needed" }
+        );
+        if !needs {
+            while cancel_rx.try_recv().is_ok() {}
+            // If triggered by idle but nothing to consolidate, reset the timer
+            // so we don't re-check on every minute tick.
+            if triggered_by_idle {
+                last_turn_at = Instant::now();
+            }
+            continue;
         }
 
-        // Run summarization (uses background slot — does not touch main cache).
-        // Bail out early if a barge-in arrives.
-        tokio::select! {
-            _ = maybe_summarize(&llm_session, &background_client, &db, session_id, context_tokens, keep_turns, "", "") => {}
-            _ = cancel_rx.recv() => {
-                debug!(target: "llm", "Summarization cancelled by barge-in");
-                // Drop shared reference to suppress unused warning if not otherwise used.
-                let _ = &shared;
+        // ── Phase 1: Announce (only for context-limit consolidation, not idle) ─
+        if !triggered_by_idle {
+            info!(target: "memory", "Context limit approaching — starting announced consolidation");
+
+            // Wait for the LLM to be idle, then send the announcement.
+            while shared.llm_busy.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            shared.consolidation_active.store(false, Ordering::SeqCst);
+            *shared.transliterated_text.lock().unwrap() =
+                "[Sistema: necesitas reorganizar tu memoria para seguir conversando. \
+                 Avisa al usuario de que vuelves en unos minutos.]".to_string();
+            events.vad_finish.notify_one();
+
+            loop {
+                tokio::select! {
+                    _ = events.llm_post_finished.notified() => { break; }
+                    _ = cancel_rx.recv() => {}
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            shared.consolidation_active.store(true, Ordering::SeqCst);
+            info!(target: "memory", "Pipeline paused — running consolidation...");
+        } else {
+            info!(target: "memory", "Idle timer — running silent consolidation...");
+        }
+
+        // ── Phase 2: Extract and save ────────────────────────────────────────
+        let (conversation_text, summary_prompt, turns_to_summarize) = {
+            let s = llm_session.lock().unwrap();
+            let count = s.summarizable_turn_count(keep_turns);
+            let prompt = s.build_summary_prompt(keep_turns);
+            let mut conv = String::new();
+            for msg in &s.messages[..count.min(s.messages.len())] {
+                if let (Some(role), Some(content)) =
+                    (msg["role"].as_str(), msg["content"].as_str())
+                {
+                    if role == "user" || role == "assistant" {
+                        conv.push_str(role);
+                        conv.push_str(": ");
+                        conv.push_str(content);
+                        conv.push_str("\n\n");
+                    }
+                }
+            }
+            (conv, prompt, count)
+        };
+
+        // 2a) Profile facts.
+        if !conversation_text.is_empty() {
+            let facts = extract_facts(&background_client, &conversation_text, "").await;
+            for fact in facts {
+                if let Err(e) = db.upsert_profile_fact(&fact.key, &fact.value, fact.confidence).await {
+                    warn!(target: "profile", "Failed to save profile fact '{}': {}", fact.key, e);
+                } else {
+                    debug!(target: "profile", "Profile: {} = {} ({:.0}%)", fact.key, fact.value, fact.confidence * 100.0);
+                }
             }
         }
 
+        // 2b) Persistent memories.
+        let existing_memories = db.load_active_memories().await.unwrap_or_default();
+        let mem_result = extract_memories(&background_client, &conversation_text, &existing_memories).await;
+        for id in &mem_result.archive_ids {
+            if let Err(e) = db.deactivate_memory(*id).await {
+                warn!(target: "memory", "Failed to archive memory id={}: {}", id, e);
+            }
+        }
+        if !mem_result.new_memories.is_empty() {
+            info!(target: "memory", "Extracted {} new memories", mem_result.new_memories.len());
+            if let Err(e) = db.save_memories_batch(&mem_result.new_memories, session_id).await {
+                warn!(target: "memory", "Failed to save memories: {}", e);
+            }
+        }
+        if !mem_result.archive_ids.is_empty() {
+            info!(target: "memory", "Archived {} outdated memories", mem_result.archive_ids.len());
+        }
+
+        // 2c) Summarize.
+        let summary = if let Some(prompt) = summary_prompt {
+            match background_client.complete(&prompt).await {
+                Ok(s) if !s.is_empty() => { info!(target: "memory", "Summary: {}", s); Some(s) }
+                Ok(_) => { warn!(target: "memory", "Summarization returned empty result"); None }
+                Err(e) => { warn!(target: "memory", "Summarization failed: {}", e); None }
+            }
+        } else {
+            None
+        };
+
+        // ── Phase 3: Rebuild system prompt ───────────────────────────────────
+        if let Some(ref summary_text) = summary {
+            // Fetch the current summary_through_id so the offset is relative to
+            // the loaded batch, not the entire DB history. Without this, repeated
+            // consolidations would compute a through_id earlier than the previous
+            // one, causing all old messages to reload on the next startup.
+            let prev_through_id = db.get_summary_through_id(session_id).await.unwrap_or(0);
+            let through_id = db
+                .get_message_id_at_offset(session_id, prev_through_id, turns_to_summarize.saturating_sub(1))
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(0);
+            if through_id > 0 {
+                if let Err(e) = db.save_summary(session_id, summary_text, through_id).await {
+                    warn!(target: "db", "Failed to persist summary: {}", e);
+                }
+            }
+        }
+
+        let fresh_profile = db.load_user_profile().await.unwrap_or_default();
+        let fresh_profile_facts: Vec<crate::profile::ProfileFact> = fresh_profile
+            .into_iter()
+            .map(|(key, value, confidence)| crate::profile::ProfileFact { key, value, confidence })
+            .collect();
+        let fresh_memories = db.load_active_memories().await.unwrap_or_default();
+        let new_system_prompt = build_system_prompt(
+            &base_prompt, &fresh_profile_facts, &fresh_memories, &tool_section,
+        );
+
+        {
+            let mut s = llm_session.lock().unwrap();
+            if let Some(ref summary_text) = summary {
+                s.apply_summary(summary_text, keep_turns);
+            }
+            s.set_system_prompt(new_system_prompt);
+            s.invalidate_cache();
+        }
+
+        info!(
+            target: "memory",
+            "Consolidation complete ({}) — prompt rebuilt ({} profile facts, {} memories, {} recent turns kept)",
+            if triggered_by_idle { "silent" } else { "announced" },
+            fresh_profile_facts.len(), fresh_memories.len(), keep_turns,
+        );
+
+        // ── Phase 4: Announce back (only for non-idle consolidation) ─────────
+        if !triggered_by_idle {
+            shared.consolidation_active.store(false, Ordering::SeqCst);
+            let now = chrono::Local::now().format("%H:%M").to_string();
+            *shared.transliterated_text.lock().unwrap() = format!(
+                "[Sistema: has terminado de reorganizar tu memoria. Son las {now}. \
+                 Avisa al usuario de que ya estás disponible de nuevo.]"
+            );
+            events.vad_finish.notify_one();
+            info!(target: "memory", "Consolidation cycle finished — pipeline resumed");
+        }
+
+        // Reset idle timer so we don't immediately re-consolidate.
+        last_turn_at = Instant::now();
         while cancel_rx.try_recv().is_ok() {}
     }
 }
@@ -1576,7 +1820,11 @@ async fn run_pipeline(
         let llm_client_c = llm_client.clone();
         let db_c = db.clone();
         tokio::spawn(async move {
-            sum_task(shared_c, events_c, llm_session_c, llm_client_c, db_c, session_id, context_tokens, summary_keep_turns).await;
+            consolidation_task(
+                shared_c, events_c, llm_session_c, llm_client_c, db_c,
+                session_id, context_tokens, summary_keep_turns, 80,
+                String::new(), String::new(),
+            ).await;
         })
     };
 
@@ -1623,112 +1871,24 @@ fn map_answer_to_outcome(transcript: &str) -> String {
 }
 
 
-/// Summarize old conversation turns if the prompt is approaching the context limit.
-///
-/// Runs after every completed pipeline turn. Builds a summary of old turns,
-/// injects it into the session prompt, and persists it to the DB so future
-/// restarts can restore the compact context.
-async fn maybe_summarize(
-    llm_session: &Arc<Mutex<LlmSession>>,
-    background_client: &LlamaClient,
-    db: &Database,
-    session_id: Uuid,
-    context_tokens: usize,
-    keep_turns: usize,
-    user_text: &str,
-    assistant_text: &str,
-) {
-    let needs = llm_session.lock().unwrap().needs_summarization(context_tokens);
-    if !needs {
-        return;
-    }
-
-    // Extract user profile facts from the current turn before summarizing.
-    // Only runs when summarization is needed, avoiding an LLM call every turn.
-    let facts = extract_facts(background_client, user_text, assistant_text).await;
-    for fact in facts {
-        if let Err(e) = db.upsert_profile_fact(&fact.key, &fact.value, fact.confidence).await {
-            warn!(target: "profile", "Failed to save profile fact '{}': {}", fact.key, e);
-        } else {
-            debug!(target: "profile", "Profile: {} = {} ({:.0}%)", fact.key, fact.value, fact.confidence * 100.0);
-        }
-    }
-
-    let (summary_prompt, turns_to_summarize) = {
-        let s = llm_session.lock().unwrap();
-        let prompt = s.build_summary_prompt(keep_turns);
-        let count = s.summarizable_turn_count(keep_turns);
-        (prompt, count)
-    };
-
-    let Some(prompt) = summary_prompt else {
-        return;
-    };
-
-    info!(target: "llm", "Context limit approaching — summarizing {} old turns...", turns_to_summarize);
-
-    let summary = match background_client.complete(&prompt).await {
-        Ok(s) if !s.is_empty() => s,
-        Ok(_) => {
-            warn!(target: "llm", "Summarization returned empty result, skipping");
-            return;
-        }
-        Err(e) => {
-            warn!(target: "llm", "Summarization failed: {}", e);
-            return;
-        }
-    };
-
-    info!(target: "llm", "Summary: {}", summary);
-
-    // Find the DB message id of the last turn that is being summarized.
-    // Each turn in `turns` corresponds to one row in messages (alternating User/Assistant),
-    // so the last summarized message is at 0-based offset (turns_to_summarize - 1).
-    let through_id = match db
-        .get_message_id_at_offset(session_id, turns_to_summarize - 1)
-        .await
-    {
-        Ok(Some(id)) => id,
-        Ok(None) => {
-            warn!(target: "llm", "Could not find message offset for summary cutpoint, skipping");
-            return;
-        }
-        Err(e) => {
-            warn!(target: "llm", "DB error finding summary cutpoint: {}", e);
-            return;
-        }
-    };
-
-    if let Err(e) = db.save_summary(session_id, &summary, through_id).await {
-        warn!(target: "db", "Failed to persist summary: {}", e);
-    }
-
-    llm_session.lock().unwrap().apply_summary(&summary, keep_turns);
-
-    info!(
-        target: "llm",
-        "Summarization complete — prompt compacted (keeping {} recent turns)",
-        keep_turns
-    );
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    /// Integration test for `maybe_summarize` using a real LLM server.
+    /// Integration test for summarization using a real LLM server.
     ///
     /// Requires a running llama.cpp server (default http://localhost:8080).
     /// Override with `LLM_URL` env var.
     ///
     /// Run manually:
     /// ```sh
-    /// cargo test test_maybe_summarize_real_llm -- --ignored --nocapture
+    /// cargo test test_summarize_real_llm -- --ignored --nocapture
     /// ```
     #[tokio::test]
     #[ignore]
-    async fn test_maybe_summarize_real_llm() {
+    async fn test_summarize_real_llm() {
         let _ = tracing_subscriber::fmt()
             .with_env_filter("info")
             .try_init();
@@ -1786,79 +1946,44 @@ mod tests {
         let msg_count_before = session.messages.len();
         println!("Messages before summarization: {}", msg_count_before);
 
-        // Use a small context_tokens to force summarization, keep only 2 recent turns.
-        // Token estimate ≈ total_chars * 10 / 35; threshold = context_tokens * 3 / 4.
         let context_tokens: usize = 300;
         let keep_turns: usize = 2;
 
         assert!(
-            session.needs_summarization(context_tokens),
-            "Session should need summarization with context_tokens={} but doesn't. \
-             Add more turns or reduce context_tokens.",
+            session.needs_consolidation(context_tokens, 75),
+            "Session should need consolidation with context_tokens={} but doesn't.",
             context_tokens
         );
 
-        // ── Call maybe_summarize ─────────────────────────────────────────────
-        let llm_session = Arc::new(Mutex::new(session));
-        maybe_summarize(
-            &llm_session,
-            &llm_client,
-            &db,
-            session_id,
-            context_tokens,
-            keep_turns,
-            "",
-            "",
-        )
-        .await;
+        // ── Run summarization directly ──────────────────────────────────────
+        let prompt = session.build_summary_prompt(keep_turns).unwrap();
+        let summary = llm_client.complete(&prompt).await.unwrap();
+        assert!(!summary.is_empty(), "Summary should not be empty");
+
+        let turns_to_summarize = session.summarizable_turn_count(keep_turns);
+        let through_id = db
+            .get_message_id_at_offset(session_id, 0, turns_to_summarize - 1)
+            .await
+            .unwrap()
+            .unwrap();
+        db.save_summary(session_id, &summary, through_id).await.unwrap();
+        session.apply_summary(&summary, keep_turns);
 
         // ── Assertions ──────────────────────────────────────────────────────
-        let session_after = llm_session.lock().unwrap();
-
-        // 1. Messages should be compacted to keep_turns * 2 (user+assistant pairs)
-        let msg_count_after = session_after.messages.len();
+        let msg_count_after = session.messages.len();
         println!("Messages after summarization: {}", msg_count_after);
-        assert!(
-            msg_count_after < msg_count_before,
-            "Message count should decrease after summarization: before={}, after={}",
-            msg_count_before, msg_count_after
-        );
-        assert_eq!(
-            msg_count_after,
-            keep_turns,
-            "Should keep exactly {} messages (keep_turns={}), got {}",
-            keep_turns,
-            keep_turns,
-            msg_count_after
-        );
+        assert!(msg_count_after < msg_count_before);
+        assert_eq!(msg_count_after, keep_turns);
 
-        // 2. System message should now contain the summary
-        let all_msgs = session_after.all_messages_api();
+        let all_msgs = session.all_messages_api();
         let system_content = all_msgs[0]["content"].as_str().unwrap();
-        println!("System message after summarization:\n{}", system_content);
-        assert!(
-            system_content.contains("[CONVERSATION SUMMARY]"),
-            "System message should contain [CONVERSATION SUMMARY] marker"
-        );
+        assert!(system_content.contains("[CONVERSATION SUMMARY]"));
 
-        // 3. Summary should be persisted in DB
         let (db_summary, db_recent) = db.get_session_context(session_id).await.unwrap();
-        assert!(
-            db_summary.is_some(),
-            "DB should have a summary after summarization"
-        );
-        let summary_text = db_summary.unwrap();
-        println!("Summary from DB:\n{}", summary_text);
-        assert!(
-            !summary_text.is_empty(),
-            "Summary text should not be empty"
-        );
-        assert!(
-            !db_recent.is_empty(),
-            "DB should still have recent messages after summary cutoff"
-        );
+        assert!(db_summary.is_some());
+        assert!(!db_recent.is_empty());
 
-        println!("\n✓ maybe_summarize integration test passed");
+        println!("\n✓ summarize integration test passed");
     }
 
     /// Benchmark: measures TTFT before and after summarization to detect
@@ -1932,7 +2057,7 @@ mod tests {
             let messages = session_clone.all_messages_api();
 
             let t = Instant::now();
-            let (mut rx, _stream_handle) = client.stream(&messages, &[]).await
+            let (mut rx, _stream_handle) = client.stream(&messages, &[], false).await
                 .expect("Failed to start LLM stream");
             let mut ttft_ms: Option<u128> = None;
             let mut response = String::new();
@@ -1970,16 +2095,13 @@ mod tests {
         assert!(!before_response.is_empty(), "LLM should produce a response before summarization");
 
         // ── Run summarization ───────────────────────────────────────────────
-        println!("\n── Running maybe_summarize ──");
-        let context_tokens: usize = 200;
+        println!("\n── Running summarization ──");
         let keep_turns: usize = 2;
-        let llm_session = Arc::new(Mutex::new(session));
-        maybe_summarize(
-            &llm_session, &llm_client, &db, session_id,
-            context_tokens, keep_turns, "", "",
-        ).await;
+        let prompt = session.build_summary_prompt(keep_turns).unwrap();
+        let summary = llm_client.complete(&prompt).await.unwrap();
+        session.apply_summary(&summary, keep_turns);
 
-        let session_after = llm_session.lock().unwrap().clone();
+        let session_after = session.clone();
         let msg_count = session_after.messages.len();
         println!("  Session compacted: {} messages remaining", msg_count);
 

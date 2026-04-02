@@ -1,3 +1,3 @@
 pub mod database;
 
-pub use database::Database;
+pub use database::{Database, Memory, NewMemory};

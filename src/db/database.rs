@@ -5,6 +5,25 @@ use sqlx::Row;
 use std::path::Path;
 use uuid::Uuid;
 
+/// A persistent memory extracted from conversation history.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct Memory {
+    pub id: i64,
+    pub content: String,
+    pub category: String,
+    pub source_session_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A new memory to be inserted (no id yet).
+#[derive(Debug, Clone)]
+pub struct NewMemory {
+    pub content: String,
+    pub category: String,
+}
+
 /// SQLite database for persistent chat history.
 #[derive(Clone)]
 pub struct Database {
@@ -84,6 +103,27 @@ impl Database {
                 confidence REAL NOT NULL DEFAULT 1.0,
                 updated_at TEXT NOT NULL
             )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Persistent memories extracted during context consolidation.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS memories (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                content           TEXT NOT NULL,
+                category          TEXT NOT NULL DEFAULT 'general',
+                source_session_id TEXT,
+                created_at        TEXT NOT NULL,
+                updated_at        TEXT NOT NULL,
+                is_active         INTEGER NOT NULL DEFAULT 1
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_memories_active ON memories(is_active)",
         )
         .execute(&self.pool)
         .await?;
@@ -170,24 +210,39 @@ impl Database {
             .collect())
     }
 
-    /// Return the message id at a 0-based offset within a session (ordered by id ASC).
+    /// Return the message id at a 0-based offset within a session (ordered by id ASC),
+    /// counting only messages with `id > after_id`.
     ///
-    /// Used to determine the cutoff point before saving a summary: the summary covers
-    /// all messages up to and including this id.
+    /// Pass `after_id = 0` to count from the beginning.
+    /// Pass the current `summary_through_id` to count only within the currently-loaded
+    /// batch — this ensures the new cutoff is always strictly ahead of the old one.
     pub async fn get_message_id_at_offset(
         &self,
         session_id: Uuid,
+        after_id: i64,
         offset: usize,
     ) -> Result<Option<i64>> {
         let row = sqlx::query(
-            "SELECT id FROM messages WHERE session_id = ? ORDER BY id ASC LIMIT 1 OFFSET ?",
+            "SELECT id FROM messages WHERE session_id = ? AND id > ? ORDER BY id ASC LIMIT 1 OFFSET ?",
         )
         .bind(session_id.to_string())
+        .bind(after_id)
         .bind(offset as i64)
         .fetch_optional(&self.pool)
         .await?;
 
         Ok(row.map(|r| r.try_get::<i64, _>("id").unwrap_or(0)))
+    }
+
+    /// Return the current `summary_through_id` for a session (0 if no summary yet).
+    pub async fn get_summary_through_id(&self, session_id: Uuid) -> Result<i64> {
+        let row = sqlx::query(
+            "SELECT summary_through_id FROM sessions WHERE id = ?",
+        )
+        .bind(session_id.to_string())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.try_get("summary_through_id").unwrap_or(0))
     }
 
     /// Persist the conversation summary and the id of the last summarized message.
@@ -303,5 +358,70 @@ impl Database {
             sessions.push((uuid, timestamp));
         }
         Ok(sessions)
+    }
+
+    // ── Memories ──────────────────────────────────────────────────────────────
+
+    /// Load all active memories, most recently updated first.
+    pub async fn load_active_memories(&self) -> Result<Vec<Memory>> {
+        let rows = sqlx::query(
+            "SELECT id, content, category, source_session_id, created_at, updated_at
+             FROM memories WHERE is_active = 1 ORDER BY updated_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| Memory {
+                id: r.try_get("id").unwrap_or(0),
+                content: r.try_get("content").unwrap_or_default(),
+                category: r.try_get("category").unwrap_or_default(),
+                source_session_id: r.try_get("source_session_id").ok(),
+                created_at: r.try_get("created_at").unwrap_or_default(),
+                updated_at: r.try_get("updated_at").unwrap_or_default(),
+            })
+            .collect())
+    }
+
+    /// Insert multiple memories in a single transaction.
+    pub async fn save_memories_batch(
+        &self,
+        memories: &[NewMemory],
+        session_id: Uuid,
+    ) -> Result<()> {
+        if memories.is_empty() {
+            return Ok(());
+        }
+        let now = Utc::now().to_rfc3339();
+        let sid = session_id.to_string();
+
+        let mut tx = self.pool.begin().await?;
+        for mem in memories {
+            sqlx::query(
+                "INSERT INTO memories (content, category, source_session_id, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(&mem.content)
+            .bind(&mem.category)
+            .bind(&sid)
+            .bind(&now)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Soft-delete a memory by setting is_active = 0.
+    pub async fn deactivate_memory(&self, memory_id: i64) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("UPDATE memories SET is_active = 0, updated_at = ? WHERE id = ?")
+            .bind(now)
+            .bind(memory_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 }

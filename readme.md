@@ -48,7 +48,7 @@ Jarvis is built from the ground up for voice interaction:
 
 ### Advanced Features ✅
 
-- 🧠 Context-aware summarization (keeps recent turns verbatim)
+- 🧠 Context consolidation with persistent memory (Claude-like context management)
 - 👤 User profile extraction from conversations (injects into system prompt)
 - 🎭 Startup greeting with name recognition
 - 🛠️ Tool calling system (`current_time`, `take_screenshot`, `send_notification`, `read/set_clipboard`, `open_app`)
@@ -190,7 +190,7 @@ llama-server \
   --flash-attn \                     # GPU-accelerated attention (faster prefill)
   --cache-type-k q8_0 \             # Quantized KV cache (less VRAM, same quality)
   --cache-type-v q8_0 \
-  --ctx-size 4096 \                  # Match LLM_CONTEXT_TOKENS (smaller = faster)
+  --ctx-size 8192 \                  # Match LLM_CONTEXT_TOKENS (smaller = faster)
   --threads $(sysctl -n hw.perflevel0.physicalcpu) \  # Physical perf cores only
   --parallel 2 \                     # 2 slots: main conversation + background tasks
   --cont-batching \                  # Continuous batching for parallel slots
@@ -279,6 +279,24 @@ Jarvis Voicebot is intentionally **narrow in scope**: it owns the audio pipeline
 
 See [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md) for detailed architectural docs. Also [doc/doc.md](doc/doc.md) for additional info.
 
+### Context Window & Memory Consolidation
+
+Jarvis uses the full context window provided by the LLM (`LLM_CONTEXT_TOKENS`, default 8192). When the conversation approaches the configured threshold (`LLM_CONSOLIDATION_THRESHOLD_PCT`, default 80%), a consolidation cycle runs automatically.
+
+There are two consolidation modes:
+
+**Active (mid-conversation):** Triggered when the context threshold is reached after a turn.
+1. **Announce offline** — Jarvis tells the user it needs a few minutes to reorganize its memory
+2. **Extract profile facts** — Structured facts (name, city, preferences) are extracted and persisted in the `user_profile` DB table
+3. **Extract memories** — Free-form persistent notes (projects, decisions, technical context) are extracted into the `memories` DB table
+4. **Summarize** — Old conversation turns are summarized into a compact text
+5. **Rebuild system prompt** — The system prompt is rebuilt with updated `[USER PROFILE]`, `[MEMORIES]`, and `[CONVERSATION SUMMARY]` sections
+6. **Announce back online** — Jarvis announces it's available again and tells the user the current time
+
+**Silent (idle):** Triggered when the user hasn't spoken for `LLM_IDLE_CONSOLIDATION_SECS` (default 15 minutes) and the context threshold is reached. Runs the same extraction and rebuild steps transparently, without any voice announcements.
+
+Memories and profile facts persist across sessions via SQLite. On startup, they are loaded and injected into the system prompt so the LLM has full context from previous conversations.
+
 ---
 
 ## Configuration
@@ -303,7 +321,9 @@ Most configuration is done via environment variables (or `.env` file):
 | `LLM_SYSTEM_PROMPT` | — | System prompt for the LLM |
 | `LLM_MAX_TOKENS` | `200` | Max response tokens |
 | `LLM_TEMPERATURE` | `0.3` | Sampling temperature |
-| `LLM_CONTEXT_TOKENS` | `4096` | Context window size |
+| `LLM_CONTEXT_TOKENS` | `8192` | Context window size in tokens. Set to match your model's context length. |
+| `LLM_CONSOLIDATION_THRESHOLD_PCT` | `80` | Percentage of context window that triggers memory consolidation (see below). |
+| `LLM_IDLE_CONSOLIDATION_SECS` | `900` | Seconds of user inactivity before a silent consolidation runs (0 = disabled). |
 | **TTS** || |
 | `TTS_PROVIDER` | `avspeech` | Provider: `avspeech`, `say`, or `kokoro` |
 | `SAY_VOICE` | `Jorge (Enhanced)` | macOS voice name |

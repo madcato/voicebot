@@ -182,10 +182,16 @@ impl LlamaClient {
     /// Stream completion tokens from an OpenAI-compatible endpoint.
     ///
     /// Returns a channel receiver that yields text tokens as they arrive.
+    /// Stream a chat completion from the LLM server.
+    ///
+    /// When `force_no_cache` is true and the backend supports it (llama.cpp),
+    /// `cache_prompt` is set to `false` for this single call, forcing a full
+    /// KV-cache rebuild. Used after context consolidation changes the system prompt.
     pub async fn stream(
         &self,
         messages: &[serde_json::Value],
         tools: &[serde_json::Value],
+        force_no_cache: bool,
     ) -> Result<(mpsc::Receiver<StreamToken>, tokio::task::JoinHandle<()>)> {
         let mut payload = serde_json::json!({
             "model": self.model,
@@ -198,7 +204,7 @@ impl LlamaClient {
         if self.llama_extensions {
             // llama.cpp extensions: reuse the KV-cache across turns for this slot.
             // Sampling params (temp, top_p, top_k, min_p) are set server-side.
-            payload["cache_prompt"] = serde_json::json!(true);
+            payload["cache_prompt"] = serde_json::json!(!force_no_cache);
             payload["slot_id"] = serde_json::json!(self.slot_id);
         } else {
             // mlx-lm: sampling params must be sent per-request (no server-side config).
@@ -597,7 +603,7 @@ mod tests {
 
         let client = LlamaClient::new(&server.uri(), "test-model", 400, 0.7, 0, -1);
         let messages = make_messages();
-        let (mut rx, _handle) = client.stream(&messages_to_json(&messages), &[]).await.unwrap();
+        let (mut rx, _handle) = client.stream(&messages_to_json(&messages), &[], false).await.unwrap();
 
         let mut collected = String::new();
         while let Some(token) = rx.recv().await {
@@ -626,7 +632,7 @@ mod tests {
 
         let client = LlamaClient::new(&server.uri(), "test-model", 400, 0.7, 0, -1);
         let messages = make_messages();
-        let (mut rx, _handle) = client.stream(&messages_to_json(&messages), &[]).await.unwrap();
+        let (mut rx, _handle) = client.stream(&messages_to_json(&messages), &[], false).await.unwrap();
 
         let mut collected = String::new();
         while let Some(token) = rx.recv().await {
@@ -727,7 +733,7 @@ mod tests {
             .await;
 
         let client = LlamaClient::new(&server.uri(), "test-model", 400, 0.7, 0, -1);
-        let (mut rx, _handle) = client.stream(&[], &[]).await.unwrap();
+        let (mut rx, _handle) = client.stream(&[], &[], false).await.unwrap();
 
         let token = rx.recv().await.expect("should receive a token");
         match token {

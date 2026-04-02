@@ -79,10 +79,9 @@ Microphone
 - `whisper.rs`: whisper-rs FFI wrapper; transcribes f32 mono 16kHz audio; returns text + detected language
 - Language hint passed to whisper for faster decoding when language is known
 
-**`src/llm/`** — LLM client (to be implemented)
-- `client.rs`: async HTTP client to llama.cpp `/completion` endpoint
-- `session.rs`: `LlmSession` struct holding `accumulated_prompt: String` and `slot_id: u8`; appends user/assistant turns in ChatML format (`<|im_start|>role\n...<|im_end|>\n`)
-- Streams SSE tokens via `reqwest` with `stream` feature; yields `String` tokens through a tokio channel
+**`src/llm/`** — LLM client
+- `client.rs`: async HTTP client to llama.cpp `/v1/chat/completions` endpoint; `stream()` for conversation, `complete()` / `complete_short()` for background tasks (summarization, profile/memory extraction)
+- `session.rs`: `LlmSession` holding `messages: Vec<Value>` + `original_system_prompt` + `summary`; `set_system_prompt()` for runtime prompt rebuild; `invalidate_cache()` / `consume_cache_stale()` for KV-cache control after consolidation; `needs_consolidation(tokens, pct)` for threshold check
 
 **`src/tts/`** — Text-to-Speech
 - `say.rs`: macOS `say` subprocess wrapper; outputs raw i16 PCM at 22050 Hz via `--data-format=LEI16@22050 -o /dev/stdout`; voice configured via `SAY_VOICE` env var (default `"Marisol (Enhanced)"`)
@@ -99,18 +98,25 @@ Microphone
 - `LLM_URL` — llama.cpp server URL (default `http://127.0.0.1:8080`)
 - `LLM_SLOT_ID` — llama.cpp KV-cache slot (default 0)
 - `LLM_MAX_TOKENS` — max tokens per response (default 200)
+- `LLM_CONTEXT_TOKENS` — context window size in tokens (default 8192)
+- `LLM_CONSOLIDATION_THRESHOLD_PCT` — % of context window that triggers consolidation (default 80)
+- `LLM_SUMMARY_KEEP_TURNS` — recent turns to keep after consolidation (default 6)
 - `WHISPER_THREADS` — CPU threads for Whisper decoding (default 0 = auto)
-- `AUDIO_DRAIN_MS` — silence tail after playback in ms (default 150)
 - `LLM_SYSTEM_PROMPT` — system prompt text
 - `WHISPER_MODEL` — path to whisper GGML model file (default `models/ggml-large-v3-turbo.bin`)
 - `SAY_VOICE` — macOS voice name (default `"Marisol (Enhanced)"`); list voices with `say -v ?`
 - `AUDIO_OUTPUT_DEVICE` — substring match of output device name; leave unset to use system default
 
+**`src/memory/`** — Persistent memory system
+- `mod.rs`: `extract_memories()` asks LLM to extract persistent notes from conversation history; `build_memory_context()` builds the `[MEMORIES]` block for the system prompt
+- Memories are free-form notes (projects, decisions, preferences) that persist across sessions
+- LLM can also archive outdated memories during extraction
+
 **`src/db/`** — SQLite persistence (keep and extend)
 - Chat history **must** survive process restarts — SQLite is the source of truth
-- On startup: load the last session's accumulated prompt from DB to restore LLM KV-cache context
+- On startup: load the last session's messages, summary, profile facts, and memories from DB
 - On each turn: persist user transcript and assistant response to DB
-- Tables: `sessions`, `messages` (role, content, timestamp)
+- Tables: `sessions`, `messages`, `user_profile`, `memories`
 
 ### Legacy modules (to be removed or gutted)
 
