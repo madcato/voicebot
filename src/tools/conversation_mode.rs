@@ -9,10 +9,13 @@ use crate::tools::Tool;
 pub enum ConversationMode {
     /// Default — responds to the enrolled user's voice normally.
     Active,
-    /// Quiet mode — only responds when the transcript contains the wake word.
-    /// Activated manually via this tool or automatically when a non-enrolled
-    /// speaker is detected N times in a row.
+    /// Quiet mode activated automatically (silence timer or non-user streak).
+    /// Any speech from the main user immediately returns the bot to Active.
     Ambient,
+    /// Quiet mode activated explicitly by the user via the tool.
+    /// Stays locked until the user explicitly requests Active mode — automatic
+    /// triggers (silence, non-user streak) do NOT override this state.
+    AmbientLocked,
 }
 
 /// Tool that lets the LLM switch the voicebot between Active and Ambient mode.
@@ -70,14 +73,15 @@ impl Tool for SetConversationModeTool {
             .unwrap_or_else(|| args.trim().to_lowercase());
 
         let new_mode = if mode_str.contains("ambient") || mode_str.contains("sleep") {
-            ConversationMode::Ambient
+            ConversationMode::AmbientLocked
         } else {
             ConversationMode::Active
         };
 
         let msg = match new_mode {
-            ConversationMode::Ambient => "Ambient mode activated.",
-            ConversationMode::Active  => "Active mode restored.",
+            ConversationMode::AmbientLocked => "Ambient mode activated.",
+            ConversationMode::Active        => "Active mode restored.",
+            ConversationMode::Ambient       => unreachable!(),
         };
 
         *self.mode.lock().unwrap() = new_mode;

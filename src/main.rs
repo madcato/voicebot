@@ -937,7 +937,9 @@ async fn async_main() -> Result<()> {
                             continue;
                         }
 
-                        let ambient = *conv_mode.lock().unwrap() == ConversationMode::Ambient;
+                        let mode_snapshot = conv_mode.lock().unwrap().clone();
+                        let ambient_locked = mode_snapshot == ConversationMode::AmbientLocked;
+                        let ambient_auto   = mode_snapshot == ConversationMode::Ambient;
                         let wake_word_check = config.wake_word.clone();
 
                         // ── ACP permission gate ───────────────────────────────
@@ -954,12 +956,13 @@ async fn async_main() -> Result<()> {
 
                         // ── Fire VAD_FINISH after final STT result is ready ────
                         // Awaiting in a spawned task keeps the audio loop unblocked.
-                        let stt_c      = Arc::clone(&stt_stream);
-                        let shared_c   = Arc::clone(&shared);
-                        let events_c   = Arc::clone(&events);
-                        let amb_c      = Arc::clone(&ambient_buffer);
-                        let epoch      = utterance_epoch.load(Ordering::SeqCst);
-                        let epoch_ref  = Arc::clone(&utterance_epoch);
+                        let stt_c        = Arc::clone(&stt_stream);
+                        let shared_c     = Arc::clone(&shared);
+                        let events_c     = Arc::clone(&events);
+                        let amb_c        = Arc::clone(&ambient_buffer);
+                        let conv_mode_c  = Arc::clone(&conv_mode);
+                        let epoch        = utterance_epoch.load(Ordering::SeqCst);
+                        let epoch_ref    = Arc::clone(&utterance_epoch);
                         tokio::spawn(async move {
                             let text = stt_c.await_result(min_stt_gen).await;
                             if text.is_empty() { return; }
@@ -971,20 +974,23 @@ async fn async_main() -> Result<()> {
                                 return;
                             }
 
-                            // Ambient mode: buffer non-wake-word utterances from
-                            // the main user too (e.g. their side of a conversation).
-                            // Wake-word fires one response but does NOT change mode —
-                            // only an explicit "modo activo" command switches to Active.
-                            if ambient {
+                            // Ambient (locked) — user explicitly requested quiet mode:
+                            // only respond to the wake word; everything else is buffered.
+                            // Stays locked until the user explicitly says "active mode".
+                            if ambient_locked {
                                 let lower = text.to_lowercase();
                                 if lower.contains(&wake_word_check) {
-                                    info!(target: "pipeline", "Ambient: wake word detected — responding (staying Ambient)");
+                                    info!(target: "pipeline", "Ambient (locked): wake word detected — responding (staying locked)");
                                 } else {
-                                    // Buffer the main user's ambient utterance for context.
                                     amb_c.lock().unwrap().push("Usuario".to_string(), text.clone());
-                                    debug!(target: "pipeline", "Ambient: no wake word — buffered as context");
+                                    debug!(target: "pipeline", "Ambient (locked): no wake word — buffered as context");
                                     return;
                                 }
+                            } else if ambient_auto {
+                                // Auto-ambient — triggered by silence or non-user streak:
+                                // any speech from the main user returns immediately to Active.
+                                *conv_mode_c.lock().unwrap() = ConversationMode::Active;
+                                info!(target: "pipeline", "Auto-ambient: main user spoke — returning to Active");
                             }
 
                             // Inject ambient context when the query contains a referential.
@@ -1766,7 +1772,7 @@ async fn run_pipeline(
         return;
     }
 
-    // Ambient mode wake-word check.
+    // Ambient (locked) wake-word check — only applies when user explicitly set ambient mode.
     if ambient {
         let lower = transcript.to_lowercase();
         if !lower.contains(&wake_word.to_lowercase()) {
