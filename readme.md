@@ -323,7 +323,7 @@ Most configuration is done via environment variables (or `.env` file):
 | `LLM_TEMPERATURE` | `0.3` | Sampling temperature |
 | `LLM_CONTEXT_TOKENS` | `8192` | Context window size in tokens. Set to match your model's context length. |
 | `LLM_CONSOLIDATION_THRESHOLD_PCT` | `80` | Percentage of context window that triggers memory consolidation (see below). |
-| `LLM_IDLE_CONSOLIDATION_SECS` | `900` | Seconds of user inactivity before a silent consolidation runs (0 = disabled). |
+| `LLM_IDLE_CONSOLIDATION_SECS` | `1800` | Seconds of user inactivity before a silent consolidation runs (0 = disabled). |
 | `LLM_IDLE_MIN_CONTEXT_PCT` | `50` | Context fill % threshold used by idle-triggered consolidation. Consolidates proactively while idle to stay below the hard limit (0 = disabled). |
 | **TTS** || |
 | `TTS_PROVIDER` | `avspeech` | Provider: `avspeech`, `say`, or `kokoro` |
