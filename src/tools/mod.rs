@@ -20,6 +20,7 @@ pub use open_app::OpenAppTool;
 pub use run_agent::{
     format_history, ActiveAcpTask, HermesAcpWriter, JsonRpcMessage, RunAgentTool,
 };
+pub use run_shell::RunShellTool;
 pub use take_screenshot::TakeScreenshotTool;
 
 /// A tool the LLM can invoke by name.

@@ -113,7 +113,7 @@ use crate::stt::{WhisperStt, SttStream};
 use whisper_rs::install_logging_hooks;
 use crate::tools::{
     format_history, ActiveAcpTask, ConversationMode, CurrentTimeTool, HermesAcpWriter, JsonRpcMessage,
-    OpenAppTool, ReadClipboardTool, RunAgentTool, SetClipboardTool, SetConversationModeTool,
+    OpenAppTool, ReadClipboardTool, RunAgentTool, RunShellTool, SetClipboardTool, SetConversationModeTool,
     TakeScreenshotTool, ToolRegistry,
 };
 use crate::tts::{SayTts, SentenceSplitter, TtsEngine};
@@ -303,6 +303,12 @@ async fn async_main() -> Result<()> {
     tool_registry.register(SetClipboardTool);
     tool_registry.register(OpenAppTool);
     tool_registry.register(SetConversationModeTool::new(Arc::clone(&conv_mode)));
+
+    // Shell command execution — enabled by SHELL_ENABLED=1
+    if config.shell_enabled {
+        tool_registry.register(RunShellTool::new(config.shell_timeout_secs));
+        info!(target: "voicebot", "run_shell tool enabled (timeout={}s)", config.shell_timeout_secs);
+    }
 
     // Vision (screenshot) — enabled when SECONDARY_LLM_URL is set
     if let Some(ref sec_client) = secondary_llm_client {

@@ -534,11 +534,18 @@ impl HermesAcpWriter {
             .ok_or_else(|| anyhow::anyhow!("ACP: AGENT_ACP_COMMAND is empty"))?;
         let args = &parts[1..];
 
+        let stderr_sink = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("voicebot.log")
+            .map(std::process::Stdio::from)
+            .unwrap_or_else(|_| std::process::Stdio::null());
+
         let mut child = Command::new(program)
             .args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit()) // hermes logs to stderr
+            .stderr(stderr_sink) // hermes logs to stderr → redirect to voicebot.log
             .spawn()
             .map_err(|e| anyhow::anyhow!("ACP: failed to spawn '{}': {}", command, e))?;
 
