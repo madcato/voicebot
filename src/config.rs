@@ -102,6 +102,9 @@ pub struct Config {
     /// Command to start the ACP process (AGENT_ACP_COMMAND, default "hermes acp").
     /// Only used when agent_mode = "acp".
     pub agent_acp_command: String,
+    /// When true, send a warmup prompt to Hermes at startup to force model load.
+    /// AGENT_ACP_WARMUP=1. Only applies when agent_mode = "acp".
+    pub agent_acp_warmup: bool,
 
     // ── Inference daemon ──────────────────────────────────────────────────────
     /// Enable the background "is there anything worth saying?" loop.
@@ -302,6 +305,7 @@ impl Config {
             agent_mode: env::var("AGENT_MODE").unwrap_or_else(|_| "cli".to_string()),
             agent_acp_command: env::var("AGENT_ACP_COMMAND")
                 .unwrap_or_else(|_| "hermes acp".to_string()),
+            agent_acp_warmup: env::var("AGENT_ACP_WARMUP").as_deref() == Ok("1"),
 
             // Inference daemon
             daemon_enabled: env::var("DAEMON_ENABLED")

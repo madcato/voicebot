@@ -335,6 +335,7 @@ Most configuration is done via environment variables (or `.env` file):
 | `AGENT_TIMEOUT_SECS` | `120` | Timeout for synchronous CLI agent calls |
 | `AGENT_MODE` | `cli` | `cli` = fire-and-forget subprocess; `acp` = persistent ACP bidirectional mode |
 | `AGENT_ACP_COMMAND` | `hermes acp` | Command to start the ACP process (ACP mode only) |
+| `AGENT_ACP_WARMUP` | `0` | Pre-warm the ACP session at startup (`1` = enabled). Spawns and handshakes the ACP process in the background so the first `run_agent` call skips cold-start. Set `AGENT_ACP_WARMUP=1` to also send a warmup prompt, forcing model load before the user's first request. Requires `AGENT_MODE=acp`. |
 | **Secondary LLM** || |
 | `SECONDARY_LLM_URL` | — | Base URL of secondary LLM. Enables `take_screenshot` tool, EYES visual awareness, and routes summarization + profile extraction to this model. |
 | `SECONDARY_LLM_MODEL` | `local-model` | Model name for secondary LLM requests. |

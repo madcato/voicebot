@@ -343,6 +343,85 @@ async fn async_main() -> Result<()> {
         ));
     }
 
+    // ── ACP pre-warm ──────────────────────────────────────────────────────────
+    // When running in ACP mode, spawn the hermes acp process and perform the
+    // initialize + session/new handshake in the background at startup. This
+    // populates acp_writer / acp_inbound so the first run_agent call skips
+    // the cold-start delay. Optionally send a warmup prompt (AGENT_ACP_WARMUP=1)
+    // to force model load before the user's first real request.
+    if config.agent_mode == "acp" {
+        let acp_cmd     = config.agent_acp_command.clone();
+        let warmup      = config.agent_acp_warmup;
+        let writer_arc  = Arc::clone(&acp_writer);
+        let inbound_arc = Arc::clone(&acp_inbound);
+
+        tokio::spawn(async move {
+            info!(target: "agent", "ACP pre-warm: spawning {}…", acp_cmd);
+            let (mut writer, mut rx) = match HermesAcpWriter::spawn(&acp_cmd).await {
+                Ok(pair) => pair,
+                Err(e) => {
+                    warn!(target: "agent", "ACP pre-warm: spawn failed: {e}");
+                    return;
+                }
+            };
+            let cwd = std::env::current_dir()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            match writer.initialize(&mut rx, &cwd).await {
+                Ok(sid) => info!(target: "agent", "ACP pre-warm: session ready (sid={sid})"),
+                Err(e)  => {
+                    warn!(target: "agent", "ACP pre-warm: init failed: {e}");
+                    return;
+                }
+            }
+
+            // Store so run_acp() finds the session already initialised.
+            *writer_arc.lock().await  = Some(writer);
+            *inbound_arc.lock().await = Some(rx);
+
+            if warmup {
+                info!(target: "agent", "ACP pre-warm: sending warmup prompt…");
+                let mut taken_rx = inbound_arc.lock().await.take();
+                if let Some(rx) = taken_rx.as_mut() {
+                    let prompt_id = {
+                        let mut w = writer_arc.lock().await;
+                        let sid = w.as_ref()
+                            .and_then(|w| w.session_id.clone())
+                            .unwrap_or_default();
+                        match w.as_mut() {
+                            Some(w) => w.send_prompt(&sid, "hola").await.ok(),
+                            None    => None,
+                        }
+                    };
+                    if let Some(id) = prompt_id {
+                        let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
+                        tokio::pin!(deadline);
+                        loop {
+                            tokio::select! {
+                                _ = &mut deadline => {
+                                    warn!(target: "agent", "ACP pre-warm: warmup timed out");
+                                    break;
+                                }
+                                msg = rx.recv() => match msg {
+                                    Some(JsonRpcMessage::Response { id: resp_id, .. })
+                                        if resp_id == id =>
+                                    {
+                                        info!(target: "agent", "ACP pre-warm: warmup complete");
+                                        break;
+                                    }
+                                    Some(_) => continue,
+                                    None    => break,
+                                }
+                            }
+                        }
+                    }
+                }
+                *inbound_arc.lock().await = taken_rx;
+            }
+        });
+    }
+
     let tools = Arc::new(tool_registry);
 
     // ── Database ─────────────────────────────────────────────────────────────
@@ -1309,7 +1388,15 @@ async fn llm_task(
             {
                 let db_c = db.clone();
                 let resp_c = final_response.clone();
+                let tool_exchanges_c = messages[base_msg_len..].to_vec();
                 tokio::spawn(async move {
+                    // Persist tool-call exchanges BEFORE the assistant text so the DB
+                    // reflects the same ordering the LLM saw: tool_calls → tool_result → response.
+                    if !tool_exchanges_c.is_empty() {
+                        if let Err(e) = db_c.save_tool_exchanges(session_id, &tool_exchanges_c).await {
+                            warn!(target: "db", "Failed to save tool exchanges: {}", e);
+                        }
+                    }
                     if let Err(e) = db_c.save_message(session_id, "Assistant", &resp_c).await {
                         warn!(target: "db", "Failed to save assistant message: {}", e);
                     }
