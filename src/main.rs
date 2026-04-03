@@ -1183,6 +1183,10 @@ async fn llm_task(
 
         // Tool call loop — allows the model to call tools before its spoken response.
         let tool_defs = tools.tool_definitions();
+        info!(target: "pipeline", "LLM request: {} tool(s) available: {:?}",
+            tool_defs.len(),
+            tool_defs.iter().filter_map(|t| t["function"]["name"].as_str()).collect::<Vec<_>>()
+        );
         let mut messages = llm_session.lock().unwrap().all_messages_api();
         let base_msg_len = messages.len();
         let mut final_response = String::new();
@@ -1233,6 +1237,7 @@ async fn llm_task(
                                     tui_tx.send(tui::events::TuiEvent::AssistantToken(t)).ok();
                                 }
                                 Some(StreamToken::ToolCall { name, args }) => {
+                                    info!(target: "pipeline", "ToolCall received: name={} args={}", name, args);
                                     tool_call = Some((name, args));
                                     break;
                                 }

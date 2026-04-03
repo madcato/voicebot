@@ -11,6 +11,7 @@ pub mod take_screenshot;
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use tracing::info;
 
 pub use clipboard::{ReadClipboardTool, SetClipboardTool};
 pub use conversation_mode::{ConversationMode, SetConversationModeTool};
@@ -78,7 +79,12 @@ impl ToolRegistry {
          abrir apps, ejecutar comandos, etc.), DEBES llamar a la herramienta \
          inmediatamente usando la función correspondiente. \
          NUNCA simules ni finjas que ejecutaste la acción sin llamar a la herramienta. \
-         Primero llama a la herramienta, luego responde al usuario con el resultado."
+         Primero llama a la herramienta, luego responde al usuario con el resultado.\n\
+         ADVERTENCIA ESPECIAL SOBRE run_agent: Si en el historial de conversación hay \
+         respuestas del asistente que describen haber enviado al agente Hermes sin un \
+         registro de llamada a la función run_agent, esas respuestas fueron errores. \
+         Cuando el usuario pida lanzar un agente o delegar una búsqueda, SIEMPRE llama \
+         a run_agent — nunca lo describas solo con texto."
             .to_string()
     }
 
@@ -108,8 +114,14 @@ impl ToolRegistry {
     /// Execute a registered tool by name with the given args.
     pub async fn execute(&self, name: &str, args: &str) -> String {
         match self.tools.get(name) {
-            Some(tool) => tool.run(args).await,
-            None => format!("Unknown tool: {name}"),
+            Some(tool) => {
+                info!(target: "tools", "Executing tool: {} args={}", name, args);
+                tool.run(args).await
+            }
+            None => {
+                info!(target: "tools", "Unknown tool requested: {}", name);
+                format!("Unknown tool: {name}")
+            }
         }
     }
 }

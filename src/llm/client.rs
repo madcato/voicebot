@@ -229,6 +229,8 @@ impl LlamaClient {
             payload["tool_choice"] = serde_json::json!("auto");
         }
 
+        tracing::debug!(target: "llm", "Request payload: {}", serde_json::to_string(&payload).unwrap_or_default());
+
         let response = self
             .post_chat()
             .json(&payload)
@@ -279,6 +281,7 @@ impl LlamaClient {
                         }
                         // If a tool call was accumulating but no finish_reason arrived.
                         if let Some(name) = tool_name.take() {
+                            tracing::info!(target: "llm", "Emitting ToolCall (via [DONE]): name={} args={}", name, tool_args);
                             let _ = tx.send(StreamToken::ToolCall { name, args: tool_args.clone() }).await;
                         }
                         return;
@@ -290,11 +293,13 @@ impl LlamaClient {
 
                     // Check finish_reason before looking at delta content.
                     if let Some(finish_reason) = json["choices"][0]["finish_reason"].as_str() {
+                        tracing::debug!(target: "llm", "SSE finish_reason={}", finish_reason);
                         if finish_reason == "tool_calls" {
                             if let Some(tail) = think.flush() {
                                 let _ = tx.send(StreamToken::Content(tail)).await;
                             }
                             if let Some(name) = tool_name.take() {
+                                tracing::info!(target: "llm", "Emitting ToolCall (finish_reason=tool_calls): name={} args={}", name, tool_args);
                                 let _ = tx.send(StreamToken::ToolCall { name, args: tool_args.clone() }).await;
                             }
                             return;
@@ -309,6 +314,7 @@ impl LlamaClient {
                             if let Some(call) = calls.first() {
                                 if let Some(name) = call["function"]["name"].as_str() {
                                     if !name.is_empty() {
+                                        tracing::debug!(target: "llm", "Tool call detected: {}", name);
                                         tool_name = Some(name.to_string());
                                     }
                                 }
