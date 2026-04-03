@@ -266,6 +266,34 @@ impl Database {
         Ok(())
     }
 
+    /// Persist the tool-call exchange messages for a turn (assistant tool_calls + tool results).
+    ///
+    /// Serialises the full JSON array into a single row with role "ToolExchanges" so that
+    /// on next startup the session can reconstruct the exact tool-call context the LLM saw.
+    /// Without this, the model only sees the final assistant text response after a tool call
+    /// and cannot distinguish correctly-called tools from hallucinated ones.
+    pub async fn save_tool_exchanges(
+        &self,
+        session_id: Uuid,
+        exchanges: &[serde_json::Value],
+    ) -> Result<()> {
+        if exchanges.is_empty() {
+            return Ok(());
+        }
+        let json = serde_json::to_string(exchanges)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+        )
+        .bind(session_id.to_string())
+        .bind("ToolExchanges")
+        .bind(json)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Persist a single message turn.
     pub async fn save_message(&self, session_id: Uuid, role: &str, content: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();

@@ -95,6 +95,13 @@ impl LlmSession {
             match role.as_str() {
                 "User" => session.add_user_turn(content),
                 "Assistant" => session.add_assistant_turn(content),
+                "ToolExchanges" => {
+                    // Deserialise and replay the tool-call + tool-result messages so the
+                    // LLM sees the same context it had during the original turn.
+                    if let Ok(exchanges) = serde_json::from_str::<Vec<serde_json::Value>>(content) {
+                        session.add_tool_exchange(exchanges);
+                    }
+                }
                 _ => {}
             }
         }
