@@ -41,7 +41,7 @@ pub fn format_history(messages: &[serde_json::Value]) -> String {
 /// Reads the complete stdout as the response.
 ///
 /// Command construction: `{command_parts...} -q {query}`
-/// e.g. AGENT_COMMAND=`hermes chat` → `hermes chat -q "..."`
+/// e.g. AGENT_COMMAND=`hermes chat` → `hermes chat -Q -q "..."`
 async fn call_agent(command: String, query: String) -> String {
     let parts: Vec<String> = command.split_whitespace().map(String::from).collect();
     let program = match parts.first() {
@@ -49,6 +49,7 @@ async fn call_agent(command: String, query: String) -> String {
         None => return "Agent error: AGENT_COMMAND is empty.".to_string(),
     };
     let mut args: Vec<String> = parts[1..].to_vec();
+    args.push("-Q".to_string()); // quiet: suppress banner, spinner, tool previews
     args.push("-q".to_string());
     args.push(query);
 
@@ -67,7 +68,8 @@ async fn call_agent(command: String, query: String) -> String {
 
     match child.wait_with_output().await {
         Ok(output) => {
-            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let raw = String::from_utf8_lossy(&output.stdout).to_string();
+            let text = strip_hermes_cli_noise(&raw);
             if text.is_empty() {
                 "Agent completed with no output.".to_string()
             } else {
@@ -79,6 +81,39 @@ async fn call_agent(command: String, query: String) -> String {
             format!("Agent error: {}", e)
         }
     }
+}
+
+/// Strip structural lines Hermes emits even in quiet mode:
+///   - Box borders: lines whose trimmed content starts with ╭, ╰, or │
+///   - Session trailer: lines starting with "session_id:"
+/// Everything else is kept; leading/trailing whitespace is removed.
+fn strip_hermes_cli_noise(raw: &str) -> String {
+    let lines: Vec<&str> = raw.lines().collect();
+
+    let start = lines
+        .iter()
+        .position(|l| {
+            let t = l.trim();
+            !t.is_empty()
+                && !t.starts_with('╭')
+                && !t.starts_with('╰')
+                && !t.starts_with('│')
+        })
+        .unwrap_or(0);
+
+    let end = lines
+        .iter()
+        .rposition(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with("session_id:")
+        })
+        .map(|i| i + 1)
+        .unwrap_or(lines.len());
+
+    if start >= end {
+        return String::new();
+    }
+    lines[start..end].join("\n").trim().to_string()
 }
 
 // ── JSON-RPC 2.0 helpers ─────────────────────────────────────────────────────
@@ -254,10 +289,12 @@ impl RunAgentTool {
 
     /// ACP mode: send task to persistent ACP subprocess, deliver result proactively.
     async fn run_acp(&self, task: String) -> String {
+        info!(target: "agent", "RunAgentTool(acp): task started: {:?}", task);
         // Refuse if another task is already running.
         {
             let guard = self.active_task.lock().await;
             if guard.is_some() {
+                warn!(target: "agent", "RunAgentTool(acp): rejected — another task already running");
                 return "[El agente ya tiene una tarea en progreso. Usa 'run_agent: cancel' para cancelarla primero.]"
                     .to_string();
             }
@@ -402,7 +439,10 @@ impl Tool for RunAgentTool {
     fn description(&self) -> &str {
         "Delega una tarea al agente externo (Hermes). El agente tiene acceso a \
          herramientas de computadora, archivos, web, calendario y razonamiento extendido. \
-         El resultado se anuncia de forma proactiva cuando el agente termina. \
+         IMPORTANTE: DEBES llamar a esta función para delegar tareas. Nunca describas \
+         verbalmente que 'has enviado al agente' o que 'el agente está buscando' sin \
+         haber llamado primero a run_agent — eso sería un error. \
+         El resultado llega de forma proactiva cuando el agente termina. \
          Para cancelar una tarea en curso usa run_agent con task='cancel'. \
          Para consultar el estado usa task='status'."
     }
@@ -423,7 +463,9 @@ impl Tool for RunAgentTool {
 
     async fn run(&self, args: &str) -> String {
         let task = parse_task(args);
+        info!(target: "agent", "run_agent invoked: mode={} raw_args={:?} task={:?}", self.mode, args, task);
         if task.is_empty() {
+            warn!(target: "agent", "run_agent called with empty task");
             return "Error: run_agent requires a task description.".to_string();
         }
 
@@ -907,6 +949,32 @@ mod tests {
             "acp".to_string(),
             String::new(),
         )
+    }
+
+    // ── strip_hermes_cli_noise ────────────────────────────────────────────────
+
+    #[test]
+    fn strip_noise_quiet_mode_output() {
+        let input = "\r\n╭─ ⚕ Hermes ──────────────────────────────────────────────────────────────────╮\r\nEl resultado es 42.\n\nsession_id: 20260403_121303_abc\n";
+        assert_eq!(strip_hermes_cli_noise(input), "El resultado es 42.");
+    }
+
+    #[test]
+    fn strip_noise_clean_output() {
+        let input = "Respuesta limpia sin ruido.";
+        assert_eq!(strip_hermes_cli_noise(input), "Respuesta limpia sin ruido.");
+    }
+
+    #[test]
+    fn strip_noise_only_structural_lines() {
+        let input = "╭─ header ─╮\nsession_id: abc\n";
+        assert_eq!(strip_hermes_cli_noise(input), "");
+    }
+
+    #[test]
+    fn strip_noise_multiline_response() {
+        let input = "╭─ Hermes ─╮\nPrimera línea.\nSegunda línea.\n\nsession_id: xyz\n";
+        assert_eq!(strip_hermes_cli_noise(input), "Primera línea.\nSegunda línea.");
     }
 
     // ── format_history ────────────────────────────────────────────────────────
