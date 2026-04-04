@@ -88,9 +88,9 @@ from statistics import mean, stdev
 MODELS = [
     "Brooooooklyn/Qwen3.5-35B-A3B-UD-Q4_K_XL-mlx",
     "Brooooooklyn/Qwen3.5-27B-unsloth-mlx",
-    "Brooooooklyn/Qwen3.5-35B-A3B-UD-Q4_K_XL-mlx",
     "mlx-community/Qwen3.5-35B-A3B-4bit",
     "mlx-community/Qwen3.5-9B-MLX-4bit",
+    "mlx-community/Qwen3.5-4B-MLX-4bit",
     "mlx-community/gemma-4-26b-a4b-it-4bit",
     "mlx-community/gemma-4-31b-it-4bit",
     "mlx-community/gemma-4-e4b-it-4bit",
