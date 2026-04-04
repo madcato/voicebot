@@ -51,7 +51,8 @@ Jarvis is built from the ground up for voice interaction:
 - 🧠 Context consolidation with persistent memory (Claude-like context management)
 - 👤 User profile extraction from conversations (injects into system prompt)
 - 🎭 Startup greeting with name recognition
-- 🛠️ Tool calling system (`current_time`, `take_screenshot`, `send_notification`, `read/set_clipboard`, `open_app`)
+- 🛠️ Tool calling system (`current_time`, `take_screenshot`, `send_notification`, `read/set_clipboard`, `open_app`, `web_search`)
+- 🔍 Web search via SearXNG with multiturn agent support (talk, search, analyze, search, respond)
 - 🆔 Multi-speaker registry (auto-enrolls up to N speakers, ONNX-based embeddings)
 - 🎙️ Ambient context buffer — transcribes all ambient speech (TV, others) for contextual responses
 - 💬 Two conversation modes: **Active** (respond freely to main user) / **Ambient** (wake-word only, with full context)
@@ -344,6 +345,9 @@ Most configuration is done via environment variables (or `.env` file):
 | `SECONDARY_LLM_PROVIDER` | `llama` | Backend for secondary LLM: `llama` or `mlx`. |
 | **EYES (visual awareness)** || |
 | `EYES_INTERVAL_SECS` | `0` (disabled) | Seconds between automatic screen captures. Set to e.g. `15` to enable. Requires `SECONDARY_LLM_URL` (vision model). Jarvis speaks when something important is detected on screen. |
+| **Web Search (SearXNG)** || |
+| `SEARXNG_URL` | — (disabled) | Base URL of SearXNG instance (e.g. `http://tesla.local:8080`). Enables the `web_search` tool. |
+| `SEARXNG_SECRET` | (empty) | Bearer token for SearXNG API authentication. |
 | **Speaker Verification** || |
 | `SPEAKER_MODEL` | auto-detect | Path to sherpa-onnx speaker embedding ONNX model. Auto-detected at `models/speaker_embedding.onnx`; disabled if absent. |
 | `SPEAKER_ENROLLMENT_PATH` | `data/speaker.emb` | Base path for speaker profiles. Profiles saved as `speaker_0.emb`, `speaker_1.emb`, etc. in the same directory. |

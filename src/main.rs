@@ -114,7 +114,7 @@ use whisper_rs::install_logging_hooks;
 use crate::tools::{
     format_history, ActiveAcpTask, ConversationMode, CurrentTimeTool, HermesAcpWriter, JsonRpcMessage,
     OpenAppTool, ReadClipboardTool, RunAgentTool, RunShellTool, SetClipboardTool, SetConversationModeTool,
-    TakeScreenshotTool, ToolRegistry,
+    TakeScreenshotTool, ToolRegistry, WebSearchTool,
 };
 use crate::tts::{SayTts, SentenceSplitter, TtsEngine};
 #[cfg(feature = "kokoro")]
@@ -318,6 +318,15 @@ async fn async_main() -> Result<()> {
             config.secondary_llm_model,
         );
         tool_registry.register(TakeScreenshotTool::new(sec_client.clone()));
+    }
+
+    // Web search (SearXNG) — enabled when SEARXNG_URL is set
+    if let Some(ref searxng_url) = config.searxng_url {
+        tool_registry.register(WebSearchTool::new(
+            searxng_url.clone(),
+            config.searxng_secret.clone(),
+        ));
+        info!(target: "voicebot", "web_search tool enabled (url={})", searxng_url);
     }
 
     // External agent delegation — unified RunAgentTool (CLI or ACP mode)
@@ -792,8 +801,9 @@ async fn async_main() -> Result<()> {
     {
         let now = chrono::Local::now();
         let time_str = now.format("%H:%M").to_string();
+        let date_str = now.format("%d/%m/%Y").to_string();
         let notification = format!(
-            "[Sistema: el voicebot acaba de arrancar. Son las {time_str}.\n\
+            "[Sistema: el voicebot acaba de arrancar. Son las {time_str}, del día {date_str}\n\
              Saluda al usuario de forma natural y muy concisa.]"
         );
         *shared.transliterated_text.lock().unwrap() = notification;
@@ -1350,6 +1360,11 @@ async fn llm_task(
 
                 match tool_call {
                     Some((name, args)) => {
+                        // Announce "Buscando." via TTS while web_search runs.
+                        if name == "web_search" {
+                            shared.assistant_text.lock().unwrap().push_str("Buscando. ");
+                            events.llm_post_received.notify_one();
+                        }
                         let result = tools.execute(&name, &args).await;
                         info!(target: "pipeline", "Tool[{}] `{}` → {}", iter, name, result);
                         #[cfg(feature = "tui")]

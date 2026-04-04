@@ -48,16 +48,16 @@ from statistics import mean, stdev
 # ── Model list ────────────────────────────────────────────────────────────────
 
 ## OMLX
-MODELS = [
-    "Bonsai-8B-mlx-1bit",
-    "LFM2-24B-A2B-MLX-4bit",
-    "LFM2.5-350M-MLX-8bit",
-    "Qwen3-30B-A3B-Instruct-2507-MLX-4bit",
-    "Qwen3.5-27B-oQ3",
-    "Qwen3.5-2B-4bit",
-    "Qwen3.5-35B-A3B-4bit",
-    "Qwen3.5-35B-A3B-MLX-oQ4",
-]
+# MODELS = [
+#     "Bonsai-8B-mlx-1bit",
+#     "LFM2-24B-A2B-MLX-4bit",
+#     "LFM2.5-350M-MLX-8bit",
+#     "Qwen3-30B-A3B-Instruct-2507-MLX-4bit",
+#     "Qwen3.5-27B-oQ3",
+#     "Qwen3.5-2B-4bit",
+#     "Qwen3.5-35B-A3B-4bit",
+#     "Qwen3.5-35B-A3B-MLX-oQ4",
+# ]
 
 ## LM Studio
 # MODELS = [
@@ -73,13 +73,16 @@ MODELS = [
 # ]
 
 ## Ollama local
-# MODELS = [
-#     "lfm2:24b",
-#     "qwen3:30b-a3b-instruct-2507-q4_K_M",
-#     "qwen3.5:4b-nvfp4",
-#     "qwen3.5:35b-a3b-coding-nvfp4",
-#     "qwen3.5:35b-a3b-int4",
-# ]
+MODELS = [
+    "gemma4:e2b-it-q8_0",
+    "gemma4:31b-it-q4_K_M",
+    "gemma4:26b-a4b-it-q4_K_M",
+    "lfm2:24b",
+    "qwen3:30b-a3b-instruct-2507-q4_K_M",
+    "qwen3.5:4b-nvfp4",
+    "qwen3.5:35b-a3b-coding-nvfp4",
+    "qwen3.5:35b-a3b-int4",
+]
 
 # ── Conversation fixture ──────────────────────────────────────────────────────
 

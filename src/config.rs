@@ -137,6 +137,12 @@ pub struct Config {
     /// Hard timeout per shell command in seconds (SHELL_TIMEOUT_SECS).
     pub shell_timeout_secs: u64,
 
+    // ── Web Search (SearXNG) ─────────────────────────────────────────────────
+    /// Base URL of the SearXNG instance (SEARXNG_URL). None = web_search tool disabled.
+    pub searxng_url: Option<String>,
+    /// Bearer token for SearXNG authentication (SEARXNG_SECRET).
+    pub searxng_secret: String,
+
     // ── Speaker verification ──────────────────────────────────────────────────
     /// Path to sherpa-onnx speaker embedding ONNX model (SPEAKER_MODEL).
     /// None = auto-detect from models/speaker_embedding.onnx; disabled if absent.
@@ -342,6 +348,10 @@ impl Config {
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .context("Invalid SHELL_TIMEOUT_SECS")?,
+
+            // Web Search (SearXNG)
+            searxng_url: env::var("SEARXNG_URL").ok(),
+            searxng_secret: env::var("SEARXNG_SECRET").unwrap_or_default(),
 
             // Speaker verification
             speaker_model: {

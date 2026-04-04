@@ -106,6 +106,8 @@ Microphone
 - `WHISPER_MODEL` — path to whisper GGML model file (default `models/ggml-large-v3-turbo.bin`)
 - `SAY_VOICE` — macOS voice name (default `"Marisol (Enhanced)"`); list voices with `say -v ?`
 - `AUDIO_OUTPUT_DEVICE` — substring match of output device name; leave unset to use system default
+- `SEARXNG_URL` — base URL of SearXNG instance; enables `web_search` tool when set
+- `SEARXNG_SECRET` — Bearer token for SearXNG API authentication
 
 **`src/memory/`** — Persistent memory system
 - `mod.rs`: `extract_memories()` asks LLM to extract persistent notes from conversation history; `build_memory_context()` builds the `[MEMORIES]` block for the system prompt
