@@ -1,5 +1,5 @@
 pub mod client;
 pub mod session;
 
-pub use client::{LlamaClient, StreamToken};
+pub use client::{OpenAIClient, StreamToken};
 pub use session::{LlmSession, Message};

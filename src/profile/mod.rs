@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-use crate::llm::{LlamaClient, Message};
+use crate::llm::{OpenAIClient, Message};
 
 /// Minimum confidence required for a fact to be injected into the system prompt.
 const MIN_INJECT_CONFIDENCE: f64 = 0.5;
@@ -43,7 +43,7 @@ pub fn build_profile_context(facts: &[ProfileFact]) -> String {
 /// task — errors are logged but do not affect the conversation.
 #[allow(dead_code)]
 pub async fn extract_facts(
-    client: &LlamaClient,
+    client: &OpenAIClient,
     user_text: &str,
     assistant_text: &str,
 ) -> Vec<ProfileFact> {
@@ -133,7 +133,7 @@ fn strip_code_fence(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{LlamaClient, LlmSession};
+    use crate::llm::{OpenAIClient, LlmSession};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -205,7 +205,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         let facts = extract_facts(&client, "Me llamo Daniel.", "Encantado, Daniel.").await;
 
         assert_eq!(facts.len(), 1);
@@ -231,7 +231,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         let facts = extract_facts(
             &client,
             "Me llamo Daniel, vivo en Madrid y soy ingeniero de software.",
@@ -256,7 +256,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         let facts = extract_facts(&client, "¿Qué hora es?", "Son las 14:00.").await;
         assert!(facts.is_empty());
     }
@@ -274,7 +274,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         let facts = extract_facts(&client, "Vivo en Madrid.", "Entendido.").await;
 
         assert_eq!(facts.len(), 1);
@@ -295,7 +295,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         let facts = extract_facts(&client, "Me encanta programar en Rust.", "Es un lenguaje excelente.").await;
 
         assert_eq!(facts.len(), 1);
@@ -315,7 +315,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         let facts = extract_facts(&client, "Me encanta Rust.", "Es genial.").await;
 
         assert_eq!(facts.len(), 1);
@@ -336,7 +336,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         let facts = extract_facts(&client, "Soy Daniel.", "Hola.").await;
 
         assert_eq!(facts.len(), 1);
@@ -357,7 +357,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         let facts = extract_facts(&client, "Me llamo Daniel.", "Hola.").await;
 
         assert_eq!(facts.len(), 1);
@@ -373,7 +373,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         // Must not panic — errors are swallowed and an empty vec is returned.
         let facts = extract_facts(&client, "Hola.", "Hola.").await;
         assert!(facts.is_empty());
@@ -390,7 +390,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
         let facts = extract_facts(&client, "Hola.", "Hola.").await;
         assert!(facts.is_empty(), "non-JSON LLM output must yield empty facts without panic");
     }
@@ -483,7 +483,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
 
         // Step 1: extract facts from the last turn
         let facts = extract_facts(
@@ -537,7 +537,7 @@ mod tests {
         let llm_provider = std::env::var("LLM_PROVIDER")
             .unwrap_or_else(|_| "llama".to_string());
         let llm_api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
-        let client = LlamaClient::new(
+        let client = OpenAIClient::new(
             &llm_url,
             &llm_model,
             400,

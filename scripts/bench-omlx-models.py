@@ -73,15 +73,27 @@ from statistics import mean, stdev
 # ]
 
 ## Ollama local
+# MODELS = [
+#     "gemma4:e2b-it-q8_0",
+#     "gemma4:31b-it-q4_K_M",
+#     "gemma4:26b-a4b-it-q4_K_M",
+#     "lfm2:24b",
+#     "qwen3:30b-a3b-instruct-2507-q4_K_M",
+#     "qwen3.5:4b-nvfp4",
+#     "qwen3.5:35b-a3b-coding-nvfp4",
+#     "qwen3.5:35b-a3b-int4",
+# ]
+
+## mlx-lm local
 MODELS = [
-    "gemma4:e2b-it-q8_0",
-    "gemma4:31b-it-q4_K_M",
-    "gemma4:26b-a4b-it-q4_K_M",
-    "lfm2:24b",
-    "qwen3:30b-a3b-instruct-2507-q4_K_M",
-    "qwen3.5:4b-nvfp4",
-    "qwen3.5:35b-a3b-coding-nvfp4",
-    "qwen3.5:35b-a3b-int4",
+    "Brooooooklyn/Qwen3.5-35B-A3B-UD-Q4_K_XL-mlx",
+    "Brooooooklyn/Qwen3.5-27B-unsloth-mlx",
+    "Brooooooklyn/Qwen3.5-35B-A3B-UD-Q4_K_XL-mlx",
+    "mlx-community/Qwen3.5-35B-A3B-4bit",
+    "mlx-community/Qwen3.5-9B-MLX-4bit",
+    "mlx-community/gemma-4-26b-a4b-it-4bit",
+    "mlx-community/gemma-4-31b-it-4bit",
+    "mlx-community/gemma-4-e4b-it-4bit",
 ]
 
 # ── Conversation fixture ──────────────────────────────────────────────────────

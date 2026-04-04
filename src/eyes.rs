@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::agents::ProactiveEvent;
-use crate::llm::LlamaClient;
+use crate::llm::OpenAIClient;
 
 const EYES_PROMPT: &str = "\
 You are a background visual monitor for a voice assistant called Jarvis. \
@@ -38,7 +38,7 @@ warn_user: false";
 
 pub struct EyesDaemon {
     pub interval_secs: u64,
-    pub vision_client: LlamaClient,
+    pub vision_client: OpenAIClient,
     pub proactive_tx: mpsc::Sender<ProactiveEvent>,
 }
 

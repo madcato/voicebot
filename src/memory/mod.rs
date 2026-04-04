@@ -2,7 +2,7 @@ use serde::Deserialize;
 use tracing::{debug, info, warn};
 
 use crate::db::{Memory, NewMemory};
-use crate::llm::{LlamaClient, Message};
+use crate::llm::{OpenAIClient, Message};
 
 /// Maximum number of memories injected into the system prompt.
 const MAX_MEMORIES_IN_PROMPT: usize = 50;
@@ -57,7 +57,7 @@ pub struct MemoryExtractionResult {
 /// `existing_memories` is passed so the LLM can avoid duplicates and mark
 /// outdated memories for archival.
 pub async fn extract_memories(
-    client: &LlamaClient,
+    client: &OpenAIClient,
     conversation_text: &str,
     existing_memories: &[Memory],
 ) -> MemoryExtractionResult {

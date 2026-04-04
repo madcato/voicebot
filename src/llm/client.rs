@@ -91,7 +91,7 @@ fn partial_tag_suffix(s: &str, tag: &str) -> usize {
     0
 }
 
-/// A token produced by `LlamaClient::stream`.
+/// A token produced by `OpenAIClient::stream`.
 ///
 /// The LLM either generates text content (route to TTS) or calls a tool
 /// (stop streaming, execute the tool, then continue).
@@ -104,7 +104,7 @@ pub enum StreamToken {
 }
 
 #[derive(Clone)]
-pub struct LlamaClient {
+pub struct OpenAIClient {
     client: reqwest::Client,
     chat_url: String,
     model: String,
@@ -124,7 +124,7 @@ pub struct LlamaClient {
     api_key: String,
 }
 
-impl LlamaClient {
+impl OpenAIClient {
     pub fn new(
         base_url: &str,
         model: &str,
@@ -494,7 +494,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test-model", 512, 0.3, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test-model", 512, 0.3, 0, -1);
         let result = client.complete(&make_messages()).await.unwrap();
         assert_eq!(result, "This is the summary.");
     }
@@ -510,7 +510,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test-model", 512, 0.3, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test-model", 512, 0.3, 0, -1);
         let result = client.complete(&make_messages()).await.unwrap();
         assert_eq!(result, "trimmed");
     }
@@ -524,7 +524,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test-model", 512, 0.3, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test-model", 512, 0.3, 0, -1);
         let result = client.complete(&make_messages()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("500"));
@@ -543,7 +543,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test-model", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test-model", 256, 0.1, 0, -1);
         let result = client.complete_short(&make_messages()).await.unwrap();
         assert!(result.contains("Daniel"));
     }
@@ -561,7 +561,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "vision-model", 512, 0.3, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "vision-model", 512, 0.3, 0, -1);
         let result = client
             .complete_multimodal("data:image/png;base64,abc123", "What do you see?")
             .await
@@ -578,7 +578,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "vision-model", 512, 0.3, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "vision-model", 512, 0.3, 0, -1);
         let result = client
             .complete_multimodal("data:image/png;base64,abc123", "What do you see?")
             .await;
@@ -607,7 +607,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test-model", 400, 0.7, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test-model", 400, 0.7, 0, -1);
         let messages = make_messages();
         let (mut rx, _handle) = client.stream(&messages_to_json(&messages), &[], false).await.unwrap();
 
@@ -636,7 +636,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test-model", 400, 0.7, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test-model", 400, 0.7, 0, -1);
         let messages = make_messages();
         let (mut rx, _handle) = client.stream(&messages_to_json(&messages), &[], false).await.unwrap();
 
@@ -738,7 +738,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test-model", 400, 0.7, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test-model", 400, 0.7, 0, -1);
         let (mut rx, _handle) = client.stream(&[], &[], false).await.unwrap();
 
         let token = rx.recv().await.expect("should receive a token");
@@ -762,7 +762,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = LlamaClient::new(&server.uri(), "test-model", 512, 0.3, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test-model", 512, 0.3, 0, -1);
 
         // Build a session with enough history to trigger summarization
         let mut session = super::super::session::LlmSession::new("Eres Jarvis.", 0);

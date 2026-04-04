@@ -29,7 +29,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::audio::output::AudioOutput;
 use crate::db::Database;
-use crate::llm::{LlamaClient, LlmSession};
+use crate::llm::{OpenAIClient, LlmSession};
 use crate::stt::SttStream;
 use crate::tools::{ToolRegistry, ConversationMode};
 use crate::tts::{mock_tts::MockTts, TtsEngine};
@@ -71,7 +71,7 @@ fn make_sse_tool_call(tool_name: &str, args: &str) -> String {
 
 struct E2eHarness {
     pub server: MockServer,
-    pub llm_client: LlamaClient,
+    pub llm_client: OpenAIClient,
     pub llm_session: Arc<Mutex<LlmSession>>,
     pub tts: Arc<TtsEngine>,
     /// Accumulates every sentence sent to TTS.
@@ -92,7 +92,7 @@ impl E2eHarness {
 
     async fn with_system_prompt(system_prompt: &str) -> Self {
         let server = MockServer::start().await;
-        let llm_client = LlamaClient::new(
+        let llm_client = OpenAIClient::new(
             &server.uri(),
             "test-model",
             400,  // max_tokens
