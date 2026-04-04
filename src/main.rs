@@ -106,7 +106,7 @@ use crate::audio::speaker::{SpeakerVerdict, SpeakerVerifier};
 use crate::audio::vad::{VadResult, VoiceActivityDetector};
 use crate::config::Config;
 use crate::db::{Database, Memory};
-use crate::llm::{LlamaClient, LlmSession, StreamToken};
+use crate::llm::{OpenAIClient, LlmSession, StreamToken};
 use crate::memory::{build_memory_context, extract_memories};
 use crate::profile::{build_profile_context, ProfileFact};
 use crate::stt::{WhisperStt, SttStream};
@@ -271,9 +271,9 @@ async fn async_main() -> Result<()> {
     //
     // Secondary LLM client — vision, summarization, profile extraction.
     // Built early so TakeScreenshotTool can be registered in the tool registry.
-    let secondary_llm_client: Option<LlamaClient> =
+    let secondary_llm_client: Option<OpenAIClient> =
         config.secondary_llm_url.as_ref().map(|url| {
-            LlamaClient::new(url, &config.secondary_llm_model, config.secondary_llm_max_tokens, 0.3, 0, -1)
+            OpenAIClient::new(url, &config.secondary_llm_model, config.secondary_llm_max_tokens, 0.3, 0, -1)
                 .with_provider(&config.secondary_llm_provider)
                 .with_api_key(&config.secondary_llm_api_key)
         });
@@ -483,7 +483,7 @@ async fn async_main() -> Result<()> {
     )));
 
     // ── LLM client ────────────────────────────────────────────────────────────
-    let llm_client = LlamaClient::new(
+    let llm_client = OpenAIClient::new(
         &config.llm_url,
         &config.llm_model,
         config.llm_max_tokens,
@@ -1189,7 +1189,7 @@ async fn llm_task(
     shared: Arc<SharedSession>,
     events: Arc<PipelineEvents>,
     llm_session: Arc<Mutex<LlmSession>>,
-    llm_client: LlamaClient,
+    llm_client: OpenAIClient,
     db: Database,
     session_id: uuid::Uuid,
     tools: Arc<ToolRegistry>,
@@ -1639,7 +1639,7 @@ async fn consolidation_task(
     shared: Arc<SharedSession>,
     events: Arc<PipelineEvents>,
     llm_session: Arc<Mutex<LlmSession>>,
-    background_client: LlamaClient,
+    background_client: OpenAIClient,
     db: Database,
     session_id: uuid::Uuid,
     context_tokens: usize,
@@ -1885,7 +1885,7 @@ async fn run_pipeline(
     tts: Arc<crate::tts::TtsEngine>,
     audio_output: Arc<crate::audio::output::AudioOutput>,
     llm_session: Arc<Mutex<crate::llm::LlmSession>>,
-    llm_client: crate::llm::LlamaClient,
+    llm_client: crate::llm::OpenAIClient,
     db: crate::db::Database,
     session_id: uuid::Uuid,
     tts_sample_rate: u32,
@@ -2060,7 +2060,7 @@ mod tests {
         let llm_provider = std::env::var("LLM_PROVIDER")
             .unwrap_or_else(|_| "llama".to_string());
         let llm_api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
-        let llm_client = crate::llm::LlamaClient::new(
+        let llm_client = crate::llm::OpenAIClient::new(
             &llm_url,
             &llm_model,
             400,       // max_tokens
@@ -2161,7 +2161,7 @@ mod tests {
         let llm_provider = std::env::var("LLM_PROVIDER")
             .unwrap_or_else(|_| "llama".to_string());
         let llm_api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
-        let llm_client = crate::llm::LlamaClient::new(
+        let llm_client = crate::llm::OpenAIClient::new(
             &llm_url, &llm_model, 400, 0.3, 0, -1,
         )
         .with_provider(&llm_provider)
@@ -2198,7 +2198,7 @@ mod tests {
 
         // ── Helper: measure TTFT for a simple message ────────────────────────
         async fn measure_ttft(
-            client: &crate::llm::LlamaClient,
+            client: &crate::llm::OpenAIClient,
             session: &crate::llm::LlmSession,
             probe_msg: &str,
         ) -> (u128, u128, String) {

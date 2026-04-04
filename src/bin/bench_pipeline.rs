@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use tracing_subscriber::EnvFilter;
 
 use voicebot::config::Config;
-use voicebot::llm::{LlamaClient, LlmSession, StreamToken};
+use voicebot::llm::{OpenAIClient, LlmSession, StreamToken};
 use voicebot::stt::WhisperStt;
 use voicebot::tts::{SayTts, SentenceSplitter, TtsEngine};
 use whisper_rs::install_logging_hooks;
@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
     );
 
     // ── LLM init ─────────────────────────────────────────────────────────────
-    let llm_client = LlamaClient::new(
+    let llm_client = OpenAIClient::new(
         &config.llm_url,
         &config.llm_model,
         config.llm_max_tokens,

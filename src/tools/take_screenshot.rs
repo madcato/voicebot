@@ -2,23 +2,23 @@ use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use tracing::{info, warn};
 
-use crate::llm::LlamaClient;
+use crate::llm::OpenAIClient;
 
 use super::Tool;
 
 /// Tool that takes a screenshot and describes it using a vision model.
 ///
 /// Enabled when `SECONDARY_LLM_URL` is set. Delegates HTTP to the shared
-/// secondary `LlamaClient` so the vision call never evicts the main
+/// secondary `OpenAIClient` so the vision call never evicts the main
 /// conversation KV-cache.
 ///
 /// macOS only: uses `screencapture -x -t png` for a silent capture.
 pub struct TakeScreenshotTool {
-    client: LlamaClient,
+    client: OpenAIClient,
 }
 
 impl TakeScreenshotTool {
-    pub fn new(client: LlamaClient) -> Self {
+    pub fn new(client: OpenAIClient) -> Self {
         Self { client }
     }
 
@@ -117,7 +117,7 @@ mod tests {
     use super::*;
 
     fn tool(base_url: &str) -> TakeScreenshotTool {
-        TakeScreenshotTool::new(LlamaClient::new(base_url, "test-vision-model", 512, 0.0, 0, -1))
+        TakeScreenshotTool::new(OpenAIClient::new(base_url, "test-vision-model", 512, 0.0, 0, -1))
     }
 
     #[test]

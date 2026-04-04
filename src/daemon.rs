@@ -10,14 +10,14 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::agents::ProactiveEvent;
-use crate::llm::{LlamaClient, LlmSession, Message};
+use crate::llm::{OpenAIClient, LlmSession, Message};
 
 /// Sentinel the LLM must return when it decides there is nothing to say.
 const NOTHING: &str = "NOTHING";
 
 pub struct InferenceDaemon {
     pub interval_secs: u64,
-    pub llm_client: LlamaClient,
+    pub llm_client: OpenAIClient,
     pub llm_session: std::sync::Arc<std::sync::Mutex<LlmSession>>,
     pub proactive_tx: mpsc::Sender<ProactiveEvent>,
 }

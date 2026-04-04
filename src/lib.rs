@@ -14,6 +14,6 @@ pub use audio::output::AudioOutput;
 pub use audio::vad::{VadResult, VoiceActivityDetector};
 pub use config::Config;
 pub use db::Database;
-pub use llm::{LlamaClient, LlmSession};
+pub use llm::{OpenAIClient, LlmSession};
 pub use stt::WhisperStt;
 pub use tts::{SayTts, SentenceSplitter};

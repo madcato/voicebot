@@ -32,7 +32,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OMLX_DIR="${1:-${OMLX_DIR:-${HOME}/.lmstudio/models}}"
 
 export OMLX_DIR
-export BENCH_PORT="${BENCH_PORT:-${OMLX_PORT:-1234}}"
+export BENCH_PORT="${BENCH_PORT:-${OMLX_PORT:-8080}}"
 export BENCH_TOKEN="${BENCH_TOKEN:-${OMLX_TOKEN:-asdf}}"
 export BENCH_PROVIDER="${BENCH_PROVIDER:-omlx}"
 export BENCH_TRIALS="${BENCH_TRIALS:-3}"
