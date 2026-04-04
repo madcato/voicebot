@@ -797,6 +797,21 @@ async fn async_main() -> Result<()> {
         });
     }
 
+    // ── Startup consolidation (if context already exceeds idle threshold) ────
+    {
+        let needs = {
+            let s = llm_session.lock().unwrap();
+            s.needs_consolidation(config.llm_context_tokens, config.llm_idle_min_context_pct)
+        };
+        if needs {
+            info!(target: "memory", "Startup: context exceeds idle threshold — running silent consolidation before greeting");
+            run_consolidation_cycle(
+                &background_client, &db, session_id, &llm_session,
+                config.llm_summary_keep_turns, &config.llm_system_prompt, &tool_section,
+            ).await;
+        }
+    }
+
     // ── Startup greeting ──────────────────────────────────────────────────────
     {
         let now = chrono::Local::now();
@@ -1629,6 +1644,124 @@ async fn tts_task(
     }
 }
 
+/// Core consolidation work: extract profile facts + memories, summarize old
+/// turns, rebuild the system prompt, and apply the compacted session.
+///
+/// Called both by `consolidation_task` (recurring) and at startup when the
+/// context already exceeds `LLM_IDLE_MIN_CONTEXT_PCT`.
+#[allow(clippy::too_many_arguments)]
+async fn run_consolidation_cycle(
+    background_client: &OpenAIClient,
+    db: &Database,
+    session_id: uuid::Uuid,
+    llm_session: &Arc<Mutex<LlmSession>>,
+    keep_turns: usize,
+    base_prompt: &str,
+    tool_section: &str,
+) {
+    let (conversation_text, summary_prompt, turns_to_summarize) = {
+        let s = llm_session.lock().unwrap();
+        let count = s.summarizable_turn_count(keep_turns);
+        let prompt = s.build_summary_prompt(keep_turns);
+        let mut conv = String::new();
+        for msg in &s.messages[..count.min(s.messages.len())] {
+            if let (Some(role), Some(content)) =
+                (msg["role"].as_str(), msg["content"].as_str())
+            {
+                if role == "user" || role == "assistant" {
+                    conv.push_str(role);
+                    conv.push_str(": ");
+                    conv.push_str(content);
+                    conv.push_str("\n\n");
+                }
+            }
+        }
+        (conv, prompt, count)
+    };
+
+    // Profile facts.
+    if !conversation_text.is_empty() {
+        let facts = extract_facts(background_client, &conversation_text, "").await;
+        for fact in facts {
+            if let Err(e) = db.upsert_profile_fact(&fact.key, &fact.value, fact.confidence).await {
+                warn!(target: "profile", "Failed to save profile fact '{}': {}", fact.key, e);
+            } else {
+                debug!(target: "profile", "Profile: {} = {} ({:.0}%)", fact.key, fact.value, fact.confidence * 100.0);
+            }
+        }
+    }
+
+    // Persistent memories.
+    let existing_memories = db.load_active_memories().await.unwrap_or_default();
+    let mem_result = extract_memories(background_client, &conversation_text, &existing_memories).await;
+    for id in &mem_result.archive_ids {
+        if let Err(e) = db.deactivate_memory(*id).await {
+            warn!(target: "memory", "Failed to archive memory id={}: {}", id, e);
+        }
+    }
+    if !mem_result.new_memories.is_empty() {
+        info!(target: "memory", "Extracted {} new memories", mem_result.new_memories.len());
+        if let Err(e) = db.save_memories_batch(&mem_result.new_memories, session_id).await {
+            warn!(target: "memory", "Failed to save memories: {}", e);
+        }
+    }
+    if !mem_result.archive_ids.is_empty() {
+        info!(target: "memory", "Archived {} outdated memories", mem_result.archive_ids.len());
+    }
+
+    // Summarize.
+    let summary = if let Some(prompt) = summary_prompt {
+        match background_client.complete(&prompt).await {
+            Ok(s) if !s.is_empty() => { info!(target: "memory", "Summary: {}", s); Some(s) }
+            Ok(_) => { warn!(target: "memory", "Summarization returned empty result"); None }
+            Err(e) => { warn!(target: "memory", "Summarization failed: {}", e); None }
+        }
+    } else {
+        None
+    };
+
+    // Persist summary and rebuild system prompt.
+    if let Some(ref summary_text) = summary {
+        let prev_through_id = db.get_summary_through_id(session_id).await.unwrap_or(0);
+        let through_id = db
+            .get_message_id_at_offset(session_id, prev_through_id, turns_to_summarize.saturating_sub(1))
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        if through_id > 0 {
+            if let Err(e) = db.save_summary(session_id, summary_text, through_id).await {
+                warn!(target: "db", "Failed to persist summary: {}", e);
+            }
+        }
+    }
+
+    let fresh_profile = db.load_user_profile().await.unwrap_or_default();
+    let fresh_profile_facts: Vec<crate::profile::ProfileFact> = fresh_profile
+        .into_iter()
+        .map(|(key, value, confidence)| crate::profile::ProfileFact { key, value, confidence })
+        .collect();
+    let fresh_memories = db.load_active_memories().await.unwrap_or_default();
+    let new_system_prompt = build_system_prompt(
+        base_prompt, &fresh_profile_facts, &fresh_memories, tool_section,
+    );
+
+    {
+        let mut s = llm_session.lock().unwrap();
+        if let Some(ref summary_text) = summary {
+            s.apply_summary(summary_text, keep_turns);
+        }
+        s.set_system_prompt(new_system_prompt);
+        s.invalidate_cache();
+    }
+
+    info!(
+        target: "memory",
+        "Consolidation complete — prompt rebuilt ({} profile facts, {} memories, {} recent turns kept)",
+        fresh_profile_facts.len(), fresh_memories.len(), keep_turns,
+    );
+}
+
 /// Context consolidation task: blocks on LLM_POST_FINISHED, runs a full
 /// memory consolidation cycle when the context window approaches its limit.
 ///
@@ -1742,113 +1875,11 @@ async fn consolidation_task(
             info!(target: "memory", "Idle timer — running silent consolidation...");
         }
 
-        // ── Phase 2: Extract and save ────────────────────────────────────────
-        let (conversation_text, summary_prompt, turns_to_summarize) = {
-            let s = llm_session.lock().unwrap();
-            let count = s.summarizable_turn_count(keep_turns);
-            let prompt = s.build_summary_prompt(keep_turns);
-            let mut conv = String::new();
-            for msg in &s.messages[..count.min(s.messages.len())] {
-                if let (Some(role), Some(content)) =
-                    (msg["role"].as_str(), msg["content"].as_str())
-                {
-                    if role == "user" || role == "assistant" {
-                        conv.push_str(role);
-                        conv.push_str(": ");
-                        conv.push_str(content);
-                        conv.push_str("\n\n");
-                    }
-                }
-            }
-            (conv, prompt, count)
-        };
-
-        // 2a) Profile facts.
-        if !conversation_text.is_empty() {
-            let facts = extract_facts(&background_client, &conversation_text, "").await;
-            for fact in facts {
-                if let Err(e) = db.upsert_profile_fact(&fact.key, &fact.value, fact.confidence).await {
-                    warn!(target: "profile", "Failed to save profile fact '{}': {}", fact.key, e);
-                } else {
-                    debug!(target: "profile", "Profile: {} = {} ({:.0}%)", fact.key, fact.value, fact.confidence * 100.0);
-                }
-            }
-        }
-
-        // 2b) Persistent memories.
-        let existing_memories = db.load_active_memories().await.unwrap_or_default();
-        let mem_result = extract_memories(&background_client, &conversation_text, &existing_memories).await;
-        for id in &mem_result.archive_ids {
-            if let Err(e) = db.deactivate_memory(*id).await {
-                warn!(target: "memory", "Failed to archive memory id={}: {}", id, e);
-            }
-        }
-        if !mem_result.new_memories.is_empty() {
-            info!(target: "memory", "Extracted {} new memories", mem_result.new_memories.len());
-            if let Err(e) = db.save_memories_batch(&mem_result.new_memories, session_id).await {
-                warn!(target: "memory", "Failed to save memories: {}", e);
-            }
-        }
-        if !mem_result.archive_ids.is_empty() {
-            info!(target: "memory", "Archived {} outdated memories", mem_result.archive_ids.len());
-        }
-
-        // 2c) Summarize.
-        let summary = if let Some(prompt) = summary_prompt {
-            match background_client.complete(&prompt).await {
-                Ok(s) if !s.is_empty() => { info!(target: "memory", "Summary: {}", s); Some(s) }
-                Ok(_) => { warn!(target: "memory", "Summarization returned empty result"); None }
-                Err(e) => { warn!(target: "memory", "Summarization failed: {}", e); None }
-            }
-        } else {
-            None
-        };
-
-        // ── Phase 3: Rebuild system prompt ───────────────────────────────────
-        if let Some(ref summary_text) = summary {
-            // Fetch the current summary_through_id so the offset is relative to
-            // the loaded batch, not the entire DB history. Without this, repeated
-            // consolidations would compute a through_id earlier than the previous
-            // one, causing all old messages to reload on the next startup.
-            let prev_through_id = db.get_summary_through_id(session_id).await.unwrap_or(0);
-            let through_id = db
-                .get_message_id_at_offset(session_id, prev_through_id, turns_to_summarize.saturating_sub(1))
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or(0);
-            if through_id > 0 {
-                if let Err(e) = db.save_summary(session_id, summary_text, through_id).await {
-                    warn!(target: "db", "Failed to persist summary: {}", e);
-                }
-            }
-        }
-
-        let fresh_profile = db.load_user_profile().await.unwrap_or_default();
-        let fresh_profile_facts: Vec<crate::profile::ProfileFact> = fresh_profile
-            .into_iter()
-            .map(|(key, value, confidence)| crate::profile::ProfileFact { key, value, confidence })
-            .collect();
-        let fresh_memories = db.load_active_memories().await.unwrap_or_default();
-        let new_system_prompt = build_system_prompt(
-            &base_prompt, &fresh_profile_facts, &fresh_memories, &tool_section,
-        );
-
-        {
-            let mut s = llm_session.lock().unwrap();
-            if let Some(ref summary_text) = summary {
-                s.apply_summary(summary_text, keep_turns);
-            }
-            s.set_system_prompt(new_system_prompt);
-            s.invalidate_cache();
-        }
-
-        info!(
-            target: "memory",
-            "Consolidation complete ({}) — prompt rebuilt ({} profile facts, {} memories, {} recent turns kept)",
-            if triggered_by_idle { "silent" } else { "announced" },
-            fresh_profile_facts.len(), fresh_memories.len(), keep_turns,
-        );
+        // ── Phase 2+3: Extract, summarize, rebuild prompt ───────────────────
+        run_consolidation_cycle(
+            &background_client, &db, session_id, &llm_session,
+            keep_turns, &base_prompt, &tool_section,
+        ).await;
 
         // ── Phase 4: Announce back (only for non-idle consolidation) ─────────
         if !triggered_by_idle {
