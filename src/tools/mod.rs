@@ -7,6 +7,7 @@ pub mod read_file;
 pub mod run_agent;
 pub mod run_shell;
 pub mod take_screenshot;
+pub mod web_search;
 
 use std::collections::HashMap;
 
@@ -22,6 +23,7 @@ pub use run_agent::{
 };
 pub use run_shell::RunShellTool;
 pub use take_screenshot::TakeScreenshotTool;
+pub use web_search::WebSearchTool;
 
 /// A tool the LLM can invoke by name.
 #[async_trait]
