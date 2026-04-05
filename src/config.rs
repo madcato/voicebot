@@ -134,6 +134,10 @@ pub struct Config {
     pub secondary_llm_api_key: String,
     /// Backend for secondary LLM: "llama" or "mlx" (SECONDARY_LLM_PROVIDER, default "llama").
     pub secondary_llm_provider: String,
+    /// Enable Qwen3 thinking mode on the secondary LLM (SECONDARY_LLM_THINKING, default false).
+    /// When true, `chat_template_kwargs: {"enable_thinking": true}` is sent in requests and
+    /// `<think>…</think>` blocks are stripped from the returned text.
+    pub secondary_llm_thinking: bool,
 
     // ── Shell tool ────────────────────────────────────────────────────────────
     /// Enable the `run_shell` tool (SHELL_ENABLED=1). Off by default.
@@ -146,6 +150,9 @@ pub struct Config {
     pub searxng_url: Option<String>,
     /// Bearer token for SearXNG authentication (SEARXNG_SECRET).
     pub searxng_secret: String,
+    /// Enable the web_search tool (WEB_SEARCH_ENABLED, default true).
+    /// Set to 0 to disable without removing SEARXNG_URL.
+    pub web_search_enabled: bool,
 
     // ── Speaker verification ──────────────────────────────────────────────────
     /// Path to sherpa-onnx speaker embedding ONNX model (SPEAKER_MODEL).
@@ -351,6 +358,9 @@ impl Config {
             secondary_llm_api_key: env::var("SECONDARY_LLM_API_KEY").unwrap_or_default(),
             secondary_llm_provider: env::var("SECONDARY_LLM_PROVIDER")
                 .unwrap_or_else(|_| "llama".to_string()),
+            secondary_llm_thinking: env::var("SECONDARY_LLM_THINKING")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(false),
 
             // Shell tool
             shell_enabled: env::var("SHELL_ENABLED")
@@ -364,6 +374,9 @@ impl Config {
             // Web Search (SearXNG)
             searxng_url: env::var("SEARXNG_URL").ok(),
             searxng_secret: env::var("SEARXNG_SECRET").unwrap_or_default(),
+            web_search_enabled: env::var("WEB_SEARCH_ENABLED")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(true),
 
             // Speaker verification
             speaker_model: {

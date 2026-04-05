@@ -80,6 +80,25 @@ impl ThinkFilter {
     }
 }
 
+/// Strip all `<think>…</think>` blocks from a complete (non-streaming) string.
+///
+/// Used to post-process secondary LLM responses when thinking mode is enabled.
+/// The model reasons inside the tags; only the text after the closing tag is
+/// returned to callers.
+fn strip_think_blocks(s: &str) -> String {
+    let mut out = s.to_string();
+    loop {
+        match (out.find("<think>"), out.find("</think>")) {
+            (Some(start), Some(end)) if start <= end => {
+                let after = &out[end + "</think>".len()..].to_string();
+                out = format!("{}{}", &out[..start], after);
+            }
+            _ => break,
+        }
+    }
+    out.trim().to_string()
+}
+
 /// Returns the length of the longest suffix of `s` that is a proper prefix of
 /// `tag` (i.e. the tail of `s` that could be the start of `tag`).
 fn partial_tag_suffix(s: &str, tag: &str) -> usize {
@@ -122,6 +141,10 @@ pub struct OpenAIClient {
     llama_extensions: bool,
     /// Bearer token sent in `Authorization` header. Empty = no auth header.
     api_key: String,
+    /// When true, send `chat_template_kwargs: {"enable_thinking": true}` in
+    /// non-streaming requests and strip `<think>…</think>` blocks from the
+    /// returned text. Intended for the secondary LLM only.
+    thinking: bool,
 }
 
 impl OpenAIClient {
@@ -151,6 +174,7 @@ impl OpenAIClient {
             background_slot_id,
             llama_extensions: true,
             api_key: String::new(),
+            thinking: false,
         }
     }
 
@@ -176,6 +200,16 @@ impl OpenAIClient {
     /// Any other value (e.g. `"mlx"`) → omit those fields.
     pub fn with_provider(mut self, provider: &str) -> Self {
         self.llama_extensions = provider == "llama";
+        self
+    }
+
+    /// Enable Qwen3 thinking mode for non-streaming completions.
+    ///
+    /// When `true`, `chat_template_kwargs: {"enable_thinking": true}` is sent
+    /// and `<think>…</think>` blocks are stripped from the returned text.
+    /// The model reasons internally; callers only receive the final answer.
+    pub fn with_thinking(mut self, thinking: bool) -> Self {
+        self.thinking = thinking;
         self
     }
 
@@ -373,6 +407,8 @@ impl OpenAIClient {
             payload["slot_id"] = serde_json::json!(self.background_slot_id);
             payload["enable_thinking"] = serde_json::json!(false);
             payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
+        } else if self.thinking {
+            payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": true});
         }
 
         let response = self
@@ -389,7 +425,8 @@ impl OpenAIClient {
         }
 
         let json: serde_json::Value = response.json().await?;
-        Ok(json["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string())
+        let text = json["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string();
+        Ok(if self.thinking { strip_think_blocks(&text) } else { text })
     }
 
     /// One-shot completion with a short token budget. Used for structured
@@ -409,6 +446,8 @@ impl OpenAIClient {
             payload["slot_id"] = serde_json::json!(self.background_slot_id);
             payload["enable_thinking"] = serde_json::json!(false);
             payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
+        } else if self.thinking {
+            payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": true});
         }
 
         let response = self
@@ -425,7 +464,8 @@ impl OpenAIClient {
         }
 
         let json: serde_json::Value = response.json().await?;
-        Ok(json["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string())
+        let text = json["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string();
+        Ok(if self.thinking { strip_think_blocks(&text) } else { text })
     }
 
     /// One-shot multimodal completion with a single image + text prompt.
@@ -438,7 +478,7 @@ impl OpenAIClient {
         image_data_url: &str,
         text_prompt: &str,
     ) -> Result<String> {
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "model": self.model,
             "max_tokens": self.max_tokens,
             "stream": false,
@@ -450,6 +490,9 @@ impl OpenAIClient {
                 ]
             }]
         });
+        if self.thinking {
+            payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": true});
+        }
 
         let response = self
             .post_chat()
@@ -465,11 +508,12 @@ impl OpenAIClient {
         }
 
         let json: serde_json::Value = response.json().await?;
-        Ok(json["choices"][0]["message"]["content"]
+        let text = json["choices"][0]["message"]["content"]
             .as_str()
             .unwrap_or("")
             .trim()
-            .to_string())
+            .to_string();
+        Ok(if self.thinking { strip_think_blocks(&text) } else { text })
     }
 
     /// Check if the server is reachable.

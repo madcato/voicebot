@@ -10,6 +10,7 @@ use tracing::{debug, info, warn};
 
 use super::Tool;
 use crate::agents::ProactiveEvent;
+use crate::llm::{Message, OpenAIClient};
 
 // ── History formatting ────────────────────────────────────────────────────────
 
@@ -183,6 +184,37 @@ fn parse_jsonrpc(v: &Value) -> Option<JsonRpcMessage> {
     }
 }
 
+// ── Result synthesis ─────────────────────────────────────────────────────────
+
+/// Ask the secondary LLM to summarize a raw agent result into a concise,
+/// voice-ready response. Falls back to `raw` if synthesis fails or is not
+/// configured.
+async fn synthesize_agent_result(
+    task: &str,
+    raw: String,
+    client: Option<&OpenAIClient>,
+) -> String {
+    let Some(client) = client else { return raw };
+    if raw.is_empty() || raw.starts_with("Agent error:") || raw.starts_with("ACP") {
+        return raw;
+    }
+    let prompt = format!(
+        "Tarea completada por el agente externo:\nTarea: {task}\nResultado:\n{raw}\n\n\
+         Resume en 2-3 frases concisas lo esencial para comunicarlo por voz. Solo el resumen."
+    );
+    match client.complete_short(&[Message::user(&prompt)]).await {
+        Ok(summary) if !summary.is_empty() => {
+            info!(target: "agent", "synthesize_agent_result: {} chars → {} chars", raw.len(), summary.len());
+            summary
+        }
+        Ok(_) => raw,
+        Err(e) => {
+            warn!(target: "agent", "synthesize_agent_result error: {}", e);
+            raw
+        }
+    }
+}
+
 // ── RunAgentTool ──────────────────────────────────────────────────────────────
 
 /// Unified agent delegation tool.
@@ -211,6 +243,9 @@ pub struct RunAgentTool {
     mode: String,
     /// ACP subprocess command — used in `"acp"` mode.
     acp_command: String,
+    /// When set, the secondary LLM synthesizes Hermes's raw result into a
+    /// concise voice-ready summary before the ProactiveEvent is injected.
+    synthesis_client: Option<std::sync::Arc<OpenAIClient>>,
 }
 
 impl RunAgentTool {
@@ -234,7 +269,14 @@ impl RunAgentTool {
             proactive_tx,
             mode,
             acp_command,
+            synthesis_client: None,
         }
+    }
+
+    /// Attach a secondary LLM client for result synthesis.
+    pub fn with_synthesis(mut self, client: std::sync::Arc<OpenAIClient>) -> Self {
+        self.synthesis_client = Some(client);
+        self
     }
 
     /// Cancel the in-flight ACP task, if any.
@@ -270,11 +312,13 @@ impl RunAgentTool {
         };
         let query = build_agent_query(&self.history, &task);
         let proactive_tx = self.proactive_tx.clone();
+        let synthesis_client = self.synthesis_client.clone();
 
         tokio::spawn(async move {
             info!("RunAgentTool(cli): task started: {:?}", task);
-            let result = call_agent(command, query).await;
-            info!("RunAgentTool(cli): task complete ({} chars)", result.len());
+            let raw = call_agent(command, query).await;
+            info!("RunAgentTool(cli): task complete ({} chars)", raw.len());
+            let result = synthesize_agent_result(&task, raw, synthesis_client.as_deref()).await;
             if proactive_tx
                 .send(ProactiveEvent::AgentResult { task, result })
                 .await
@@ -307,6 +351,7 @@ impl RunAgentTool {
         let active_task = Arc::clone(&self.active_task);
         let proactive_tx = self.proactive_tx.clone();
         let acp_command = self.acp_command.clone();
+        let synthesis_client = self.synthesis_client.clone();
 
         tokio::spawn(async move {
             // ── Lazily initialize the ACP process ────────────────────────────
@@ -417,8 +462,9 @@ impl RunAgentTool {
             { active_task.lock().await.take(); }
 
             info!(target: "acp", "Agent task complete — sending result ({} chars)", result.len());
+            let final_result = synthesize_agent_result(&task_c, result, synthesis_client.as_deref()).await;
             if proactive_tx
-                .send(ProactiveEvent::AgentResult { task: task_c, result })
+                .send(ProactiveEvent::AgentResult { task: task_c, result: final_result })
                 .await
                 .is_err()
             {

@@ -278,6 +278,7 @@ async fn async_main() -> Result<()> {
             OpenAIClient::new(url, &config.secondary_llm_model, config.secondary_llm_max_tokens, 0.3, 0, -1)
                 .with_provider(&config.secondary_llm_provider)
                 .with_api_key(&config.secondary_llm_api_key)
+                .with_thinking(config.secondary_llm_thinking)
         });
     if secondary_llm_client.is_some() {
         info!(
@@ -322,13 +323,17 @@ async fn async_main() -> Result<()> {
         tool_registry.register(TakeScreenshotTool::new(sec_client.clone()));
     }
 
-    // Web search (SearXNG) — enabled when SEARXNG_URL is set
-    if let Some(ref searxng_url) = config.searxng_url {
-        tool_registry.register(WebSearchTool::new(
-            searxng_url.clone(),
-            config.searxng_secret.clone(),
-        ));
-        info!(target: "voicebot", "web_search tool enabled (url={})", searxng_url);
+    // Web search (SearXNG) — enabled when SEARXNG_URL is set and WEB_SEARCH_ENABLED != 0
+    if config.web_search_enabled {
+        if let Some(ref searxng_url) = config.searxng_url {
+            let mut wst = WebSearchTool::new(searxng_url.clone(), config.searxng_secret.clone());
+            if let Some(ref sec) = secondary_llm_client {
+                wst = wst.with_synthesis(std::sync::Arc::new(sec.clone()));
+                info!(target: "voicebot", "web_search synthesis via secondary LLM enabled");
+            }
+            tool_registry.register(wst);
+            info!(target: "voicebot", "web_search tool enabled (url={})", searxng_url);
+        }
     }
 
     // External agent delegation — unified RunAgentTool (CLI or ACP mode)
@@ -348,7 +353,7 @@ async fn async_main() -> Result<()> {
             "Agent delegation enabled (mode={})",
             mode
         );
-        tool_registry.register(RunAgentTool::new(
+        let mut run_agent_tool = RunAgentTool::new(
             agent_cmd,
             Arc::clone(&acp_writer),
             Arc::clone(&acp_inbound),
@@ -357,7 +362,12 @@ async fn async_main() -> Result<()> {
             proactive_tx.clone(),
             mode,
             acp_cmd,
-        ));
+        );
+        if let Some(ref sec) = secondary_llm_client {
+            run_agent_tool = run_agent_tool.with_synthesis(std::sync::Arc::new(sec.clone()));
+            info!(target: "voicebot", "run_agent result synthesis via secondary LLM enabled");
+        }
+        tool_registry.register(run_agent_tool);
     }
 
     // ── ACP pre-warm ──────────────────────────────────────────────────────────
