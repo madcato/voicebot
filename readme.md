@@ -74,6 +74,16 @@ Jarvis is built from the ground up for voice interaction:
 
 Enable with: `cargo run --features tui`
 
+### Remote Device Connectivity ✅
+
+- 📱 WebSocket server for remote audio streaming (phone, watch, other computers)
+- 🔊 Full STT→LLM→TTS pipeline runs on the server — remote device only sends/receives audio
+- 📡 Wire protocol: PCM i16 LE mono 16kHz (binary frames) + JSON control messages (text frames)
+- ⚡ Barge-in works over WebSocket — both audio-based (server VAD) and explicit signal
+- 🍎 Apple Watch client guide included (see `doc/APPLE_WATCH_CLIENT.md`)
+
+Enable with: `WS_PORT=9090 cargo run --features remote --release`
+
 ### Roadmap 🚧
 
 - Calendar, email, file system access
@@ -360,6 +370,8 @@ Most configuration is done via environment variables (or `.env` file):
 | **Ambient Context Buffer** || |
 | `AMBIENT_BUFFER_MINUTES` | `3` | Rolling window duration for the ambient context buffer. |
 | `AMBIENT_BUFFER_MAX_ENTRIES` | `30` | Maximum buffered utterances. Oldest are evicted when full. |
+| **Remote Device (WebSocket)** || |
+| `WS_PORT` | — (disabled) | WebSocket server port. Set to e.g. `9090` to enable remote device connectivity. Requires `--features remote`. |
 
 See [.env.example](.env.example) for complete environment variable reference.
 
@@ -375,6 +387,9 @@ cargo build --release
 
 # Build with TUI (terminal user interface)
 cargo build --release --features tui
+
+# Build with remote device support (WebSocket server)
+cargo build --release --features remote
 
 # Run with debug
 cargo run

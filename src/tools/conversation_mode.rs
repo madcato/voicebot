@@ -36,20 +36,10 @@ impl Tool for SetConversationModeTool {
     }
 
     fn description(&self) -> &str {
-        "Switch the voicebot between Active and Ambient listening modes. \
-         IMPORTANT: Always call this tool immediately when the user requests a mode change — do not just acknowledge it. \
-         \
-         Call with mode='ambient' when the user says things like: \
-         'modo ambiente', 'modo silencio', 'activa el modo ambiente', \
-         'desactiva el modo conversación', 'quédate en silencio', \
-         'duerme', 'modo espera', 'go to sleep', 'ambient mode', 'sleep mode'. \
-         In Ambient mode the bot ONLY responds when it hears its wake word (its name); all other speech is ignored. \
-         \
-         Call with mode='active' when the user says things like: \
-         'modo conversación', 'activa el modo conversación', \
-         'sal del modo ambiente', 'despierta', 'escúchame', \
-         'active mode', 'wake up', 'conversation mode'. \
-         In Active mode the bot listens and responds normally."
+        "Cambia el modo de escucha del asistente entre Active y Ambient. \
+         mode='ambient': silencio, modo espera, duerme, go to sleep. \
+         mode='active': conversación, despierta, wake up. \
+         SIEMPRE llama a esta herramienta inmediatamente — nunca simules el cambio."
     }
 
     fn parameters(&self) -> serde_json::Value {

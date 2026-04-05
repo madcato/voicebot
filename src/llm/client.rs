@@ -212,18 +212,21 @@ impl OpenAIClient {
             payload["top_k"] = serde_json::json!(40);
             payload["min_p"] = serde_json::json!(0.05);
         }
-        // Disable Qwen3 thinking mode for all backends.
+        // Disable Qwen3 thinking mode for llama.cpp only.
         //
-        // With thinking enabled, Qwen3 reasons in a <think>…</think> block and
-        // sometimes argues itself OUT of calling a tool, producing a verbal
-        // acknowledgment instead ("Modo activado, señor"). The ThinkFilter
+        // With thinking enabled on llama.cpp, Qwen3 reasons in a <think>…</think>
+        // block and sometimes argues itself OUT of calling a tool. The ThinkFilter
         // strips the block but the tool call decision was already lost.
-        // Disabling thinking makes Qwen3 call tools reliably. Non-Qwen models
-        // ignore these fields.
         //
-        // Both fields are sent because some server versions read one or the other.
-        payload["enable_thinking"] = serde_json::json!(false);
-        payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
+        // For mlx-lm, DO NOT disable thinking here: `chat_template_kwargs` changes
+        // the Jinja2 template and can conflict with tool calling for some model
+        // versions (e.g. mlx-community quantizations). The ThinkFilter still strips
+        // any <think> blocks that arrive in the SSE stream, so thinking mode is safe
+        // to leave enabled on mlx-lm.
+        if self.llama_extensions {
+            payload["enable_thinking"] = serde_json::json!(false);
+            payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
+        }
         if !tools.is_empty() {
             payload["tools"] = serde_json::json!(tools);
             payload["tool_choice"] = serde_json::json!("auto");
@@ -291,7 +294,37 @@ impl OpenAIClient {
                         continue;
                     };
 
-                    // Check finish_reason before looking at delta content.
+                    // Accumulate tool_calls fragments FIRST — before checking
+                    // finish_reason. mlx-lm (and some other servers) send the entire
+                    // tool call in a single chunk that has both delta.tool_calls AND
+                    // finish_reason="tool_calls". If we checked finish_reason first we
+                    // would emit an empty ToolCall (tool_name still None) and return.
+                    //
+                    // Guard: mlx-lm sends `"tool_calls": []` on every content chunk;
+                    // only treat it as a real call when the array is non-empty.
+                    let has_tool_call_delta =
+                        if let Some(calls) = json["choices"][0]["delta"]["tool_calls"].as_array() {
+                            if !calls.is_empty() {
+                                if let Some(call) = calls.first() {
+                                    if let Some(name) = call["function"]["name"].as_str() {
+                                        if !name.is_empty() {
+                                            tracing::debug!(target: "llm", "Tool call detected: {}", name);
+                                            tool_name = Some(name.to_string());
+                                        }
+                                    }
+                                    if let Some(frag) = call["function"]["arguments"].as_str() {
+                                        tool_args.push_str(frag);
+                                    }
+                                }
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+
+                    // Now check finish_reason (tool_name may have just been set above).
                     if let Some(finish_reason) = json["choices"][0]["finish_reason"].as_str() {
                         tracing::debug!(target: "llm", "SSE finish_reason={}", finish_reason);
                         if finish_reason == "tool_calls" {
@@ -306,25 +339,8 @@ impl OpenAIClient {
                         }
                     }
 
-                    // Accumulate tool_calls fragments.
-                    // Guard: mlx-lm always sends `"tool_calls": []` on content chunks;
-                    // only treat it as a tool call when the array is non-empty.
-                    if let Some(calls) = json["choices"][0]["delta"]["tool_calls"].as_array() {
-                        if !calls.is_empty() {
-                            if let Some(call) = calls.first() {
-                                if let Some(name) = call["function"]["name"].as_str() {
-                                    if !name.is_empty() {
-                                        tracing::debug!(target: "llm", "Tool call detected: {}", name);
-                                        tool_name = Some(name.to_string());
-                                    }
-                                }
-                                if let Some(frag) = call["function"]["arguments"].as_str() {
-                                    tool_args.push_str(frag);
-                                }
-                            }
-                            continue; // tool_calls and content are mutually exclusive
-                        }
-                    }
+                    // Skip content processing if this chunk contained tool_calls data.
+                    if has_tool_call_delta { continue; }
 
                     // Regular content token.
                     if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
@@ -355,9 +371,9 @@ impl OpenAIClient {
         if self.llama_extensions {
             payload["cache_prompt"] = serde_json::json!(false);
             payload["slot_id"] = serde_json::json!(self.background_slot_id);
+            payload["enable_thinking"] = serde_json::json!(false);
+            payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
         }
-        payload["enable_thinking"] = serde_json::json!(false);
-        payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
 
         let response = self
             .post_chat()
@@ -391,9 +407,9 @@ impl OpenAIClient {
         if self.llama_extensions {
             payload["cache_prompt"] = serde_json::json!(false);
             payload["slot_id"] = serde_json::json!(self.background_slot_id);
+            payload["enable_thinking"] = serde_json::json!(false);
+            payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
         }
-        payload["enable_thinking"] = serde_json::json!(false);
-        payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
 
         let response = self
             .post_chat()
