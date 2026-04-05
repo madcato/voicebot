@@ -12,6 +12,8 @@ mod tools;
 #[cfg(feature = "tui")]
 mod tui;
 mod tts;
+#[cfg(feature = "remote")]
+mod remote;
 
 use anyhow::Result;
 use async_channel::bounded;
@@ -442,7 +444,7 @@ async fn async_main() -> Result<()> {
     // ── Database ─────────────────────────────────────────────────────────────
     let db = Database::new(&config.db_path).await?;
     let session_id = db.get_or_create_session().await?;
-    let (summary, history) = db.get_session_context(session_id).await?;
+    let (summary, history) = db.get_session_context(session_id, config.llm_history_load_limit).await?;
     info!(
         target: "db",
         "Loaded {} messages from history (summary: {})",
@@ -659,7 +661,7 @@ async fn async_main() -> Result<()> {
 
     let samples_per_chunk = config.samples_per_chunk();
     let (tx, rx) = bounded(AUDIO_CHANNEL_CAPACITY);
-    let _stream = audio_capture.start_capture(tx, samples_per_chunk)?;
+    let _stream = audio_capture.start_capture(tx.clone(), samples_per_chunk)?;
 
     let mut vad = VoiceActivityDetector::new(source_sample_rate, config.vad_silence_ms)?;
     info!(target: "audio", "VAD silence threshold: {}ms", config.vad_silence_ms);
@@ -695,6 +697,12 @@ async fn async_main() -> Result<()> {
 
     // TTS mute toggle (controlled from TUI).
     let tts_muted = Arc::new(AtomicBool::new(false));
+
+    // Remote device: shared sender for routing TTS audio to WebSocket.
+    // When Some, tts_task sends audio here instead of CPAL play_blocking.
+    #[cfg(feature = "remote")]
+    let remote_tts_tx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<remote::protocol::TtsAudioPacket>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
 
     // TUI event channel — pipeline tasks send events here for the TUI to render.
     #[cfg(feature = "tui")]
@@ -750,11 +758,15 @@ async fn async_main() -> Result<()> {
         let tts_muted_c   = Arc::clone(&tts_muted);
         #[cfg(feature = "tui")]
         let tui_tx_c = tui_tx.clone();
+        #[cfg(feature = "remote")]
+        let remote_tts_tx_c = Arc::clone(&remote_tts_tx);
         tokio::spawn(async move {
             tts_task(shared_c, events_c, tts_c, audio_out_c, tts_sample_rate, play_cancel_c,
                      tts_muted_c,
                      #[cfg(feature = "tui")]
                      tui_tx_c,
+                     #[cfg(feature = "remote")]
+                     remote_tts_tx_c,
             ).await;
         });
     }
@@ -794,6 +806,24 @@ async fn async_main() -> Result<()> {
             }
             // TUI quit → exit process.
             std::process::exit(0);
+        });
+    }
+
+    // ── Remote device WebSocket server ─────────────────────────────────────
+    #[cfg(feature = "remote")]
+    if let Some(ws_port) = config.ws_port {
+        let remote_state = Arc::new(remote::server::RemoteState {
+            audio_tx: tx.clone(),
+            samples_per_chunk,
+            cancel_tx: events.cancel_tx.clone(),
+            play_cancel: Arc::clone(&play_cancel),
+            tts_audio_tx: Arc::clone(&remote_tts_tx),
+            connected: AtomicBool::new(false),
+        });
+        tokio::spawn(async move {
+            if let Err(e) = remote::server::start_server(ws_port, remote_state).await {
+                error!(target: "remote", "WebSocket server error: {e}");
+            }
         });
     }
 
@@ -1334,6 +1364,15 @@ async fn llm_task(
                         token = token_rx.recv() => {
                             match token {
                                 Some(StreamToken::Content(t)) => {
+                                    // Strip leading newlines from the first token of each
+                                    // turn. Qwen3 in thinking mode emits \n\n after </think>
+                                    // before the actual response starts.
+                                    let t = if llm_text.is_empty() {
+                                        t.trim_start_matches('\n').to_string()
+                                    } else {
+                                        t
+                                    };
+                                    if t.is_empty() { continue; }
                                     if !first_token_logged {
                                         first_token_logged = true;
                                         if let Some(t0) = shared.t_llm_post_send.lock().unwrap().as_ref() {
@@ -1531,6 +1570,8 @@ async fn tts_task(
     tts_muted: Arc<AtomicBool>,
     #[cfg(feature = "tui")]
     tui_tx: tui::events::TuiEventTx,
+    #[cfg(feature = "remote")]
+    remote_tts_tx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<remote::protocol::TtsAudioPacket>>>>,
 ) {
     let mut cancel_rx = events.cancel_tx.subscribe();
     let mut play_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
@@ -1636,6 +1677,22 @@ async fn tts_task(
                 info!(target: "performance", "[+{}ms] Latency s2s", t0.elapsed().as_millis());
             }
         }
+        // Route audio: remote WebSocket if connected, otherwise local CPAL.
+        #[cfg(feature = "remote")]
+        {
+            let maybe_tx = remote_tts_tx.lock().await.clone();
+            if let Some(tx) = maybe_tx {
+                let packet = remote::protocol::TtsAudioPacket {
+                    samples,
+                    sample_rate: tts_sample_rate,
+                };
+                if tx.send(packet).await.is_err() {
+                    warn!(target: "remote", "Remote TTS channel closed");
+                }
+                continue;
+            }
+        }
+
         let out_c    = Arc::clone(&audio_output);
         let cancel_c = Arc::clone(&play_cancel);
         play_handle = Some(tokio::task::spawn_blocking(move || {
@@ -1991,6 +2048,8 @@ async fn run_pipeline(
                      tts_muted_c,
                      #[cfg(feature = "tui")]
                      { let (tx, _) = tokio::sync::mpsc::unbounded_channel(); tx },
+                     #[cfg(feature = "remote")]
+                     Arc::new(tokio::sync::Mutex::new(None)),
             ).await;
         })
     };
@@ -2160,7 +2219,7 @@ mod tests {
         let system_content = all_msgs[0]["content"].as_str().unwrap();
         assert!(system_content.contains("[CONVERSATION SUMMARY]"));
 
-        let (db_summary, db_recent) = db.get_session_context(session_id).await.unwrap();
+        let (db_summary, db_recent) = db.get_session_context(session_id, 0).await.unwrap();
         assert!(db_summary.is_some());
         assert!(!db_recent.is_empty());
 

@@ -89,6 +89,10 @@ pub struct Config {
     /// If the current context is below this threshold, idle consolidation is skipped.
     /// Default: 20. Set to 0 to disable the minimum check.
     pub llm_idle_min_context_pct: usize,
+    /// Maximum number of messages loaded from the DB on startup (0 = unlimited).
+    /// Older messages beyond this count are skipped — the session summary covers them.
+    /// Default: 0. Recommended: 40–60 to prevent restart compaction. (LLM_HISTORY_LOAD_LIMIT)
+    pub llm_history_load_limit: usize,
 
     // ── Agent delegation ──────────────────────────────────────────────────────
     /// CLI command used to invoke the agent (e.g. "hermes chat"). May include arguments.
@@ -174,6 +178,10 @@ pub struct Config {
     /// Maximum number of utterances to keep in the ambient context buffer
     /// (AMBIENT_BUFFER_MAX_ENTRIES, default 30).
     pub ambient_buffer_max_entries: usize,
+
+    // ── Remote device (WebSocket) ──────────────────────────────────────────────
+    /// WebSocket server port. None = disabled (WS_PORT).
+    pub ws_port: Option<u16>,
 
     // ── Persistence ───────────────────────────────────────────────────────────
     pub db_path: String,
@@ -301,6 +309,10 @@ impl Config {
                 .unwrap_or_else(|_| "20".to_string())
                 .parse()
                 .context("Invalid LLM_IDLE_MIN_CONTEXT_PCT")?,
+            llm_history_load_limit: env::var("LLM_HISTORY_LOAD_LIMIT")
+                .unwrap_or_else(|_| "0".to_string())
+                .parse()
+                .context("Invalid LLM_HISTORY_LOAD_LIMIT")?,
 
             // Agent delegation
             agent_command: env::var("AGENT_COMMAND").ok(),
@@ -400,6 +412,13 @@ impl Config {
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .context("Invalid AMBIENT_BUFFER_MAX_ENTRIES")?,
+
+            // Remote device (WebSocket)
+            ws_port: env::var("WS_PORT")
+                .ok()
+                .map(|v| v.parse::<u16>())
+                .transpose()
+                .context("Invalid WS_PORT")?,
 
             // DB
             db_path: env::var("DB_PATH")

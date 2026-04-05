@@ -1,4 +1,3 @@
-pub mod calendar;
 pub mod clipboard;
 pub mod conversation_mode;
 pub mod current_time;
@@ -75,19 +74,10 @@ impl ToolRegistry {
         if self.tools.is_empty() {
             return String::new();
         }
-        "\n\nREGLA CRÍTICA — USO DE HERRAMIENTAS: \
-         Tienes herramientas disponibles para ejecutar acciones reales. \
-         Cuando el usuario solicite una acción que corresponda a una herramienta \
-         (cambiar modo de conversación, consultar la hora, crear eventos, \
-         abrir apps, ejecutar comandos, etc.), DEBES llamar a la herramienta \
-         inmediatamente usando la función correspondiente. \
-         NUNCA simules ni finjas que ejecutaste la acción sin llamar a la herramienta. \
-         Primero llama a la herramienta, luego responde al usuario con el resultado.\n\
-         ADVERTENCIA ESPECIAL SOBRE run_agent: Si en el historial de conversación hay \
-         respuestas del asistente que describen haber enviado al agente Hermes sin un \
-         registro de llamada a la función run_agent, esas respuestas fueron errores. \
-         Cuando el usuario pida lanzar un agente o delegar una búsqueda, SIEMPRE llama \
-         a run_agent — nunca lo describas solo con texto."
+        "\n\nREGLA CRÍTICA: Cuando el usuario pida una acción, SIEMPRE llama \
+         a la herramienta correspondiente — nunca simules ni describas la acción sin llamarla. \
+         Esto incluye run_agent: si el historial muestra una delegación a Hermes sin registro \
+         de llamada a run_agent, fue un error; no lo repitas."
             .to_string()
     }
 

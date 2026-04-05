@@ -190,7 +190,7 @@ impl E2eHarness {
     /// All messages saved to the DB for this session.
     async fn db_messages(&self) -> Vec<(String, String)> {
         self.db
-            .get_session_context(self.session_id)
+            .get_session_context(self.session_id, 0)
             .await
             .unwrap()
             .1

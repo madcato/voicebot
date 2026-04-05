@@ -165,10 +165,12 @@ impl Database {
     /// Load the session's summary (if any) and the messages after the summary cutoff.
     ///
     /// Returns `(summary_text, recent_messages)`. If no summary exists, all messages
-    /// are returned. Used on startup to restore the LLM session efficiently.
+    /// are returned. When `limit > 0`, only the last `limit` messages are returned
+    /// (oldest-first), preventing context bloat on restart. Pass `0` for unlimited.
     pub async fn get_session_context(
         &self,
         session_id: Uuid,
+        limit: usize,
     ) -> Result<(Option<String>, Vec<(String, String)>)> {
         let row = sqlx::query(
             "SELECT summary, summary_through_id FROM sessions WHERE id = ?",
@@ -180,7 +182,33 @@ impl Database {
         let summary: Option<String> = row.try_get("summary")?;
         let through_id: i64 = row.try_get("summary_through_id").unwrap_or(0);
 
-        let messages = self.get_messages_after_id(session_id, through_id).await?;
+        let messages = if limit == 0 {
+            self.get_messages_after_id(session_id, through_id).await?
+        } else {
+            // Load only the last `limit` messages (DESC), then restore chronological order.
+            let rows = sqlx::query(
+                "SELECT role, content FROM messages
+                 WHERE session_id = ? AND id > ?
+                 ORDER BY id DESC LIMIT ?",
+            )
+            .bind(session_id.to_string())
+            .bind(through_id)
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await?;
+
+            let mut result: Vec<(String, String)> = rows
+                .into_iter()
+                .map(|row| {
+                    (
+                        row.try_get("role").unwrap_or_default(),
+                        row.try_get("content").unwrap_or_default(),
+                    )
+                })
+                .collect();
+            result.reverse();
+            result
+        };
         Ok((summary, messages))
     }
 
