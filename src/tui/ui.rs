@@ -11,16 +11,32 @@ use super::events::{InputSource, PipelineState};
 
 /// Render the entire TUI frame.
 pub fn render(frame: &mut Frame, app: &App) {
+    let total = frame.area();
+    // Inner width of the input box (subtract left + right borders).
+    let inner_width = total.width.saturating_sub(2) as usize;
+    let display_lines = input_display_lines(&app.input, inner_width);
+    // Height = content lines + 2 borders; at least 3, capped at 10.
+    let input_height = ((display_lines + 2) as u16).max(3).min(10);
+
     let [header_area, conversation_area, input_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(4),
-        Constraint::Length(3),
+        Constraint::Length(input_height),
     ])
-    .areas(frame.area());
+    .areas(total);
 
     render_header(frame, app, header_area);
     render_conversation(frame, app, conversation_area);
     render_input(frame, app, input_area);
+}
+
+/// Number of visual rows the input text occupies with hard-wrap at `inner_width`.
+fn input_display_lines(input: &str, inner_width: usize) -> usize {
+    if inner_width == 0 || input.is_empty() {
+        return 1;
+    }
+    let char_count = input.chars().count();
+    (char_count + inner_width - 1) / inner_width
 }
 
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -172,25 +188,40 @@ fn render_conversation(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_input(frame: &mut Frame, app: &App, area: Rect) {
-    let display = if app.input.is_empty() {
-        Line::from(vec![Span::styled(
+    let inner_width = area.width.saturating_sub(2) as usize;
+
+    let text = if app.input.is_empty() {
+        Text::from(Line::from(vec![Span::styled(
             "Type a message... (Enter to send)",
             Style::default().fg(Color::DarkGray),
-        )])
+        )]))
     } else {
-        Line::raw(&app.input)
+        // Hard-wrap into rows of inner_width chars so cursor math stays exact.
+        let chars: Vec<char> = app.input.chars().collect();
+        let lines: Vec<Line> = if inner_width == 0 {
+            vec![Line::raw(app.input.as_str())]
+        } else {
+            chars
+                .chunks(inner_width)
+                .map(|chunk| Line::raw(chunk.iter().collect::<String>()))
+                .collect()
+        };
+        Text::from(lines)
     };
 
-    let input = Paragraph::new(display)
+    let input = Paragraph::new(text)
         .block(Block::default().borders(Borders::ALL).title(" Input "));
 
     frame.render_widget(input, area);
 
-    // Show cursor at character (not byte) position.
-    let char_pos = app.input[..app.cursor].chars().count() as u16;
-    let cursor_x = area.x + 1 + char_pos;
-    let cursor_y = area.y + 1;
-    frame.set_cursor_position((cursor_x, cursor_y));
+    // Compute cursor row + column from char offset, respecting hard-wrap width.
+    let char_pos = app.input[..app.cursor].chars().count();
+    let (row, col) = if inner_width == 0 {
+        (0u16, char_pos as u16)
+    } else {
+        ((char_pos / inner_width) as u16, (char_pos % inner_width) as u16)
+    };
+    frame.set_cursor_position((area.x + 1 + col, area.y + 1 + row));
 }
 
 /// Count how many terminal rows `line` occupies when word-wrapped to `width`.
