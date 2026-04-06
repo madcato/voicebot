@@ -130,8 +130,11 @@ mod e2e_tests;
 const AUDIO_CHANNEL_CAPACITY: usize = 200;
 const MAX_SPEECH_BUFFER_SECS: u32 = 30;
 const MIN_SPEECH_DURATION_MS: u32 = 300;
-/// Pre-roll chunks kept before speech onset to recover VAD onset delay (~250ms).
-const PRE_ROLL_CHUNKS: usize = 15;
+/// Pre-roll chunks kept before speech onset to recover VAD onset delay (~32ms with
+/// SPEECH_FRAMES_NEEDED=1). Each CPAL chunk is ~110ms at typical source rates, so
+/// 3 chunks ≈ 330ms — enough to cover the onset frame plus margin. Was 15 (1700ms),
+/// which inflated Whisper input by >1s for short utterances.
+const PRE_ROLL_CHUNKS: usize = 3;
 
 // When the `avspeech` feature is enabled, the main thread must run CFRunLoop
 // so that AVSpeechSynthesizer buffer callbacks are delivered.  The tokio
@@ -685,6 +688,23 @@ async fn async_main() -> Result<()> {
     // when a turn commits mid-segment.
     let mut speech_buffer_start_offset: usize = 0;
 
+    // ── Speculative STT ───────────────────────────────────────────────────────
+    // Submit growing audio snapshots to Whisper during speech so the transcript
+    // is ready (or near-ready) by the time SpeechEnd fires.
+    //
+    // Two thresholds (both in samples at source_sample_rate):
+    //  stt_min_submit_samples — minimum utterance audio before first submit.
+    //                           Avoids feeding Whisper tiny clips that hallucinate.
+    //  stt_submit_interval_samples — how much NEW audio must arrive before the
+    //                           next speculative submit.  Set to 0 to disable.
+    let stt_min_submit_samples: usize =
+        (config.stt_min_submit_ms as usize * source_sample_rate as usize) / 1000;
+    let stt_submit_interval_samples: usize =
+        (config.stt_submit_interval_ms as usize * source_sample_rate as usize) / 1000;
+    // Tracks total buffer size at the time of the last speculative submit so
+    // we can measure "new audio since last submit".  Reset at every SpeechStart.
+    let mut last_stt_submit_samples: usize = 0;
+
     // ── Ambient state machine ─────────────────────────────────────────────────
     // Counts consecutive VAD segments where the speaker was NOT the enrolled user.
     // When it reaches config.speaker_ambient_trigger the bot silently switches to Ambient.
@@ -977,9 +997,34 @@ async fn async_main() -> Result<()> {
 
                         // Invalidate any stale STT→vad_finish tasks from a prior utterance.
                         utterance_epoch.fetch_add(1, Ordering::SeqCst);
+
+                        // Reset speculative STT counter for this new utterance.
+                        last_stt_submit_samples = 0;
                     }
                     VadResult::Speech => {
                         speech_buffer.push(&mono);
+
+                        // Speculative STT: once enough audio has accumulated, submit a
+                        // growing snapshot to Whisper every stt_submit_interval_ms.
+                        // The watch channel keeps only the latest snapshot — if Whisper
+                        // is still busy the intermediate one is silently dropped.
+                        if stt_submit_interval_samples > 0 {
+                            let utterance_samples =
+                                speech_buffer.sample_count() - speech_buffer_start_offset;
+                            let since_last =
+                                speech_buffer.sample_count().saturating_sub(last_stt_submit_samples);
+                            if utterance_samples >= stt_min_submit_samples
+                                && since_last >= stt_submit_interval_samples
+                            {
+                                let snap =
+                                    speech_buffer.get_samples_from(speech_buffer_start_offset);
+                                stt_stream.submit(snap);
+                                last_stt_submit_samples = speech_buffer.sample_count();
+                                debug!(target: "performance",
+                                    "[Speech] speculative STT: {}ms of utterance audio",
+                                    utterance_samples * 1000 / source_sample_rate as usize);
+                            }
+                        }
                     }
                     VadResult::SpeechEnd => {
                         speech_buffer.push(&mono);

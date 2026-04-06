@@ -29,6 +29,15 @@ pub struct Config {
     /// Number of CPU threads for Whisper decoding (0 = auto).
     /// Set to physical core count for best throughput.
     pub whisper_threads: u32,
+    /// Minimum ms of accumulated speech before the first speculative Whisper
+    /// submit during an utterance. Avoids feeding Whisper tiny clips that
+    /// produce garbage. Default: 1000ms.
+    pub stt_min_submit_ms: u32,
+    /// How often (ms of new speech) to re-submit a growing snapshot to Whisper
+    /// during an utterance. Each submit overlaps GPU work with speaking so the
+    /// result is ready (or nearly ready) by SpeechEnd. Default: 500ms.
+    /// Set to 0 to disable speculative submission entirely.
+    pub stt_submit_interval_ms: u32,
 
     // ── LLM ──────────────────────────────────────────────────────────────────
     /// LLM server base URL (OpenAI-compatible, default http://127.0.0.1:8000 for mlx-lm)
@@ -224,6 +233,14 @@ impl Config {
                 .unwrap_or_else(|_| "0".to_string())
                 .parse()
                 .context("Invalid WHISPER_THREADS")?,
+            stt_min_submit_ms: env::var("STT_MIN_SUBMIT_MS")
+                .unwrap_or_else(|_| "1000".to_string())
+                .parse()
+                .context("Invalid STT_MIN_SUBMIT_MS")?,
+            stt_submit_interval_ms: env::var("STT_SUBMIT_INTERVAL_MS")
+                .unwrap_or_else(|_| "500".to_string())
+                .parse()
+                .context("Invalid STT_SUBMIT_INTERVAL_MS")?,
 
             // LLM
             llm_url: env::var("LLM_URL")
