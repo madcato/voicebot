@@ -20,13 +20,13 @@ pub struct SttStream {
     seq: AtomicU64,
     audio_tx: watch::Sender<(u64, Vec<f32>)>,
     /// Kept so callers can clone receivers for `await_result`.
-    result_rx: watch::Receiver<(u64, String)>,
+    result_rx: watch::Receiver<(u64, Result<String, String>)>,
 }
 
 impl SttStream {
     pub fn new(stt: Arc<WhisperStt>) -> Arc<Self> {
         let (audio_tx, mut audio_rx) = watch::channel::<(u64, Vec<f32>)>((0, vec![]));
-        let (result_tx, result_rx) = watch::channel::<(u64, String)>((0, String::new()));
+        let (result_tx, result_rx) = watch::channel::<(u64, Result<String, String>)>((0, Ok(String::new())));
 
         tokio::spawn(async move {
             loop {
@@ -52,10 +52,16 @@ impl SttStream {
                             t.elapsed().as_millis(),
                             &text[..text.len().min(60)]
                         );
-                        let _ = result_tx.send((seq, text));
+                        let _ = result_tx.send((seq, Ok(text)));
                     }
-                    Ok(Err(e)) => tracing::error!(target: "stt", "STT error: {e}"),
-                    Err(e) => tracing::error!(target: "stt", "STT task panicked: {e}"),
+                    Ok(Err(e)) => {
+                        tracing::error!(target: "stt", "STT error: {e}");
+                        let _ = result_tx.send((seq, Err(e.to_string())));
+                    }
+                    Err(e) => {
+                        tracing::error!(target: "stt", "STT task panicked: {e}");
+                        let _ = result_tx.send((seq, Err(format!("STT task panicked: {e}"))));
+                    }
                 }
             }
         });
@@ -73,12 +79,13 @@ impl SttStream {
 
     /// Returns a cloned watch receiver for monitoring STT results.
     /// Use this to detect when new transcriptions are produced.
-    pub fn result_receiver(&self) -> watch::Receiver<(u64, String)> {
+    pub fn result_receiver(&self) -> watch::Receiver<(u64, Result<String, String>)> {
         self.result_rx.clone()
     }
 
     /// Wait until a Whisper result for sequence >= `min_seq` is ready.
-    pub async fn await_result(&self, min_seq: u64) -> String {
+    /// Returns `Ok(text)` on success or `Err(msg)` if Whisper failed.
+    pub async fn await_result(&self, min_seq: u64) -> Result<String, String> {
         let mut rx = self.result_rx.clone();
         loop {
             {
@@ -88,7 +95,7 @@ impl SttStream {
                 }
             }
             if rx.changed().await.is_err() {
-                return String::new();
+                return Ok(String::new());
             }
         }
     }
@@ -101,9 +108,9 @@ impl SttStream {
     /// Use in integration tests to bypass STT and inject a known transcript.
     pub(crate) fn mock(transcript: String) -> Arc<Self> {
         let (audio_tx, _audio_rx) = watch::channel::<(u64, Vec<f32>)>((0, vec![]));
-        let (result_tx, result_rx) = watch::channel::<(u64, String)>((0, String::new()));
+        let (result_tx, result_rx) = watch::channel::<(u64, Result<String, String>)>((0, Ok(String::new())));
         // Pre-load seq=1 so await_result(1) returns immediately without blocking.
-        let _ = result_tx.send((1, transcript));
+        let _ = result_tx.send((1, Ok(transcript)));
         // result_tx drops here — that's fine because await_result reads the pre-loaded
         // value (1 >= 1) without calling changed().
         Arc::new(Self { seq: AtomicU64::new(1), audio_tx, result_rx })

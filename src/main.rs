@@ -37,7 +37,7 @@ pub(crate) struct SharedSession {
     /// LLM token stream buffer — text not yet split into sentences.
     assistant_text: Mutex<String>,
     /// Sentences ready for TTS playback.
-    sentences: Mutex<VecDeque<String>>,
+    pub(crate) sentences: Mutex<VecDeque<String>>,
     /// True when the current LLM streaming POST has finished.
     llm_post_finished: AtomicBool,
     /// True while the LLM task is actively processing a turn.
@@ -1102,10 +1102,11 @@ async fn async_main() -> Result<()> {
                             let amb_c = Arc::clone(&ambient_buffer);
                             let label = speaker_label.clone();
                             tokio::spawn(async move {
-                                let text = stt_c.await_result(min_stt_gen).await;
-                                if !text.is_empty() {
-                                    amb_c.lock().unwrap().push(label.clone(), text.clone());
-                                    debug!(target: "pipeline", "Ambient buffer ← {label}: {text}");
+                                if let Ok(text) = stt_c.await_result(min_stt_gen).await {
+                                    if !text.is_empty() {
+                                        amb_c.lock().unwrap().push(label.clone(), text.clone());
+                                        debug!(target: "pipeline", "Ambient buffer ← {label}: {text}");
+                                    }
                                 }
                             });
                             vad.reset();
@@ -1121,7 +1122,7 @@ async fn async_main() -> Result<()> {
                         if let Some(resp_tx) = pending_agent_question.take() {
                             let stt_c = Arc::clone(&stt_stream);
                             tokio::spawn(async move {
-                                let answer = stt_c.await_result(min_stt_gen).await;
+                                let answer = stt_c.await_result(min_stt_gen).await.unwrap_or_default();
                                 let outcome = map_answer_to_outcome(&answer);
                                 info!(target: "acp", "Permission answer: {:?} → {}", answer, outcome);
                                 let _ = resp_tx.send(outcome);
@@ -1139,8 +1140,21 @@ async fn async_main() -> Result<()> {
                         let epoch        = utterance_epoch.load(Ordering::SeqCst);
                         let epoch_ref    = Arc::clone(&utterance_epoch);
                         tokio::spawn(async move {
-                            let text = stt_c.await_result(min_stt_gen).await;
-                            if text.is_empty() { return; }
+                            let text = match stt_c.await_result(min_stt_gen).await {
+                                Err(_e) => {
+                                    shared_c.sentences.lock().unwrap()
+                                        .push_back("Lo siento, hubo un error al procesar tu voz.".to_string());
+                                    events_c.sentence_ready.notify_one();
+                                    return;
+                                }
+                                Ok(t) if t.is_empty() => {
+                                    shared_c.sentences.lock().unwrap()
+                                        .push_back("No te entendí. ¿Puedes repetirlo?".to_string());
+                                    events_c.sentence_ready.notify_one();
+                                    return;
+                                }
+                                Ok(t) => t,
+                            };
 
                             // Stale check: if a new SpeechStart fired since this
                             // task was spawned, the user interrupted — discard.
@@ -1358,6 +1372,9 @@ async fn llm_task(
                         error!(target: "llm", "LLM error: {}", e);
                         #[cfg(feature = "tui")]
                         tui_tx.send(tui::events::TuiEvent::Error(format!("LLM error: {e}"))).ok();
+                        shared.sentences.lock().unwrap()
+                            .push_back("Lo siento, no pude conectar con el modelo de lenguaje.".to_string());
+                        events.sentence_ready.notify_one();
                         break 'pipeline;
                     }
                 };
@@ -1999,9 +2016,9 @@ async fn run_pipeline(
 ) {
     use std::sync::atomic::Ordering;
 
-    let transcript = {
-        let s = _stt_stream.await_result(_min_stt_gen).await;
-        s
+    let transcript = match _stt_stream.await_result(_min_stt_gen).await {
+        Ok(t) => t,
+        Err(_) => return,
     };
 
     if transcript.trim().is_empty() {
