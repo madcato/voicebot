@@ -824,8 +824,9 @@ async fn async_main() -> Result<()> {
         let shared_c = Arc::clone(&shared);
         let events_c = Arc::clone(&events);
         let tts_muted_c = Arc::clone(&tts_muted);
+        let conv_mode_tui = Arc::clone(&conv_mode);
         tokio::spawn(async move {
-            if let Err(e) = tui::run(tui_rx, shared_c, events_c, tts_muted_c).await {
+            if let Err(e) = tui::run(tui_rx, shared_c, events_c, tts_muted_c, conv_mode_tui).await {
                 tracing::error!("TUI error: {e}");
             }
             // TUI quit → exit process.

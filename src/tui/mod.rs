@@ -5,7 +5,7 @@ mod ui;
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use crossterm::{
@@ -15,6 +15,7 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
+use crate::tools::ConversationMode;
 use crate::{PipelineEvents, SharedSession};
 use app::{Action, App};
 use events::TuiEventRx;
@@ -28,6 +29,7 @@ pub async fn run(
     shared: Arc<SharedSession>,
     events: Arc<PipelineEvents>,
     tts_muted: Arc<AtomicBool>,
+    conv_mode: Arc<Mutex<ConversationMode>>,
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -35,7 +37,7 @@ pub async fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new();
+    let mut app = App::new(conv_mode);
     let mut keys = KeyReader::new();
     let tick = tokio::time::Duration::from_millis(TICK_MS);
 
