@@ -77,7 +77,9 @@ impl App {
             }
             TuiEvent::AssistantToken(token) => {
                 self.streaming_buffer.push_str(&token);
-                self.scroll = 0;
+                // Do not reset scroll — if the user has scrolled up to read,
+                // preserve their position. scroll == 0 already tracks the bottom
+                // dynamically as content grows.
             }
             TuiEvent::AssistantDone => {
                 if !self.streaming_buffer.is_empty() {
@@ -88,7 +90,7 @@ impl App {
                         timestamp: chrono::Local::now(),
                     });
                 }
-                self.scroll = 0;
+                // Preserve scroll position — user may be reading earlier content.
             }
             TuiEvent::Error(msg) => {
                 self.messages.push(ChatMessage {
