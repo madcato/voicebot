@@ -118,7 +118,7 @@ use crate::tools::{
     OpenAppTool, ReadClipboardTool, RunAgentTool, RunShellTool, SetClipboardTool, SetConversationModeTool,
     TakeScreenshotTool, ToolRegistry, WebSearchTool,
 };
-use crate::tts::{SayTts, SentenceSplitter, TtsEngine};
+use crate::tts::{SentenceSplitter, TtsEngine};
 #[cfg(feature = "kokoro")]
 use crate::tts::KokoroTts;
 #[cfg(feature = "avspeech")]
@@ -259,7 +259,8 @@ async fn async_main() -> Result<()> {
                 std::process::exit(1);
             }
             _ => {
-                SayTts::list_voices()?;
+                eprintln!("Unknown TTS_PROVIDER '{}'. Available: avspeech, kokoro", config.tts_provider);
+                std::process::exit(1);
             }
         }
         return Ok(());
@@ -642,11 +643,10 @@ async fn async_main() -> Result<()> {
             );
         }
         _ => {
-            info!(target: "tts", "TTS provider: say (voice={}, rate={}wpm)", config.say_voice, config.say_rate);
-            let say_voice = config.say_voice.clone();
-            let say_rate = config.say_rate;
-            let s = tokio::task::spawn_blocking(move || SayTts::new(&say_voice, say_rate)).await??;
-            TtsEngine::Say(s)
+            anyhow::bail!(
+                "Unknown TTS_PROVIDER '{}'. Available: avspeech, kokoro",
+                config.tts_provider
+            );
         }
     };
     let tts_sample_rate = tts.sample_rate();
@@ -1018,7 +1018,7 @@ async fn async_main() -> Result<()> {
                             {
                                 let snap =
                                     speech_buffer.get_samples_from(speech_buffer_start_offset);
-                                stt_stream.submit(snap);
+                                stt_stream.submit(snap, utterance_epoch.load(Ordering::SeqCst));
                                 last_stt_submit_samples = speech_buffer.sample_count();
                                 debug!(target: "performance",
                                     "[Speech] speculative STT: {}ms of utterance audio",
@@ -1133,7 +1133,8 @@ async fn async_main() -> Result<()> {
 
                         // Submit audio to STT for all speakers — ambient buffer
                         // needs transcripts from non-main speakers too.
-                        let min_stt_gen = stt_stream.submit(audio);
+                        let utterance_id = utterance_epoch.load(Ordering::SeqCst);
+                        let min_stt_gen = stt_stream.submit(audio, utterance_id);
 
                         // ── Non-main speaker: buffer transcript, skip LLM ─────
                         if !is_main_speaker {

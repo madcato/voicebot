@@ -1,12 +1,10 @@
 pub mod piper;
-pub mod say;
 pub mod sentence;
 #[cfg(feature = "kokoro")]
 pub mod kokoro;
 #[cfg(feature = "avspeech")]
 pub mod avspeech;
 
-pub use say::SayTts;
 pub use sentence::SentenceSplitter;
 #[cfg(feature = "kokoro")]
 pub use kokoro::KokoroTts;
@@ -16,15 +14,13 @@ pub use avspeech::AvSpeechTts;
 /// Unified TTS backend.
 ///
 /// Select at startup via `TTS_PROVIDER` env var:
-/// - `"say"` (default) — macOS `say` subprocess, configured by `SAY_VOICE` / `SAY_RATE`
-/// - `"avspeech"` — Native macOS `AVSpeechSynthesizer`; requires `--features avspeech`.
+/// - `"avspeech"` (default) — Native macOS `AVSpeechSynthesizer`; requires `--features avspeech`.
 ///   Configured by `AVSPEECH_VOICE` / `AVSPEECH_RATE`.
 /// - `"kokoro"` — Kokoro ONNX model; requires `--features kokoro` and espeak-ng.
 ///
 /// All variants expose the same `synthesize` / `sample_rate` interface so the
 /// rest of the pipeline is backend-agnostic.
 pub enum TtsEngine {
-    Say(SayTts),
     #[cfg(feature = "avspeech")]
     AvSpeech(AvSpeechTts),
     #[cfg(feature = "kokoro")]
@@ -38,7 +34,6 @@ pub enum TtsEngine {
 impl TtsEngine {
     pub fn synthesize(&self, text: &str) -> anyhow::Result<Vec<f32>> {
         match self {
-            Self::Say(t) => t.synthesize(text),
             #[cfg(feature = "avspeech")]
             Self::AvSpeech(t) => t.synthesize(text),
             #[cfg(feature = "kokoro")]
@@ -50,7 +45,6 @@ impl TtsEngine {
 
     pub fn sample_rate(&self) -> u32 {
         match self {
-            Self::Say(t) => t.sample_rate(),
             #[cfg(feature = "avspeech")]
             Self::AvSpeech(t) => t.sample_rate(),
             #[cfg(feature = "kokoro")]

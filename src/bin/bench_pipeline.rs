@@ -16,7 +16,7 @@ use tracing_subscriber::EnvFilter;
 use voicebot::config::Config;
 use voicebot::llm::{OpenAIClient, LlmSession, StreamToken};
 use voicebot::stt::WhisperStt;
-use voicebot::tts::{SayTts, SentenceSplitter, TtsEngine};
+use voicebot::tts::{SentenceSplitter, TtsEngine};
 use whisper_rs::install_logging_hooks;
 #[cfg(feature = "kokoro")]
 use voicebot::tts::KokoroTts;
@@ -123,10 +123,7 @@ async fn main() -> Result<()> {
         #[cfg(not(feature = "kokoro"))]
         "kokoro" => anyhow::bail!("TTS_PROVIDER=kokoro requires the 'kokoro' feature"),
         _ => {
-            let voice = config.say_voice.clone();
-            let rate = config.say_rate;
-            println!("TTS provider: say (voice={voice}, rate={rate}wpm)");
-            TtsEngine::Say(tokio::task::spawn_blocking(move || SayTts::new(&voice, rate)).await??)
+            anyhow::bail!("Unknown TTS_PROVIDER '{}'. Available: avspeech, kokoro", config.tts_provider);
         }
     };
     let tts = Arc::new(tts);
@@ -280,16 +277,6 @@ async fn main() -> Result<()> {
 
         // Active provider — reuse existing instance (avoids second-instance issues)
         providers.push((active_provider, Arc::clone(&tts)));
-
-        // say — only create if not already the active provider
-        if active_provider != "say" {
-            let voice = config.say_voice.clone();
-            let rate = config.say_rate;
-            match tokio::task::spawn_blocking(move || SayTts::new(&voice, rate)).await? {
-                Ok(s) => providers.push(("say", Arc::new(TtsEngine::Say(s)))),
-                Err(e) => println!("  say: init failed — {e}"),
-            }
-        }
 
         // avspeech — only create if not already the active provider
         #[cfg(feature = "avspeech")]

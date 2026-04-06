@@ -60,11 +60,8 @@ impl WhisperStt {
         })
     }
 
-    /// Transcribe mono f32 audio sampled at 16 kHz.
-    /// CPU-intensive — call from `tokio::task::spawn_blocking`.
-    pub fn transcribe(&self, audio: &[f32]) -> Result<String> {
-        let mut state = self.state.lock().unwrap();
-
+    /// Build decoder params shared by all transcription calls.
+    fn make_params(&self) -> FullParams<'_, '_> {
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 0 });
         params.set_language(Some(&self.language));
         params.set_print_special(false);
@@ -73,23 +70,19 @@ impl WhisperStt {
         params.set_print_timestamps(false);
         // Single segment mode: skip the "should I split?" heuristic — voice
         // utterances are short enough that a single decoder pass suffices.
-        // Saves ~20-50ms by avoiding the segment-boundary search.
         params.set_single_segment(true);
         // Don't predict timestamp tokens between words — saves decoder steps.
         params.set_no_timestamps(true);
-        // Skip the word-level timestamp alignment post-processing pass.
+        // Skip word-level timestamp alignment post-processing.
         params.set_token_timestamps(false);
-        // Explicit thread count: match physical cores for optimal throughput.
-        // Default 0 lets whisper.cpp pick, which may over-subscribe on HT CPUs.
         if self.threads > 0 {
             params.set_n_threads(self.threads as i32);
         }
+        params
+    }
 
-        let audio = pad_to_min_duration(audio, MIN_AUDIO_SAMPLES);
-        state
-            .full(params, &audio)
-            .context("Whisper transcription failed")?;
-
+    /// Extract text from all segments of the last decode.
+    fn collect_text(state: &WhisperState) -> String {
         let num_segments = state.full_n_segments();
         let mut text = String::new();
         for i in 0..num_segments {
@@ -103,8 +96,38 @@ impl WhisperStt {
                 }
             }
         }
+        text.trim().to_string()
+    }
 
-        Ok(text.trim().to_string())
+    /// Transcribe mono f32 audio sampled at 16 kHz.
+    /// CPU-intensive — call from `tokio::task::spawn_blocking`.
+    pub fn transcribe(&self, audio: &[f32]) -> Result<String> {
+        self.transcribe_internal(audio, "")
+    }
+
+    /// Transcribe a delta audio chunk using `prompt` (text from a prior decode)
+    /// as context. The decoder picks up where the previous decode left off.
+    ///
+    /// Use this for speculative streaming: each call processes only the new
+    /// audio since the last completed decode, using the previous transcript as
+    /// a text prompt to maintain linguistic continuity.
+    ///
+    /// CPU-intensive — call from `tokio::task::spawn_blocking`.
+    pub fn transcribe_with_prompt(&self, audio: &[f32], prompt: &str) -> Result<String> {
+        self.transcribe_internal(audio, prompt)
+    }
+
+    fn transcribe_internal(&self, audio: &[f32], prompt: &str) -> Result<String> {
+        let mut state = self.state.lock().unwrap();
+        let mut params = self.make_params();
+        if !prompt.is_empty() {
+            params.set_initial_prompt(prompt);
+        }
+        let audio = pad_to_min_duration(audio, MIN_AUDIO_SAMPLES);
+        state
+            .full(params, &audio)
+            .context("Whisper transcription failed")?;
+        Ok(Self::collect_text(&state))
     }
 }
 

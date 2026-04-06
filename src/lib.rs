@@ -16,4 +16,4 @@ pub use config::Config;
 pub use db::Database;
 pub use llm::{OpenAIClient, LlmSession};
 pub use stt::WhisperStt;
-pub use tts::{SayTts, SentenceSplitter};
+pub use tts::SentenceSplitter;

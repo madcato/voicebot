@@ -8,33 +8,54 @@ use super::WhisperStt;
 ///
 /// # How it works
 ///
-/// The audio loop calls `submit()` whenever the speech buffer grows —
-/// starting immediately at SpeechStart and then every ~500ms of new audio.
-/// A background task picks up each new audio snapshot and runs Whisper.
-/// Because Whisper is always working, by the time SpeechEnd fires the result
-/// for the final audio is usually complete or only milliseconds away.
+/// The audio loop calls `submit()` with a growing full snapshot of the current
+/// utterance — starting at `stt_min_submit_ms` and then every
+/// `stt_submit_interval_ms` of new audio during speech.
 ///
-/// `submit()` returns a sequence number.  `await_result(seq)` blocks until
-/// a result for that sequence (or a later one) is available.
+/// A background worker picks up each new snapshot and runs the full Whisper
+/// decoder on it. Because Whisper is always working on the latest audio, by
+/// the time `SpeechEnd` fires the result for the final audio is usually
+/// complete or only a short delta away.
+///
+/// # Why full snapshots (not deltas)
+///
+/// Delta decoding (processing only the new tail with a text prompt for context)
+/// causes word-boundary errors: the encoder has no acoustic context for the
+/// first word of each delta, and silence-only deltas at SpeechEnd cause
+/// hallucinations. Full-snapshot decoding is slower per call but correct.
+///
+/// # Utterance isolation
+///
+/// Each `submit()` carries an `utterance_id`. A new utterance_id signals that
+/// the user started speaking again; any result published after that point
+/// belongs to the new utterance. `await_result` relies only on seq numbers,
+/// so stale-epoch checks in main.rs handle discard of old results.
+///
+/// # Sequence numbers
+///
+/// `submit()` returns a monotonically increasing `seq`. `await_result(seq)`
+/// blocks until a result for that seq (or later) is available. A result is
+/// **always** published for every submit — even if skipped — so `await_result`
+/// never blocks forever.
 pub struct SttStream {
     seq: AtomicU64,
-    audio_tx: watch::Sender<(u64, Vec<f32>)>,
-    /// Kept so callers can clone receivers for `await_result`.
+    /// Carries (seq, full_audio_snapshot, utterance_id).
+    audio_tx: watch::Sender<(u64, Vec<f32>, u64)>,
     result_rx: watch::Receiver<(u64, Result<String, String>)>,
 }
 
 impl SttStream {
     pub fn new(stt: Arc<WhisperStt>) -> Arc<Self> {
-        let (audio_tx, mut audio_rx) = watch::channel::<(u64, Vec<f32>)>((0, vec![]));
-        let (result_tx, result_rx) = watch::channel::<(u64, Result<String, String>)>((0, Ok(String::new())));
+        let (audio_tx, mut audio_rx) = watch::channel::<(u64, Vec<f32>, u64)>((0, vec![], 0));
+        let (result_tx, result_rx) =
+            watch::channel::<(u64, Result<String, String>)>((0, Ok(String::new())));
 
         tokio::spawn(async move {
             loop {
-                // Block until a new audio snapshot is submitted.
                 if audio_rx.changed().await.is_err() {
                     break;
                 }
-                let (seq, audio) = audio_rx.borrow_and_update().clone();
+                let (seq, audio, _utterance_id) = audio_rx.borrow_and_update().clone();
                 if audio.is_empty() {
                     continue;
                 }
@@ -66,19 +87,26 @@ impl SttStream {
             }
         });
 
-        Arc::new(Self { seq: AtomicU64::new(0), audio_tx, result_rx })
+        Arc::new(Self {
+            seq: AtomicU64::new(0),
+            audio_tx,
+            result_rx,
+        })
     }
 
     /// Submit a new audio snapshot for processing.
-    /// Returns the sequence number — pass it to `await_result`.
-    pub fn submit(&self, audio: Vec<f32>) -> u64 {
+    ///
+    /// `utterance_id` is the current utterance epoch — pass the same value for
+    /// all submits within one utterance (speculative and final).
+    ///
+    /// Returns the sequence number; pass it to `await_result`.
+    pub fn submit(&self, audio: Vec<f32>, utterance_id: u64) -> u64 {
         let s = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-        let _ = self.audio_tx.send((s, audio));
+        let _ = self.audio_tx.send((s, audio, utterance_id));
         s
     }
 
     /// Returns a cloned watch receiver for monitoring STT results.
-    /// Use this to detect when new transcriptions are produced.
     pub fn result_receiver(&self) -> watch::Receiver<(u64, Result<String, String>)> {
         self.result_rx.clone()
     }
@@ -104,15 +132,17 @@ impl SttStream {
 #[cfg(test)]
 impl SttStream {
     /// Creates a mock SttStream that immediately returns `transcript` for any
-    /// `await_result(seq)` where seq <= 1. No background Whisper task is started.
-    /// Use in integration tests to bypass STT and inject a known transcript.
+    /// `await_result(seq)` where seq <= 1.
     pub(crate) fn mock(transcript: String) -> Arc<Self> {
-        let (audio_tx, _audio_rx) = watch::channel::<(u64, Vec<f32>)>((0, vec![]));
-        let (result_tx, result_rx) = watch::channel::<(u64, Result<String, String>)>((0, Ok(String::new())));
-        // Pre-load seq=1 so await_result(1) returns immediately without blocking.
+        let (audio_tx, _audio_rx) =
+            watch::channel::<(u64, Vec<f32>, u64)>((0, vec![], 0));
+        let (result_tx, result_rx) =
+            watch::channel::<(u64, Result<String, String>)>((0, Ok(String::new())));
         let _ = result_tx.send((1, Ok(transcript)));
-        // result_tx drops here — that's fine because await_result reads the pre-loaded
-        // value (1 >= 1) without calling changed().
-        Arc::new(Self { seq: AtomicU64::new(1), audio_tx, result_rx })
+        Arc::new(Self {
+            seq: AtomicU64::new(1),
+            audio_tx,
+            result_rx,
+        })
     }
 }
