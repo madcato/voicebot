@@ -11,7 +11,6 @@
 #
 # After launch, set in .env:
 #   LLM_URL=http://127.0.0.1:8000
-#   LLM_PROVIDER=mlx
 
 set -euo pipefail
 

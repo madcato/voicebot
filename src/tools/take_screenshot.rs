@@ -117,7 +117,7 @@ mod tests {
     use super::*;
 
     fn tool(base_url: &str) -> TakeScreenshotTool {
-        TakeScreenshotTool::new(OpenAIClient::new(base_url, "test-vision-model", 512, 0.0, 0, -1))
+        TakeScreenshotTool::new(OpenAIClient::new(base_url, "test-vision-model", 512, 0.0))
     }
 
     #[test]

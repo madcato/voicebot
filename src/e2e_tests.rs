@@ -3,7 +3,7 @@
 //! These tests exercise the full STT → LLM → TTS → DB pipeline using:
 //! - `SttStream::mock()` — injects a known transcript, no Whisper needed
 //! - `TtsEngine::Mock` — captures synthesized sentences instead of playing audio
-//! - wiremock — deterministic LLM responses, no llama-server needed
+//! - wiremock — deterministic LLM responses, no LLM server needed
 //! - Real SQLite in a temp directory — DB assertions without side effects
 //!
 //! All tests are marked `#[ignore]` and must be run explicitly:
@@ -97,10 +97,8 @@ impl E2eHarness {
             "test-model",
             400,  // max_tokens
             0.0,  // temperature — deterministic
-            0,    // slot_id
-            -1,   // background_slot_id
         );
-        let llm_session = Arc::new(Mutex::new(LlmSession::new(system_prompt, 0)));
+        let llm_session = Arc::new(Mutex::new(LlmSession::new(system_prompt)));
 
         let (mock_tts, captured) = MockTts::new();
         let tts = Arc::new(TtsEngine::Mock(mock_tts));

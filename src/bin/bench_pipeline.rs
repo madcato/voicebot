@@ -97,12 +97,9 @@ async fn main() -> Result<()> {
         &config.llm_model,
         config.llm_max_tokens,
         config.llm_temperature,
-        config.llm_slot_id,
-        config.llm_background_slot_id,
     )
-    .with_provider(&config.llm_provider)
     .with_api_key(&config.llm_api_key);
-    println!("LLM endpoint: {} (provider: {})", config.llm_url, config.llm_provider);
+    println!("LLM endpoint: {}", config.llm_url);
 
     // ── TTS init ─────────────────────────────────────────────────────────────
     let tts: TtsEngine = match config.tts_provider.as_str() {
@@ -166,12 +163,12 @@ async fn main() -> Result<()> {
         }
 
         // ── LLM ──────────────────────────────────────────────────────────────
-        let mut session = LlmSession::new(&config.llm_system_prompt, config.llm_slot_id);
+        let mut session = LlmSession::new(&config.llm_system_prompt);
         session.add_user_turn(&transcript);
         let messages = session.all_messages_api();
 
         let t = Instant::now();
-        let (mut rx, _stream_handle) = llm_client.stream(&messages, &[], false).await?;
+        let (mut rx, _stream_handle) = llm_client.stream(&messages, &[]).await?;
         let mut llm_ttft_ms: Option<u128> = None;
         let mut full_response = String::new();
 

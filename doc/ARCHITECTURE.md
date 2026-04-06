@@ -176,20 +176,11 @@ impl LlamaClient {
     pub async fn complete(&self, messages: &[Message]) -> Result<String>;
     pub async fn complete_short(&self, messages: &[Message]) -> Result<String>;
 
-    // KV-cache warm-up — llama.cpp only; disabled for other providers
-    pub async fn prefill_warm(&self, messages: Vec<serde_json::Value>) -> Result<()>;
-    pub fn supports_prefill_warm(&self) -> bool;
 }
 ```
 
-`LlamaClient` targets **any OpenAI-compatible endpoint**.
-Backend-specific behaviour is selected at construction via `.with_provider(name)`:
-
-| `LLM_PROVIDER` | Backend | Extra fields sent |
-|----------------|---------|-------------------|
-| `llama` (default) | llama.cpp | `cache_prompt`, `slot_id` |
-| `mlx` | mlx-lm | `enable_thinking: false`, `chat_template_kwargs`, `repetition_penalty` |
-| *(any)* | LM Studio, OpenAI, Ollama | no extra fields (standard OpenAI body) |
+`OpenAIClient` targets **any OpenAI-compatible endpoint** (mlx-lm, oMLX, OpenAI, Ollama).
+Extra sampling params (`repetition_penalty`, `top_k`, `min_p`) are sent unconditionally on every streaming request for best output quality with mlx-lm and oMLX.
 
 **Adding a non-OpenAI LLM backend** (e.g. a gRPC model, custom HTTP API):
 
@@ -261,7 +252,7 @@ When `SpeechStart` fires while a pipeline is playing:
 |----------|-----------|
 | Single binary, tokio channels | No IPC overhead; easy to reason about cancellation |
 | Always-on Whisper (`SttStream`) | Transcript is ready ~0ms after SpeechEnd |
-| KV-cache warm-up (`prefill_warm`) | llama.cpp: fire-and-forget prefill after vad_finish; saves ~300ms |
+| Apple MLX backends | mlx-lm and oMLX maintain KV-cache implicitly; substantially faster than llama.cpp on Apple Silicon |
 | Sentence-by-sentence TTS | First word heard in <1s; synthesis of N overlaps playback of N-1 |
 | `TtsEngine` enum | Zero-cost dispatch; each variant owns its state; easy to add variants |
 | SQLite for history | Survives restarts; restored to `LlmSession` on startup |
@@ -281,10 +272,8 @@ All config is loaded from environment variables (`.env` file supported via `dote
 | `VAD_SILENCE_MS` | `1500` | ms of silence before SpeechEnd fires |
 | `VOICEBOT_LANGUAGE` | `es` | `es` or `en` — Whisper hint + TTS voice selection |
 | `WHISPER_MODEL` | `models/ggml-large-v3-turbo.bin` | Path to GGML model |
-| `LLM_URL` | `http://localhost:8080` | OpenAI-compatible endpoint base URL |
+| `LLM_URL` | `http://localhost:8000` | OpenAI-compatible endpoint base URL (mlx-lm default: 8000; oMLX: 8001) |
 | `LLM_MODEL` | — | Model name sent in API requests |
-| `LLM_PROVIDER` | `llama` | `llama` (llama.cpp) or `mlx` (mlx-lm) |
-| `LLM_SLOT_ID` | `0` | KV-cache slot (llama.cpp only) |
 | `LLM_MAX_TOKENS` | `400` | Max tokens per response |
 | `LLM_TEMPERATURE` | `0.7` | Sampling temperature |
 | `LLM_SYSTEM_PROMPT` | — | System prompt text |

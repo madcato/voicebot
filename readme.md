@@ -41,7 +41,7 @@ Jarvis is built from the ground up for voice interaction:
 
 - 🔊 Real-time voice capture (CPAL) with VAD (Silero) and pre-roll buffer
 - 🎤 Whisper STT (CoreML Neural Engine or Metal GPU, cached across utterances)
-- 🤖 Streaming LLM via llama.cpp or mlx-lm (KV-cache reuse, sub-second latency)
+- 🤖 Streaming LLM via mlx-lm or oMLX (Apple MLX, KV-cache reuse, sub-second latency)
 - 🔊 Sentence-by-sentence TTS playback — speaks while generating next sentence
 - ⚡ **Barge-in** — user speech cancels active pipeline instantly
 - 💾 Persistent SQLite conversation history with session restoration
@@ -60,7 +60,7 @@ Jarvis is built from the ground up for voice interaction:
 ### Integration Options ✅
 
 - **TTS backends**: AVSpeechSynthesizer (default), macOS `say`, Kokoro ONNX 
-- **LLM providers**: llama.cpp (local GGUF), mlx-lm (Apple MLX framework)
+- **LLM providers**: mlx-lm, oMLX (Apple MLX framework — substantially faster on Apple Silicon)
 - **Agent delegation**: `run_agent` / `run_agent_async` for complex tasks
 
 ### Terminal UI (TUI) ✅
@@ -174,9 +174,8 @@ nano .env
 ```env
 WHISPER_MODEL=./models/ggml-small.bin
 WHISPER_COREML=0
-LLM_PROVIDER=llama
-LLM_URL=http://127.0.0.1:8080
-LLM_MODEL=./models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+LLM_URL=http://127.0.0.1:8000
+LLM_MODEL=mlx-community/Qwen3-8B-4bit
 TTS_PROVIDER=say
 SAY_VOICE="Jorge (Enhanced)"
 VOICEBOT_LANGUAGE=es
@@ -184,42 +183,30 @@ VOICEBOT_LANGUAGE=es
 
 ### 3. Start the LLM server
 
-**Using llama.cpp:**
+Jarvis uses Apple MLX-based servers for low-latency inference on Apple Silicon.
+
+**Using mlx-lm (recommended):**
 
 ```bash
-# First build llama.cpp if you don't have it
-# Then start the server with your model:
-./scripts/start-llm.sh ./models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+./scripts/start-mlx-lm.sh mlx-community/Qwen3-8B-4bit
+# Set in .env: LLM_URL=http://127.0.0.1:8000
 ```
 
-**Recommended llama-server flags for low latency:**
+Or manually:
 
 ```bash
-llama-server \
-  --model ./models/Qwen2.5-7B-Instruct-Q4_K_M.gguf \
-  --host 127.0.0.1 --port 8080 \
-  --flash-attn \                     # GPU-accelerated attention (faster prefill)
-  --cache-type-k q8_0 \             # Quantized KV cache (less VRAM, same quality)
-  --cache-type-v q8_0 \
-  --ctx-size 8192 \                  # Match LLM_CONTEXT_TOKENS (smaller = faster)
-  --threads $(sysctl -n hw.perflevel0.physicalcpu) \  # Physical perf cores only
-  --parallel 2 \                     # 2 slots: main conversation + background tasks
-  --cont-batching \                  # Continuous batching for parallel slots
-  --slots                            # Enable slot management
+mlx_lm.server \
+  --model mlx-community/Qwen3-8B-4bit \
+  --host 127.0.0.1 --port 8000 \
+  --prompt-cache-size 1 \
+  --chat-template-args '{"enable_thinking": false}'
 ```
 
-Key flags explained:
-- `--flash-attn`: Enables flash attention for faster prefill, especially on longer contexts.
-- `--cache-type-k/v q8_0`: Quantized KV cache reduces memory ~50% with negligible quality loss.
-- `--ctx-size`: Keep small (4096-8192) — larger contexts increase prefill latency linearly.
-- `--threads`: Use physical **performance** core count (not hyperthreads). On Apple Silicon: `sysctl -n hw.perflevel0.physicalcpu`.
-- `--parallel 2`: Separate slots for conversation (slot 0) and background tasks (slot 1). Set `LLM_BACKGROUND_SLOT_ID=1` in `.env`.
-
-**Using mlx-lm (alternative):**
+**Using oMLX (alternative — persistent tiered KV cache):**
 
 ```bash
-./scripts/start-mlx-lm.sh mlx-community/Qwen2.5-7B-Instruct-4bit
-# Set in .env: LLM_PROVIDER=mlx, LLM_URL=http://127.0.0.1:8000
+./scripts/start-omlx.sh ~/models
+# Set in .env: LLM_URL=http://127.0.0.1:8001
 ```
 
 ### 4. Build and run Hive Voicebot
@@ -326,8 +313,7 @@ Most configuration is done via environment variables (or `.env` file):
 | `WHISPER_THREADS` | `0` (auto) | CPU threads for Whisper decoding. Set to physical core count for best throughput. |
 | `WHISPER_COREML` | `0` | Use CoreML encoder (Neural Engine) |
 | **LLM** || |
-| `LLM_PROVIDER` | `llama` | Backend: `llama` or `mlx` |
-| `LLM_URL` | `http://127.0.0.1:8080` | LLM server URL (use IP, not `localhost`, to avoid DNS latency) |
+| `LLM_URL` | `http://127.0.0.1:8000` | LLM server URL (mlx-lm default; use IP not `localhost` to avoid DNS latency) |
 | `LLM_MODEL` | `local-model` | Model name or path |
 | `LLM_SYSTEM_PROMPT` | — | System prompt for the LLM |
 | `LLM_MAX_TOKENS` | `200` | Max response tokens |
@@ -352,7 +338,7 @@ Most configuration is done via environment variables (or `.env` file):
 | `SECONDARY_LLM_MODEL` | `local-model` | Model name for secondary LLM requests. |
 | `SECONDARY_LLM_MAX_TOKENS` | `512` | Max tokens for secondary LLM responses (vision). |
 | `SECONDARY_LLM_API_KEY` | — | Bearer token for secondary LLM API. |
-| `SECONDARY_LLM_PROVIDER` | `llama` | Backend for secondary LLM: `llama` or `mlx`. |
+| `SECONDARY_LLM_PROVIDER` | `mlx` | Backend for secondary LLM (mlx-lm or omlx). |
 | **EYES (visual awareness)** || |
 | `EYES_INTERVAL_SECS` | `0` (disabled) | Seconds between automatic screen captures. Set to e.g. `15` to enable. Requires `SECONDARY_LLM_URL` (vision model). Jarvis speaks when something important is detected on screen. |
 | **Web Search (SearXNG)** || |
@@ -439,17 +425,14 @@ Voice input and text input work simultaneously — speak or type at any time.
 Compare LLM server performance:
 
 ```bash
-# llama.cpp benchmark
-./scripts/bench-llama.sh ./models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
-
 # mlx-lm benchmark
-./scripts/bench-mlx.sh mlx-community/Qwen2.5-7B-Instruct-4bit
+./scripts/bench-mlx.sh mlx-community/Qwen3-8B-4bit
 
-# Real-server KV-cache comparison
-python3 scripts/bench-server.py <llama-model> <mlx-model>
+# mlx-lm vs oMLX comparison
+./scripts/bench-omlx.sh mlx-community/Qwen3-8B-4bit ~/models
 
 # Full pipeline benchmark (STT → LLM → TTS) using WAV fixtures
-# Requires: Whisper model + running llama-server
+# Requires: Whisper model + running mlx-lm or omlx server
 RUST_LOG=performance=debug cargo run --bin bench_pipeline
 ```
 
@@ -542,7 +525,7 @@ See [LICENSE-VOICEBOT.md](LICENSE-VOICEBOT.md) for full legal details and licens
 Built with:
 - **Rust** — Systems programming language
 - **whisper-rs** — Whisper.cpp bindings for Rust
-- **llama.cpp / mlx-lm**— Local LLM inference
+- **mlx-lm / oMLX** — Local LLM inference (Apple MLX framework)
 - **CPAL** — Cross-platform audio I/O
 - **Tokio** — Asynchronous runtime
 

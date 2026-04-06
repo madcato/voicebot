@@ -129,16 +129,6 @@ pub struct OpenAIClient {
     model: String,
     max_tokens: u32,
     temperature: f32,
-    /// llama.cpp KV-cache slot (0 for single-user). Sent with `cache_prompt=true`
-    /// on streaming calls so the server reuses the cached prompt across turns.
-    slot_id: u8,
-    /// Slot used for background (non-streaming) calls so they don't evict the
-    /// main conversation's KV cache. -1 = let llama.cpp pick any free slot.
-    /// Set to 1 when llama-server runs with --parallel 2.
-    background_slot_id: i32,
-    /// When true, include llama.cpp-specific fields (`cache_prompt`, `slot_id`)
-    /// in every request. Set to false when using mlx-lm or other backends.
-    llama_extensions: bool,
     /// Bearer token sent in `Authorization` header. Empty = no auth header.
     api_key: String,
     /// When true, send `chat_template_kwargs: {"enable_thinking": true}` in
@@ -153,8 +143,6 @@ impl OpenAIClient {
         model: &str,
         max_tokens: u32,
         temperature: f32,
-        slot_id: u8,
-        background_slot_id: i32,
     ) -> Self {
         let client = reqwest::Client::builder()
             .tcp_keepalive(Duration::from_secs(60))
@@ -170,9 +158,6 @@ impl OpenAIClient {
             model: model.to_string(),
             max_tokens,
             temperature,
-            slot_id,
-            background_slot_id,
-            llama_extensions: true,
             api_key: String::new(),
             thinking: false,
         }
@@ -195,14 +180,6 @@ impl OpenAIClient {
         }
     }
 
-    /// Configure which backend-specific extensions to send.
-    /// `"llama"` → include `cache_prompt` + `slot_id` (llama.cpp).
-    /// Any other value (e.g. `"mlx"`) → omit those fields.
-    pub fn with_provider(mut self, provider: &str) -> Self {
-        self.llama_extensions = provider == "llama";
-        self
-    }
-
     /// Enable Qwen3 thinking mode for non-streaming completions.
     ///
     /// When `true`, `chat_template_kwargs: {"enable_thinking": true}` is sent
@@ -216,16 +193,10 @@ impl OpenAIClient {
     /// Stream completion tokens from an OpenAI-compatible endpoint.
     ///
     /// Returns a channel receiver that yields text tokens as they arrive.
-    /// Stream a chat completion from the LLM server.
-    ///
-    /// When `force_no_cache` is true and the backend supports it (llama.cpp),
-    /// `cache_prompt` is set to `false` for this single call, forcing a full
-    /// KV-cache rebuild. Used after context consolidation changes the system prompt.
     pub async fn stream(
         &self,
         messages: &[serde_json::Value],
         tools: &[serde_json::Value],
-        force_no_cache: bool,
     ) -> Result<(mpsc::Receiver<StreamToken>, tokio::task::JoinHandle<()>)> {
         let mut payload = serde_json::json!({
             "model": self.model,
@@ -234,33 +205,14 @@ impl OpenAIClient {
             "temperature": self.temperature,
             "top_p": 0.90,
             "stream": true,
+            // mlx-lm requires sampling params per-request (no server-side config).
+            "repetition_penalty": 1.1,
+            "top_k": 40,
+            "min_p": 0.05,
         });
-        if self.llama_extensions {
-            // llama.cpp extensions: reuse the KV-cache across turns for this slot.
-            // Sampling params (temp, top_p, top_k, min_p) are set server-side.
-            payload["cache_prompt"] = serde_json::json!(!force_no_cache);
-            payload["slot_id"] = serde_json::json!(self.slot_id);
-        } else {
-            // mlx-lm: sampling params must be sent per-request (no server-side config).
-            payload["repetition_penalty"] = serde_json::json!(1.1);
-            payload["top_k"] = serde_json::json!(40);
-            payload["min_p"] = serde_json::json!(0.05);
-        }
-        // Disable Qwen3 thinking mode for llama.cpp only.
-        //
-        // With thinking enabled on llama.cpp, Qwen3 reasons in a <think>…</think>
-        // block and sometimes argues itself OUT of calling a tool. The ThinkFilter
-        // strips the block but the tool call decision was already lost.
-        //
-        // For mlx-lm, DO NOT disable thinking here: `chat_template_kwargs` changes
-        // the Jinja2 template and can conflict with tool calling for some model
-        // versions (e.g. mlx-community quantizations). The ThinkFilter still strips
-        // any <think> blocks that arrive in the SSE stream, so thinking mode is safe
-        // to leave enabled on mlx-lm.
-        if self.llama_extensions {
-            payload["enable_thinking"] = serde_json::json!(false);
-            payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
-        }
+        // Do not send chat_template_kwargs for streaming: changing the Jinja2 template
+        // can conflict with tool calling for some mlx-community quantizations.
+        // The ThinkFilter strips any <think> blocks that arrive in the SSE stream.
         if !tools.is_empty() {
             payload["tools"] = serde_json::json!(tools);
             payload["tool_choice"] = serde_json::json!("auto");
@@ -391,9 +343,6 @@ impl OpenAIClient {
     }
 
     /// One-shot (non-streaming) completion. Used for summarization.
-    ///
-    /// Sends `slot_id: background_slot_id` (default -1 = any free slot) so
-    /// llama.cpp does not evict the main conversation's KV-cache in slot 0.
     pub async fn complete(&self, messages: &[Message]) -> Result<String> {
         let mut payload = serde_json::json!({
             "model": self.model,
@@ -402,12 +351,7 @@ impl OpenAIClient {
             "temperature": 0.3,
             "stream": false,
         });
-        if self.llama_extensions {
-            payload["cache_prompt"] = serde_json::json!(false);
-            payload["slot_id"] = serde_json::json!(self.background_slot_id);
-            payload["enable_thinking"] = serde_json::json!(false);
-            payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
-        } else if self.thinking {
+        if self.thinking {
             payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": true});
         }
 
@@ -431,8 +375,6 @@ impl OpenAIClient {
 
     /// One-shot completion with a short token budget. Used for structured
     /// extractions (profile facts, etc.) that produce brief outputs.
-    ///
-    /// Sends `slot_id: background_slot_id` so it does not evict the main slot.
     pub async fn complete_short(&self, messages: &[Message]) -> Result<String> {
         let mut payload = serde_json::json!({
             "model": self.model,
@@ -441,12 +383,7 @@ impl OpenAIClient {
             "temperature": 0.1,
             "stream": false,
         });
-        if self.llama_extensions {
-            payload["cache_prompt"] = serde_json::json!(false);
-            payload["slot_id"] = serde_json::json!(self.background_slot_id);
-            payload["enable_thinking"] = serde_json::json!(false);
-            payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
-        } else if self.thinking {
+        if self.thinking {
             payload["chat_template_kwargs"] = serde_json::json!({"enable_thinking": true});
         }
 
@@ -471,8 +408,7 @@ impl OpenAIClient {
     /// One-shot multimodal completion with a single image + text prompt.
     ///
     /// Sends an OpenAI-compatible content array with `image_url` and `text` parts.
-    /// Used by `TakeScreenshotTool`. Does not send llama.cpp-specific fields —
-    /// vision endpoints are always stateless.
+    /// Used by `TakeScreenshotTool`.
     pub async fn complete_multimodal(
         &self,
         image_data_url: &str,
@@ -554,7 +490,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "test-model", 512, 0.3, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test-model", 512, 0.3);
         let result = client.complete(&make_messages()).await.unwrap();
         assert_eq!(result, "This is the summary.");
     }
@@ -570,7 +506,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "test-model", 512, 0.3, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test-model", 512, 0.3);
         let result = client.complete(&make_messages()).await.unwrap();
         assert_eq!(result, "trimmed");
     }
@@ -584,7 +520,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "test-model", 512, 0.3, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test-model", 512, 0.3);
         let result = client.complete(&make_messages()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("500"));
@@ -603,7 +539,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "test-model", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test-model", 256, 0.1);
         let result = client.complete_short(&make_messages()).await.unwrap();
         assert!(result.contains("Daniel"));
     }
@@ -621,7 +557,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "vision-model", 512, 0.3, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "vision-model", 512, 0.3);
         let result = client
             .complete_multimodal("data:image/png;base64,abc123", "What do you see?")
             .await
@@ -638,7 +574,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "vision-model", 512, 0.3, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "vision-model", 512, 0.3);
         let result = client
             .complete_multimodal("data:image/png;base64,abc123", "What do you see?")
             .await;
@@ -667,9 +603,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "test-model", 400, 0.7, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test-model", 400, 0.7);
         let messages = make_messages();
-        let (mut rx, _handle) = client.stream(&messages_to_json(&messages), &[], false).await.unwrap();
+        let (mut rx, _handle) = client.stream(&messages_to_json(&messages), &[]).await.unwrap();
 
         let mut collected = String::new();
         while let Some(token) = rx.recv().await {
@@ -696,9 +632,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "test-model", 400, 0.7, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test-model", 400, 0.7);
         let messages = make_messages();
-        let (mut rx, _handle) = client.stream(&messages_to_json(&messages), &[], false).await.unwrap();
+        let (mut rx, _handle) = client.stream(&messages_to_json(&messages), &[]).await.unwrap();
 
         let mut collected = String::new();
         while let Some(token) = rx.recv().await {
@@ -781,7 +717,7 @@ mod tests {
     #[tokio::test]
     async fn stream_delivers_native_tool_call() {
         let server = MockServer::start().await;
-        // Simulate llama.cpp SSE for a native function call
+        // Simulate SSE for a native function call
         let sse_body = concat!(
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_0\",\"type\":\"function\",\"function\":{\"name\":\"current_time\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
@@ -798,8 +734,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "test-model", 400, 0.7, 0, -1);
-        let (mut rx, _handle) = client.stream(&[], &[], false).await.unwrap();
+        let client = OpenAIClient::new(&server.uri(), "test-model", 400, 0.7);
+        let (mut rx, _handle) = client.stream(&[], &[]).await.unwrap();
 
         let token = rx.recv().await.expect("should receive a token");
         match token {
@@ -822,10 +758,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "test-model", 512, 0.3, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test-model", 512, 0.3);
 
         // Build a session with enough history to trigger summarization
-        let mut session = super::super::session::LlmSession::new("Eres Jarvis.", 0);
+        let mut session = super::super::session::LlmSession::new("Eres Jarvis.");
         for i in 0..5 {
             session.add_user_turn(&format!("Pregunta {i} del usuario"));
             session.add_assistant_turn(&format!("Respuesta {i} del asistente"));
