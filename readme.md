@@ -312,6 +312,8 @@ Most configuration is done via environment variables (or `.env` file):
 | `WHISPER_MODEL` | _required_ | Path to Whisper `.bin` model |
 | `WHISPER_THREADS` | `0` (auto) | CPU threads for Whisper decoding. Set to physical core count for best throughput. |
 | `WHISPER_COREML` | `0` | Use CoreML encoder (Neural Engine) |
+| `STT_MIN_SUBMIT_MS` | `1000` | Minimum ms of accumulated speech before the first speculative Whisper submit. Avoids garbage transcriptions from tiny clips. |
+| `STT_SUBMIT_INTERVAL_MS` | `500` | Interval (ms of new speech) between speculative Whisper submits during speech. Whisper runs in the background so the transcript is ready by SpeechEnd. Set to `0` to disable. |
 | **LLM** || |
 | `LLM_URL` | `http://127.0.0.1:8000` | LLM server URL (mlx-lm default; use IP not `localhost` to avoid DNS latency) |
 | `LLM_MODEL` | `local-model` | Model name or path |
