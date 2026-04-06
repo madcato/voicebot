@@ -32,13 +32,13 @@ The current implementation covers the conversational core. The roadmap below cha
 The core pipeline is fully operational:
 
 ```
-Microphone → VAD → AudioBuffer → Whisper STT → llama.cpp LLM → SentenceSplitter → TTS (say/Kokoro) → Speaker
+Microphone → VAD → AudioBuffer → Whisper STT → mlx-lm/oMLX LLM → SentenceSplitter → TTS (say/Kokoro) → Speaker
 ```
 
 **Implemented features:**
 - Real-time voice capture (CPAL), Silero VAD with pre-roll buffer
 - Whisper.cpp STT (CoreML Neural Engine or Metal GPU, state cached across utterances)
-- Streaming LLM via llama.cpp HTTP (`cache_prompt=true`, KV-cache reuse across turns)
+- Streaming LLM via mlx-lm or oMLX (Apple MLX, implicit KV-cache reuse, sub-second latency)
 - Sentence-by-sentence TTS playback — first sentence plays while next is being generated
 - **Barge-in**: user speech cancels active LLM/TTS pipeline instantly via `Arc<AtomicBool>`
 - Persistent SQLite conversation history — restored on startup
@@ -141,7 +141,7 @@ This is a fire-and-read pattern — no JSON protocol, no shared state, no persis
                                   │  transcript
                     ┌─────────────▼─────────────┐
                     │  LLM (streaming HTTP SSE)  │
-                    │  llama.cpp, cache_prompt   │
+                    │  mlx-lm / oMLX (streaming) │
                     └──────┬──────────┬──────────┘
                     text   │    <tool_call>?
                            │          │
@@ -178,7 +178,7 @@ This is a fire-and-read pattern — no JSON protocol, no shared state, no persis
 | Audio buffer | `src/audio/buffer.rs` | Accumulates speech chunks |
 | Audio output | `src/audio/output.rs` | CPAL playback, resample, cancel support |
 | STT | `src/stt/whisper.rs` | whisper-rs, cached WhisperState (no Metal re-init) |
-| LLM client | `src/llm/client.rs` | Streaming SSE + one-shot completion for llama.cpp |
+| LLM client | `src/llm/client.rs` | Streaming SSE + one-shot completion (OpenAI-compatible; mlx-lm and oMLX) |
 | LLM session | `src/llm/session.rs` | Accumulated prompt, turn tracking, summarization |
 | TTS | `src/tts/say.rs`, `src/tts/kokoro.rs` | macOS `say` or Kokoro ONNX; unified `TtsEngine` enum |
 | Sentence splitter | `src/tts/sentence.rs` | Buffers tokens, emits complete sentences |
@@ -199,12 +199,9 @@ This is a fire-and-read pattern — no JSON protocol, no shared state, no persis
 | `VAD_SILENCE_MS` | `500` | Silence duration (ms) before SpeechEnd fires. Lower = faster response; higher = safer for mid-sentence pauses. Range: 400–1500. This is the largest single contributor to perceived latency after your last word. |
 | `WHISPER_MODEL` | — | Path to `.bin` Whisper model (and `.mlmodelc` for CoreML encoder) |
 | `WHISPER_COREML` | `0` | Set to `1` to use CoreML encoder (Neural Engine); requires `.mlmodelc` alongside the `.bin` |
-| `LLM_URL` | `http://localhost:8080` | LLM server base URL. Use `http://localhost:8080` for llama.cpp, `http://localhost:8000` for mlx-lm |
+| `LLM_URL` | `http://localhost:8000` | LLM server base URL. mlx-lm default: port 8000; oMLX default: port 8001 |
 | `LLM_API_KEY` | _(empty)_ | Bearer token sent as `Authorization: Bearer <key>` on all `/v1/chat/completions` calls. Leave unset for local servers that require no auth |
 | `LLM_MODEL` | `local-model` | Model name sent in API requests |
-| `LLM_PROVIDER` | `llama` | LLM backend: `llama` (llama.cpp, default) or `mlx` (mlx-lm). Controls whether llama.cpp-specific fields (`cache_prompt`, `slot_id`) are sent |
-| `LLM_SLOT_ID` | `0` | llama.cpp KV-cache slot for this session (single-user = 0; llama provider only) |
-| `LLM_BACKGROUND_SLOT_ID` | `-1` | Slot used for background calls (summarization, profile extraction). `-1` = let llama.cpp pick any free slot. Set to `1` when running `llama-server --parallel 2` to isolate background calls from the main conversation's KV-cache. |
 | `LLM_SYSTEM_PROMPT` | — | System prompt for the LLM |
 | `LLM_MAX_TOKENS` | `400` | Max generation tokens per response |
 | `LLM_TEMPERATURE` | `0.7` | LLM sampling temperature |
@@ -314,134 +311,92 @@ RUST_LOG=performance=info,performance=debug cargo run
 word before starting the pipeline.  Reduce to `400` for snappier feel; increase to
 `700–800` if the bot cuts you off during natural pauses.
 
-### Speculative KV-cache warm-up
+### LLM server (`scripts/start-llm.sh`)
 
-When the user stops speaking the pipeline launches two tasks in parallel:
+Jarvis uses Apple MLX-based servers for low-latency inference on Apple Silicon.
+Both are substantially faster than llama.cpp due to the MLX framework and Apple unified memory.
 
-1. **Whisper STT** — transcribes the utterance (`spawn_blocking`)
-2. **Speculative prefill** — fires a 1-token streaming request to llama.cpp with the
-   *current* session history (no new user turn yet), using `cache_prompt=true` and the
-   main `slot_id`
-
-llama.cpp starts computing KV vectors for the full conversation history immediately.
-When STT finishes, the pipeline waits up to 80 ms for the speculative request to
-finish cleanly (`max_tokens=1` so it usually completes in ~200 ms for typical histories).
-A clean finish means the slot is released without cleanup delay.  If still running after
-the 80 ms window it is aborted.  Either way, the real request (with the user turn
-appended) finds the KV cache pre-warmed for the full history and only prefills the new
-user turn (typically < 30 tokens) instead of the full context.
-
-If `INJECT_SYSTEM_DATA=true`, `system_state::build()` (active app, battery, time) also
-runs in parallel with STT so it adds zero sequential latency.
-
-### llama.cpp server flags (`scripts/start-llm.sh`)
-
-| Flag | Value | Effect |
-|------|-------|--------|
-| `--parallel 2` | 2 | Slot 0 = main conversation; Slot 1 = background calls (summarization, profile). Never evict each other's KV cache. |
-| `--cache-type-k/v` | `q4_0` | Halves KV cache VRAM vs `q8_0`, faster prefill; negligible quality impact for conversational use. |
-| `--flash-attn on` | — | Flash Attention — faster inference on Apple Silicon. |
-| `-ngl 99` | — | Offload all layers to Metal GPU. |
-| `--mlock` | — | Lock model weights in RAM, prevents swap latency. |
-| `--reasoning-budget 0` | 0 | Disables chain-of-thought for Qwen3 — avoids silent latency before the first spoken token. |
-
-Run the server:
-```sh
-./scripts/start-llm.sh
-# or
-LLM_MODEL=/path/to/model.gguf ./scripts/start-llm.sh
-```
-
-### mlx-lm server (`scripts/start-mlx-lm.sh`)
-
-Alternative to llama.cpp using Apple's MLX framework — native Metal GPU acceleration, no GGUF conversion needed. Uses port **8000** by default.
+**mlx-lm** (default, port 8000):
 
 ```sh
 # Install mlx-lm
 pip install mlx-lm
 
 # Launch (downloads model on first run)
-./scripts/start-mlx-lm.sh mlx-community/Qwen2.5-7B-Instruct-4bit
+./scripts/start-mlx-lm.sh mlx-community/Qwen3-8B-4bit
 
 # .env settings
-LLM_PROVIDER=mlx
 LLM_URL=http://127.0.0.1:8000
-LLM_MODEL=mlx-community/Qwen2.5-7B-Instruct-4bit
+LLM_MODEL=mlx-community/Qwen3-8B-4bit
 ```
 
-When `LLM_PROVIDER=mlx`, the voicebot omits llama.cpp-specific fields (`cache_prompt`, `slot_id`) from all requests. mlx-lm manages its own prompt cache server-side via `--prompt-cache-size 1`.
+**oMLX** (persistent tiered KV cache, port 8001):
+
+```sh
+./scripts/start-omlx.sh ~/models
+
+# .env settings
+LLM_URL=http://127.0.0.1:8001
+```
+
+Or use the unified launcher:
+```sh
+./scripts/start-llm.sh                        # mlx-lm (default)
+LLM_BACKEND=omlx ./scripts/start-llm.sh      # oMLX
+```
 
 Recommended models for voicebot (low latency + Spanish support):
 
 | Model | VRAM | Notes |
 |-------|------|-------|
-| `mlx-community/Qwen2.5-7B-Instruct-4bit` | ~4 GB | Best balance of speed and quality |
-| `mlx-community/Qwen2.5-14B-Instruct-4bit` | ~8 GB | Better quality, still fast on M4 Pro |
 | `mlx-community/Qwen3-8B-4bit` | ~5 GB | Latest architecture; `<think>` blocks auto-stripped |
+| `mlx-community/Qwen2.5-7B-Instruct-4bit` | ~4 GB | Fast, good Spanish support |
+| `mlx-community/Qwen2.5-14B-Instruct-4bit` | ~8 GB | Better quality, still fast on M4 Pro |
 
-### Real-server KV-cache benchmark (`scripts/bench-server.py`)
+### Real-server benchmark (`scripts/bench-server.py`)
 
 The most realistic benchmark: starts each server, warms its KV cache with a
 multi-turn conversation, then measures **only the final turn** — the hot-cache
 scenario that governs real voicebot latency.
 
 ```sh
-python3 scripts/bench-server.py <llama-model.gguf> <mlx-model-or-hf-repo>
+python3 scripts/bench-server.py <mlx-model-or-hf-repo> <omlx-model-dir>
 
 # Example
 python3 scripts/bench-server.py \
-  ./models/Qwen2.5-7B-Q4_K_M.gguf \
-  mlx-community/Qwen2.5-7B-Instruct-4bit
+  mlx-community/Qwen3-8B-4bit \
+  ~/models
 
 # Env overrides
 BENCH_TRIALS=5 BENCH_GEN=100 python3 scripts/bench-server.py ...
 ```
 
-The script: starts llama.cpp → warms cache with full prompt (history + question)
-→ measures N trials of pure generation from hot cache → stops llama.cpp →
-repeats with mlx-lm → prints comparison with verdict and KV-cache health warning.
-
 Metrics: **TTFT** (ms, time to first spoken word) and **TG** (t/s, sentence
 completion speed). Both servers are configured to match their production
 `start-*.sh` scripts.
 
-### Cold-inference benchmarks (`scripts/bench-llama.sh` / `scripts/bench-mlx.sh`)
+### Cold-inference benchmarks (`scripts/bench-mlx.sh`)
 
-Compare llama.cpp and mlx-lm under voicebot-realistic workloads:
+Benchmark mlx-lm under voicebot-realistic workloads:
 
 ```sh
-# llama.cpp — requires a GGUF model file
-./scripts/bench-llama.sh ./models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+./scripts/bench-mlx.sh mlx-community/Qwen3-8B-4bit
 
-# mlx-lm — accepts a local path or HuggingFace repo (downloads on first run)
-./scripts/bench-mlx.sh mlx-community/Qwen2.5-7B-Instruct-4bit
-
-# Override repetitions/trials
-BENCH_REPS=5   ./scripts/bench-llama.sh ./models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
-BENCH_TRIALS=5 ./scripts/bench-mlx.sh   mlx-community/Qwen2.5-7B-Instruct-4bit
+# Override trials
+BENCH_TRIALS=5 ./scripts/bench-mlx.sh mlx-community/Qwen3-8B-4bit
 ```
 
-Both scripts test three scenarios that reflect actual voicebot usage:
+Scenarios:
 
 | Scenario | Prompt | Gen | What it measures |
 |----------|--------|-----|-----------------|
 | **cold** | 300 pp | 100 tg | First turn — full system prompt + history needs prefill |
-| **warm** | 40 pp | 100 tg | Subsequent turns — only the new user utterance needs prefill (KV cache hot) |
+| **warm** | 40 pp | 100 tg | Subsequent turns — only the new user utterance needs prefill |
 | **long** | 800 pp | 120 tg | Long conversation — how throughput degrades at large context |
 
 Key thresholds for real-time feel:
 - **warm pp > 500 t/s** → TTFT < 80ms for a typical user turn
 - **tg > 60 t/s** → 100-token response synthesized in < 1.7s (TTS keeps up)
-
-llama.cpp flags used: `-ngl 99 -ctk q4_0 -ctv q4_0 -fa 1` (matching `start-llm.sh`).
-mlx-lm flags used: `--prefill-step-size 512` (matching `start-mlx-lm.sh`).
-
-### Background calls
-
-Background LLM calls (conversation summarization, profile fact extraction) use
-`LLM_BACKGROUND_SLOT_ID` (default `-1` = any free slot).  With `--parallel 2`, set
-`LLM_BACKGROUND_SLOT_ID=1` to guarantee they always land on Slot 1 and never touch
-the main conversation's KV cache in Slot 0.
 
 ### Whisper model size tradeoff
 
@@ -557,7 +512,7 @@ ToolRouter
 1. Restore `src/tools/` and `src/mcp/` modules (currently gutted from the codebase)
 2. `McpClient`: spawns/connects to MCP servers, implements `initialize` + `tools/list` + `tools/call` JSON-RPC methods
 3. `ToolRouter`: on each tool call from the LLM, tries built-ins first, then queries registered MCP servers
-4. Tool schemas from MCP (`tools/list`) are translated to llama.cpp-compatible JSON Schema and injected into the LLM payload
+4. Tool schemas from MCP (`tools/list`) are translated to OpenAI-compatible JSON Schema and injected into the LLM payload
 
 **Config:** MCP servers configured via a JSON/TOML file, e.g.:
 ```toml
@@ -972,7 +927,7 @@ At the start of each pipeline turn:
   inject as [RELEVANT MEMORIES] block in context
 ```
 
-**Embedding model:** `nomic-embed-text` or any GGUF embedding model via llama.cpp. Runs locally, no internet, low latency (~50ms for a 512-token passage).
+**Embedding model:** `nomic-embed-text` or any embedding model via an OpenAI-compatible server. Runs locally, no internet, low latency (~50ms for a 512-token passage).
 
 **DB schema addition:**
 ```sql
@@ -1349,7 +1304,7 @@ WAKE_WORD                 keyword to respond in ambient mode (default: "jarvis")
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| STT → LLM → TTS streaming pipeline | ✅ Done | Whisper + llama.cpp + macOS say |
+| STT → LLM → TTS streaming pipeline | ✅ Done | Whisper + mlx-lm/oMLX + macOS say |
 | Barge-in interruption | ✅ Done | `Arc<AtomicBool>` cancel, CPAL callback |
 | Persistent conversation history | ✅ Done | SQLite, restored on startup |
 | Tool use (native function calling) | ✅ Done | OpenAI `tools:[]` format; multi-tool loop; voice-layer tools only |
@@ -1406,12 +1361,12 @@ Available open-source Speech-to-Speech models (alternative to the current STT+LL
 
 | Model | Params | Notes |
 |-------|--------|-------|
-| [LFM2.5-Audio](https://huggingface.co/LiquidAI/LFM2.5-Audio-1.5B) | 1.5B | llama.cpp GGUF compatible, best option for local S2S |
+| [LFM2.5-Audio](https://huggingface.co/LiquidAI/LFM2.5-Audio-1.5B) | 1.5B | Best option for local S2S (non-streaming) |
 | [LLaMA-Omni 2](https://arxiv.org/abs/2505.02625) | 0.5B–14B | Qwen2.5 base, streaming synthesis, sub-second latency |
 | [Moshi](https://github.com/kyutai-labs/moshi) | — | Full-duplex (listen + respond simultaneously) |
 | [Ultravox](https://github.com/fixie-ai/ultravox) | — | Whisper + LLaMA hybrid |
 
-The current cascade (Whisper + llama.cpp + say) is preferred for now because it supports streaming sentence-by-sentence TTS while the LLM is still generating — true S2S models don't stream output token-by-token in a way that maps to sentence-level TTS.
+The current cascade (Whisper + mlx-lm/oMLX + say) is preferred because it supports streaming sentence-by-sentence TTS while the LLM is still generating — true S2S models don't stream output token-by-token in a way that maps to sentence-level TTS.
 
 ## Kokoro TTS Setup
 

@@ -50,7 +50,7 @@ Microphone
   → VAD (Silero, voice_activity_detector crate)
   → STT (whisper-rs, embedded whisper.cpp)
       partial transcripts accumulated in-memory
-  → LLM client (llama.cpp HTTP, streaming SSE, cache_prompt=true)
+  → LLM client (mlx-lm / oMLX HTTP, streaming SSE)
       tokens streamed as they arrive
   → SentenceSplitter (buffer until punctuation boundary)
   → TTS (macOS sfspeech or `say`, subprocess, or kokoro)
@@ -61,10 +61,10 @@ Microphone
 ### Key design decisions
 
 - **Single binary**: no inter-service communication; all stages connected by `tokio::sync` channels
-- **STT→LLM latency trick**: partial Whisper transcripts are accumulated in a `String`; when VAD signals end-of-speech the full transcript is sent to llama.cpp with `cache_prompt=true`. The KV-cache already holds previous turns, so only the new user turn needs prefill.
+- **STT→LLM latency trick**: partial Whisper transcripts are accumulated in a `String`; when VAD signals end-of-speech the full transcript is sent to the LLM server. The server (mlx-lm or oMLX) maintains its own KV-cache implicitly across requests within a session.
 - **LLM→TTS streaming**: LLM tokens arrive via SSE and are buffered until a sentence boundary (`.`, `!`, `?`, `;`, `:`) — then that sentence is synthesized immediately. While sentence N plays, sentence N+1 is being generated and synthesized.
 - **Language**: Spanish by default, English supported. Configurable via `VOICEBOT_LANGUAGE` env var (`es` or `en`). Affects the Whisper transcription hint and the `SAY_VOICE` selected.
-- **LLM backend**: external llama.cpp server (`llama-server`). The voicebot maintains the accumulated prompt string in-memory and passes `slot_id` + `cache_prompt=true` for KV reuse across turns (mirrors `stateful-llm-server.py` from the butler project but in-process).
+- **LLM backend**: external mlx-lm or oMLX server (OpenAI-compatible `/v1/chat/completions`). Both are substantially faster than llama.cpp on Apple Silicon due to the MLX framework and Apple unified memory.
 
 ### Key Modules
 
@@ -80,8 +80,8 @@ Microphone
 - Language hint passed to whisper for faster decoding when language is known
 
 **`src/llm/`** — LLM client
-- `client.rs`: async HTTP client to llama.cpp `/v1/chat/completions` endpoint; `stream()` for conversation, `complete()` / `complete_short()` for background tasks (summarization, profile/memory extraction)
-- `session.rs`: `LlmSession` holding `messages: Vec<Value>` + `original_system_prompt` + `summary`; `set_system_prompt()` for runtime prompt rebuild; `invalidate_cache()` / `consume_cache_stale()` for KV-cache control after consolidation; `needs_consolidation(tokens, pct)` for threshold check
+- `client.rs`: async HTTP client to `/v1/chat/completions` (OpenAI-compatible; works with mlx-lm and oMLX); `stream()` for conversation, `complete()` / `complete_short()` for background tasks (summarization, profile/memory extraction)
+- `session.rs`: `LlmSession` holding `messages: Vec<Value>` + `original_system_prompt` + `summary`; `set_system_prompt()` for runtime prompt rebuild; `needs_consolidation(tokens, pct)` for threshold check
 
 **`src/tts/`** — Text-to-Speech
 - `say.rs`: macOS `say` subprocess wrapper; outputs raw i16 PCM at 22050 Hz via `--data-format=LEI16@22050 -o /dev/stdout`; voice configured via `SAY_VOICE` env var (default `"Marisol (Enhanced)"`)
@@ -95,8 +95,7 @@ Microphone
 **`src/config.rs`** — Environment-based config
 - `AUDIO_SAMPLE_RATE` (default 16000), `AUDIO_CHANNELS` (default 1), `AUDIO_DEVICE`, `LIST_AUDIO_DEVICES`
 - `VOICEBOT_LANGUAGE` — `es` (default) or `en`
-- `LLM_URL` — llama.cpp server URL (default `http://127.0.0.1:8080`)
-- `LLM_SLOT_ID` — llama.cpp KV-cache slot (default 0)
+- `LLM_URL` — LLM server URL (default `http://127.0.0.1:8000` for mlx-lm; oMLX default is `8001`)
 - `LLM_MAX_TOKENS` — max tokens per response (default 200)
 - `LLM_CONTEXT_TOKENS` — context window size in tokens (default 8192)
 - `LLM_CONSOLIDATION_THRESHOLD_PCT` — % of context window that triggers consolidation (default 80)

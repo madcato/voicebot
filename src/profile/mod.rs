@@ -205,7 +205,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1);
         let facts = extract_facts(&client, "Me llamo Daniel.", "Encantado, Daniel.").await;
 
         assert_eq!(facts.len(), 1);
@@ -231,7 +231,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1);
         let facts = extract_facts(
             &client,
             "Me llamo Daniel, vivo en Madrid y soy ingeniero de software.",
@@ -256,7 +256,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1);
         let facts = extract_facts(&client, "¿Qué hora es?", "Son las 14:00.").await;
         assert!(facts.is_empty());
     }
@@ -274,7 +274,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1);
         let facts = extract_facts(&client, "Vivo en Madrid.", "Entendido.").await;
 
         assert_eq!(facts.len(), 1);
@@ -295,7 +295,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1);
         let facts = extract_facts(&client, "Me encanta programar en Rust.", "Es un lenguaje excelente.").await;
 
         assert_eq!(facts.len(), 1);
@@ -315,7 +315,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1);
         let facts = extract_facts(&client, "Me encanta Rust.", "Es genial.").await;
 
         assert_eq!(facts.len(), 1);
@@ -336,7 +336,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1);
         let facts = extract_facts(&client, "Soy Daniel.", "Hola.").await;
 
         assert_eq!(facts.len(), 1);
@@ -357,7 +357,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1);
         let facts = extract_facts(&client, "Me llamo Daniel.", "Hola.").await;
 
         assert_eq!(facts.len(), 1);
@@ -373,7 +373,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1);
         // Must not panic — errors are swallowed and an empty vec is returned.
         let facts = extract_facts(&client, "Hola.", "Hola.").await;
         assert!(facts.is_empty());
@@ -390,7 +390,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1);
         let facts = extract_facts(&client, "Hola.", "Hola.").await;
         assert!(facts.is_empty(), "non-JSON LLM output must yield empty facts without panic");
     }
@@ -411,7 +411,7 @@ mod tests {
 
         let profile_ctx = build_profile_context(&facts);
         let system_prompt = format!("{base_prompt}{profile_ctx}");
-        let session = LlmSession::new(&system_prompt, 0);
+        let session = LlmSession::new(&system_prompt);
 
         let msgs = session.all_messages();
         assert_eq!(msgs[0].role, "system");
@@ -431,7 +431,7 @@ mod tests {
         ];
 
         let system_prompt = format!("{base_prompt}{}", build_profile_context(&facts));
-        let session = LlmSession::new(&system_prompt, 0);
+        let session = LlmSession::new(&system_prompt);
 
         let msgs = session.all_messages();
         assert!(msgs[0].content.contains("name: Daniel"));
@@ -443,7 +443,7 @@ mod tests {
         let base_prompt = "Eres Jarvis.";
         let profile_ctx = build_profile_context(&[]);
         let system_prompt = format!("{base_prompt}{profile_ctx}");
-        let session = LlmSession::new(&system_prompt, 0);
+        let session = LlmSession::new(&system_prompt);
 
         let msgs = session.all_messages();
         assert_eq!(msgs[0].content, base_prompt);
@@ -483,7 +483,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1, 0, -1);
+        let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1);
 
         // Step 1: extract facts from the last turn
         let facts = extract_facts(
@@ -503,7 +503,7 @@ mod tests {
 
         // Step 3: inject into the next session's system prompt
         let base = "Eres Jarvis, el asistente de Daniel.";
-        let session = LlmSession::new(&format!("{base}{profile_ctx}"), 0);
+        let session = LlmSession::new(&format!("{base}{profile_ctx}"));
         let msgs = session.all_messages();
 
         assert_eq!(msgs[0].role, "system");
@@ -516,7 +516,7 @@ mod tests {
 
     /// Integration test for `extract_facts` using a real LLM server.
     ///
-    /// Reads LLM config from `.env` (LLM_URL, LLM_MODEL, LLM_PROVIDER, LLM_API_KEY).
+    /// Reads LLM config from `.env` (LLM_URL, LLM_MODEL, LLM_API_KEY).
     ///
     /// Run manually:
     /// ```sh
@@ -534,18 +534,13 @@ mod tests {
             .unwrap_or_else(|_| "http://localhost:8080".to_string());
         let llm_model = std::env::var("LLM_MODEL")
             .unwrap_or_else(|_| "local-model".to_string());
-        let llm_provider = std::env::var("LLM_PROVIDER")
-            .unwrap_or_else(|_| "llama".to_string());
         let llm_api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
         let client = OpenAIClient::new(
             &llm_url,
             &llm_model,
             400,
             0.3,
-            0,
-            -1,
         )
-        .with_provider(&llm_provider)
         .with_api_key(&llm_api_key);
 
         // ── Case 1: User reveals personal facts ─────────────────────────────

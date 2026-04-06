@@ -234,9 +234,9 @@ create_default_env() {
 VOICEBOT_LANGUAGE=es
 
 # ── LLM server ────────────────────────────────────────────────────────────────
-# Start with: llama-server -m /path/to/model.gguf --port 8080
-#         or: mlx_lm.server --model /path/to/model --port 8080
-LLM_URL=http://localhost:8080
+# Start with: mlx_lm.server --model mlx-community/Qwen3-8B-4bit --port 8000
+#         or: omlx serve --model-dir ~/models --port 8001
+LLM_URL=http://localhost:8000
 LLM_MAX_TOKENS=400
 LLM_TEMPERATURE=0.3
 # LLM_SYSTEM_PROMPT=You are a helpful voice assistant.
@@ -345,8 +345,8 @@ info "════════════════════════�
 printf "\n"
 info "Before starting voicebot, make sure your LLM server is running."
 info ""
-info "  llama.cpp:  llama-server -m /path/to/model.gguf --port 8080"
-info "  mlx-lm:     mlx_lm.server --model /path/to/model --port 8080"
+info "  mlx-lm:  mlx_lm.server --model mlx-community/Qwen3-8B-4bit --port 8000"
+info "  omlx:    omlx serve --model-dir ~/models --port 8001"
 printf "\n"
 info "Configure voicebot:"
 info "  \$EDITOR $VOICEBOT_ENV"

@@ -38,11 +38,6 @@ pub struct LlmSession {
     summary: Option<String>,
     /// Conversation turns in OpenAI JSON format (user, assistant, tool messages).
     pub messages: Vec<serde_json::Value>,
-    #[allow(dead_code)]
-    pub slot_id: u8,
-    /// When true, the KV-cache is stale (e.g. system prompt changed) and the next
-    /// streaming call must use `cache_prompt=false` to force a full rebuild.
-    cache_stale: bool,
 }
 
 impl LlmSession {
@@ -64,13 +59,11 @@ impl LlmSession {
 
     /// Create a fresh session.
     #[allow(dead_code)]
-    pub fn new(system_prompt: &str, slot_id: u8) -> Self {
+    pub fn new(system_prompt: &str) -> Self {
         Self {
             original_system_prompt: system_prompt.to_string(),
             summary: None,
             messages: Vec::new(),
-            slot_id,
-            cache_stale: false,
         }
     }
 
@@ -80,7 +73,6 @@ impl LlmSession {
     /// `history` should already be only the turns after the summary's cutoff.
     pub fn from_history(
         system_prompt: &str,
-        slot_id: u8,
         summary: Option<&str>,
         history: &[(String, String)],
     ) -> Self {
@@ -88,8 +80,6 @@ impl LlmSession {
             original_system_prompt: system_prompt.to_string(),
             summary: summary.map(String::from),
             messages: Vec::new(),
-            slot_id,
-            cache_stale: false,
         };
         for (role, content) in history {
             match role.as_str() {
@@ -252,20 +242,6 @@ impl LlmSession {
         self.original_system_prompt = new_prompt;
     }
 
-    /// Mark the KV-cache as stale. The next streaming call should use
-    /// `cache_prompt=false` to force a full rebuild.
-    pub fn invalidate_cache(&mut self) {
-        self.cache_stale = true;
-    }
-
-    /// Return (and clear) the cache-stale flag.
-    ///
-    /// Called by `llm_task` before streaming to decide whether to send
-    /// `cache_prompt=false` for one turn.
-    pub fn consume_cache_stale(&mut self) -> bool {
-        std::mem::replace(&mut self.cache_stale, false)
-    }
-
     // ── Private helpers ────────────────────────────────────────────────────────
 
     fn system_content(&self) -> String {
@@ -285,7 +261,7 @@ mod tests {
 
     /// Build a session with `n` user+assistant turn pairs.
     fn session_with_turns(n: usize) -> LlmSession {
-        let mut s = LlmSession::new("System prompt.", 0);
+        let mut s = LlmSession::new("System prompt.");
         for i in 0..n {
             s.add_user_turn(&format!("User message {i}"));
             s.add_assistant_turn(&format!("Assistant response {i}"));
@@ -298,7 +274,7 @@ mod tests {
     #[test]
     fn needs_summarization_false_when_too_few_messages() {
         // Fewer than 4 messages always returns false regardless of size.
-        let mut s = LlmSession::new("System.", 0);
+        let mut s = LlmSession::new("System.");
         s.add_user_turn("Hello");
         s.add_assistant_turn("Hi");
         assert!(!s.needs_summarization(1)); // tiny limit, still false
@@ -316,7 +292,7 @@ mod tests {
         // → total_chars > context_tokens * 2.625
         // With context=100: need > 262 chars. Each turn pair ≈ 40 chars × 6 pairs = 240+.
         let long = "x".repeat(50);
-        let mut s = LlmSession::new("sys", 0);
+        let mut s = LlmSession::new("sys");
         for _ in 0..6 {
             s.add_user_turn(&long);
             s.add_assistant_turn(&long);
@@ -389,7 +365,7 @@ mod tests {
 
     #[test]
     fn all_messages_no_summary_returns_plain_system() {
-        let mut s = LlmSession::new("Base prompt.", 0);
+        let mut s = LlmSession::new("Base prompt.");
         s.add_user_turn("Hello");
         let msgs = s.all_messages();
         assert_eq!(msgs[0].role, "system");
@@ -399,7 +375,7 @@ mod tests {
 
     #[test]
     fn all_messages_injects_summary_into_system_message() {
-        let mut s = LlmSession::new("Base prompt.", 0);
+        let mut s = LlmSession::new("Base prompt.");
         s.add_user_turn("Hello");
         s.add_assistant_turn("Hi");
         s.apply_summary("User greeted the assistant.", 2);
@@ -426,7 +402,7 @@ mod tests {
 
     #[test]
     fn all_messages_api_includes_tool_exchanges() {
-        let mut s = LlmSession::new("System.", 0);
+        let mut s = LlmSession::new("System.");
         s.add_user_turn("Activa el modo ambiente");
         s.add_tool_exchange(vec![
             serde_json::json!({
@@ -459,7 +435,7 @@ mod tests {
             ("User".to_string(), "Hello".to_string()),
             ("Assistant".to_string(), "Hi".to_string()),
         ];
-        let s = LlmSession::from_history("System.", 0, None, &history);
+        let s = LlmSession::from_history("System.", None, &history);
         assert_eq!(s.messages.len(), 2);
         let msgs = s.all_messages();
         assert_eq!(msgs[0].content, "System.");
@@ -471,7 +447,7 @@ mod tests {
             ("User".to_string(), "Latest question".to_string()),
             ("Assistant".to_string(), "Latest answer".to_string()),
         ];
-        let s = LlmSession::from_history("System.", 0, Some("Old conversation summary."), &history);
+        let s = LlmSession::from_history("System.", Some("Old conversation summary."), &history);
         assert_eq!(s.messages.len(), 2);
         let msgs = s.all_messages();
         assert!(msgs[0].content.contains("[CONVERSATION SUMMARY]"));
@@ -486,7 +462,7 @@ mod tests {
             ("Unknown".to_string(), "Ignored".to_string()),
             ("Assistant".to_string(), "Hi".to_string()),
         ];
-        let s = LlmSession::from_history("System.", 0, None, &history);
+        let s = LlmSession::from_history("System.", None, &history);
         assert_eq!(s.messages.len(), 2); // Unknown role skipped
     }
 
@@ -529,7 +505,7 @@ mod tests {
     #[test]
     fn needs_consolidation_respects_threshold_percentage() {
         let long = "x".repeat(50);
-        let mut s = LlmSession::new("sys", 0);
+        let mut s = LlmSession::new("sys");
         for _ in 0..6 {
             s.add_user_turn(&long);
             s.add_assistant_turn(&long);
@@ -542,7 +518,7 @@ mod tests {
 
     #[test]
     fn needs_consolidation_false_when_few_messages() {
-        let mut s = LlmSession::new("System.", 0);
+        let mut s = LlmSession::new("System.");
         s.add_user_turn("Hello");
         s.add_assistant_turn("Hi");
         assert!(!s.needs_consolidation(1, 50));
@@ -552,7 +528,7 @@ mod tests {
 
     #[test]
     fn set_system_prompt_replaces_original() {
-        let mut s = LlmSession::new("Old prompt.", 0);
+        let mut s = LlmSession::new("Old prompt.");
         s.add_user_turn("Hello");
         s.set_system_prompt("New prompt with [MEMORIES].".to_string());
 
@@ -563,7 +539,7 @@ mod tests {
 
     #[test]
     fn set_system_prompt_preserves_summary() {
-        let mut s = LlmSession::new("Base.", 0);
+        let mut s = LlmSession::new("Base.");
         s.add_user_turn("Hello");
         s.add_assistant_turn("Hi");
         s.apply_summary("Summary text.", 2);
@@ -575,27 +551,4 @@ mod tests {
         assert!(msgs[0].content.contains("Summary text."));
     }
 
-    // ── cache_stale lifecycle ────────────────────────────────────────────────
-
-    #[test]
-    fn cache_stale_default_false() {
-        let mut s = LlmSession::new("System.", 0);
-        assert!(!s.consume_cache_stale());
-    }
-
-    #[test]
-    fn invalidate_then_consume_cache() {
-        let mut s = LlmSession::new("System.", 0);
-        s.invalidate_cache();
-        assert!(s.consume_cache_stale(), "first consume should return true");
-        assert!(!s.consume_cache_stale(), "second consume should return false");
-    }
-
-    #[test]
-    fn set_system_prompt_does_not_auto_invalidate() {
-        let mut s = LlmSession::new("Old.", 0);
-        s.set_system_prompt("New.".to_string());
-        // Caller must explicitly invalidate — set_system_prompt does not auto-set
-        assert!(!s.consume_cache_stale());
-    }
 }

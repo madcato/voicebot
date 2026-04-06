@@ -31,21 +31,12 @@ pub struct Config {
     pub whisper_threads: u32,
 
     // ── LLM ──────────────────────────────────────────────────────────────────
-    /// LLM server base URL (OpenAI-compatible)
+    /// LLM server base URL (OpenAI-compatible, default http://127.0.0.1:8000 for mlx-lm)
     pub llm_url: String,
     /// API key sent as `Authorization: Bearer <key>`. Empty = no auth header.
     pub llm_api_key: String,
     /// Model name sent in the `model` field of API requests
     pub llm_model: String,
-    /// LLM backend: "llama" (default, llama.cpp) or "mlx" (mlx-lm).
-    /// Controls whether llama.cpp-specific fields (cache_prompt, slot_id) are sent.
-    pub llm_provider: String,
-    /// KV-cache slot ID (0 for single-user, llama.cpp only)
-    pub llm_slot_id: u8,
-    /// Slot used for background calls (summarization, profile extraction).
-    /// -1 = let llama.cpp pick any free slot (default).
-    /// Set to 1 when running llama-server with --parallel 2.
-    pub llm_background_slot_id: i32,
     /// Max tokens per response
     pub llm_max_tokens: u32,
     pub llm_system_prompt: String,
@@ -132,8 +123,6 @@ pub struct Config {
     pub secondary_llm_max_tokens: u32,
     /// Bearer token for secondary LLM API (SECONDARY_LLM_API_KEY, default empty).
     pub secondary_llm_api_key: String,
-    /// Backend for secondary LLM: "llama" or "mlx" (SECONDARY_LLM_PROVIDER, default "llama").
-    pub secondary_llm_provider: String,
     /// Enable Qwen3 thinking mode on the secondary LLM (SECONDARY_LLM_THINKING, default false).
     /// When true, `chat_template_kwargs: {"enable_thinking": true}` is sent in requests and
     /// `<think>…</think>` blocks are stripped from the returned text.
@@ -238,20 +227,10 @@ impl Config {
 
             // LLM
             llm_url: env::var("LLM_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string()),
+                .unwrap_or_else(|_| "http://127.0.0.1:8000".to_string()),
             llm_api_key: env::var("LLM_API_KEY").unwrap_or_default(),
             llm_model: env::var("LLM_MODEL")
                 .unwrap_or_else(|_| "local-model".to_string()),
-            llm_provider: env::var("LLM_PROVIDER")
-                .unwrap_or_else(|_| "llama".to_string()),
-            llm_slot_id: env::var("LLM_SLOT_ID")
-                .unwrap_or_else(|_| "0".to_string())
-                .parse()
-                .context("Invalid LLM_SLOT_ID")?,
-            llm_background_slot_id: env::var("LLM_BACKGROUND_SLOT_ID")
-                .unwrap_or_else(|_| "-1".to_string())
-                .parse()
-                .context("Invalid LLM_BACKGROUND_SLOT_ID")?,
             llm_max_tokens: env::var("LLM_MAX_TOKENS")
                 .unwrap_or_else(|_| "200".to_string())
                 .parse()
@@ -356,8 +335,6 @@ impl Config {
                 .parse()
                 .context("Invalid SECONDARY_LLM_MAX_TOKENS")?,
             secondary_llm_api_key: env::var("SECONDARY_LLM_API_KEY").unwrap_or_default(),
-            secondary_llm_provider: env::var("SECONDARY_LLM_PROVIDER")
-                .unwrap_or_else(|_| "llama".to_string()),
             secondary_llm_thinking: env::var("SECONDARY_LLM_THINKING")
                 .map(|v| v == "1" || v.to_lowercase() == "true")
                 .unwrap_or(false),
@@ -490,7 +467,7 @@ mod tests {
         let prompt = "Eres Jarvis, el asistente personal.";
         temp_env::with_var("LLM_SYSTEM_PROMPT", Some(prompt), || {
             let config = Config::from_env().unwrap();
-            let session = LlmSession::new(&config.llm_system_prompt, config.llm_slot_id);
+            let session = LlmSession::new(&config.llm_system_prompt);
             let msgs = session.all_messages();
 
             assert_eq!(msgs[0].role, "system");
@@ -503,7 +480,7 @@ mod tests {
         let prompt = "Eres Jarvis.";
         temp_env::with_var("LLM_SYSTEM_PROMPT", Some(prompt), || {
             let config = Config::from_env().unwrap();
-            let mut session = LlmSession::new(&config.llm_system_prompt, config.llm_slot_id);
+            let mut session = LlmSession::new(&config.llm_system_prompt);
             session.add_user_turn("Hola");
             session.add_assistant_turn("Hola, señor.");
             session.add_user_turn("¿Qué hora es?");
@@ -533,7 +510,7 @@ mod tests {
 
             // Step 3: create session (mirrors main.rs line 95-100)
             let mut session =
-                LlmSession::new(&system_prompt, config.llm_slot_id);
+                LlmSession::new(&system_prompt);
             session.add_user_turn("¿Qué hora es?");
 
             // Step 4: verify the payload that would be sent to the LLM
@@ -553,7 +530,7 @@ mod tests {
         let prompt = "Eres Jarvis.";
         temp_env::with_var("LLM_SYSTEM_PROMPT", Some(prompt), || {
             let config = Config::from_env().unwrap();
-            let mut session = LlmSession::new(&config.llm_system_prompt, config.llm_slot_id);
+            let mut session = LlmSession::new(&config.llm_system_prompt);
 
             for i in 0..5 {
                 session.add_user_turn(&format!("Mensaje {i}"));
@@ -573,7 +550,7 @@ mod tests {
         let prompt = "Eres Jarvis, el asistente.";
         temp_env::with_var("LLM_SYSTEM_PROMPT", Some(prompt), || {
             let config = Config::from_env().unwrap();
-            let mut session = LlmSession::new(&config.llm_system_prompt, config.llm_slot_id);
+            let mut session = LlmSession::new(&config.llm_system_prompt);
 
             for i in 0..5 {
                 session.add_user_turn(&format!("Pregunta {i}"));

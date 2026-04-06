@@ -31,7 +31,7 @@ Each tarball contains a single stripped executable named `voicebot`.
 | macOS | `--features avspeech` | AVSpeechSynthesizer (system, no models needed) |
 | Linux | `--features kokoro` | Kokoro via ONNX (models downloaded by installer) |
 
-LLM models and the LLM server (`llama-server` or `mlx_lm.server`) are **never
+LLM models and the LLM server (`mlx_lm.server` or `omlx`) are **never
 bundled**. Users are expected to have them installed separately.
 
 ---

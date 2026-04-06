@@ -101,12 +101,12 @@ tests/fixtures/           ← pre-recorded WAV files (gitkeep, record manually)
 
 ### What the harness does
 
-1. Starts a wiremock HTTP server to stand in for llama-server.
+1. Starts a wiremock HTTP server to stand in for the LLM server (mlx-lm / oMLX).
 2. Creates a `TtsEngine::Mock` that captures synthesized sentence text instead of playing audio.
 3. Opens a real SQLite database in a `tempfile::TempDir`.
 4. Calls `run_pipeline()` with `SttStream::mock(transcript)` (bypasses Whisper).
 5. After the pipeline returns, asserts on captured TTS sentences and DB rows.
 
-### Why not temperature=0 against a live llama-server?
+### Why not temperature=0 against a live LLM server?
 
 wiremock is more reliable: it defines exactly what the LLM says, requires no external process, and never varies across model versions. Temperature=0 is useful for manual smoke-testing but not for automated assertions.

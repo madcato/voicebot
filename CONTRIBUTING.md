@@ -499,7 +499,7 @@ If you have questions that aren't covered here:
 
 ## Acknowledgments
 
-- Inspired by [llama.cpp](https://github.com/ggerganov/llama.cpp), [whisper-rs](https://github.com/robertodober/whisper-rs), and the Rust community
+- Inspired by [mlx-lm](https://github.com/ml-explore/mlx-lm), [whisper-rs](https://github.com/robertodober/whisper-rs), and the Rust community
 - Built with ❤️ by Daniel and the Hive Team
 
 Happy coding! 🚀

@@ -275,18 +275,16 @@ async fn async_main() -> Result<()> {
     // Built early so TakeScreenshotTool can be registered in the tool registry.
     let secondary_llm_client: Option<OpenAIClient> =
         config.secondary_llm_url.as_ref().map(|url| {
-            OpenAIClient::new(url, &config.secondary_llm_model, config.secondary_llm_max_tokens, 0.3, 0, -1)
-                .with_provider(&config.secondary_llm_provider)
+            OpenAIClient::new(url, &config.secondary_llm_model, config.secondary_llm_max_tokens, 0.3)
                 .with_api_key(&config.secondary_llm_api_key)
                 .with_thinking(config.secondary_llm_thinking)
         });
     if secondary_llm_client.is_some() {
         info!(
             target: "llm",
-            "Secondary LLM endpoint: {} (model={}, provider={})",
+            "Secondary LLM endpoint: {} (model={})",
             config.secondary_llm_url.as_deref().unwrap_or(""),
             config.secondary_llm_model,
-            config.secondary_llm_provider,
         );
     }
 
@@ -489,7 +487,6 @@ async fn async_main() -> Result<()> {
     );
     let llm_session = Arc::new(Mutex::new(LlmSession::from_history(
         &system_prompt,
-        config.llm_slot_id,
         summary.as_deref(),
         &history,
     )));
@@ -500,12 +497,9 @@ async fn async_main() -> Result<()> {
         &config.llm_model,
         config.llm_max_tokens,
         config.llm_temperature,
-        config.llm_slot_id,
-        config.llm_background_slot_id,
     )
-    .with_provider(&config.llm_provider)
     .with_api_key(&config.llm_api_key);
-    info!(target: "llm", "LLM endpoint: {} (provider: {})", config.llm_url, config.llm_provider);
+    info!(target: "llm", "LLM endpoint: {}", config.llm_url);
 
     // Background tasks use the secondary client when available, otherwise
     // fall back to the primary (preserves behavior when SECONDARY_LLM_URL is unset).
@@ -1361,12 +1355,7 @@ async fn llm_task(
         'pipeline: {
             'tool_loop: for iter in 0..MAX_TOOL_ITERATIONS {
                 info!(target: "performance", "LLM request [pipe={}]", pipeline_id);
-                let force_no_cache = if iter == 0 {
-                    llm_session.lock().unwrap().consume_cache_stale()
-                } else {
-                    false
-                };
-                let (token_rx, stream_handle) = match llm_client.stream(&messages, &tool_defs, force_no_cache).await {
+                let (token_rx, stream_handle) = match llm_client.stream(&messages, &tool_defs).await {
                     Ok(r)  => r,
                     Err(e) => {
                         error!(target: "llm", "LLM error: {}", e);
@@ -1836,7 +1825,6 @@ async fn run_consolidation_cycle(
             s.apply_summary(summary_text, keep_turns);
         }
         s.set_system_prompt(new_system_prompt);
-        s.invalidate_cache();
     }
 
     info!(
@@ -2146,7 +2134,7 @@ mod tests {
 
     /// Integration test for summarization using a real LLM server.
     ///
-    /// Requires a running llama.cpp server (default http://localhost:8080).
+    /// Requires a running LLM server (default http://localhost:8000, e.g. mlx-lm or oMLX).
     /// Override with `LLM_URL` env var.
     ///
     /// Run manually:
@@ -2174,23 +2162,18 @@ mod tests {
             .unwrap_or_else(|_| "http://localhost:8080".to_string());
         let llm_model = std::env::var("LLM_MODEL")
             .unwrap_or_else(|_| "local-model".to_string());
-        let llm_provider = std::env::var("LLM_PROVIDER")
-            .unwrap_or_else(|_| "llama".to_string());
         let llm_api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
         let llm_client = crate::llm::OpenAIClient::new(
             &llm_url,
             &llm_model,
             400,       // max_tokens
             0.3,       // temperature
-            0,         // slot_id
-            -1,        // background_slot_id
         )
-        .with_provider(&llm_provider)
         .with_api_key(&llm_api_key);
 
         // ── Populate session with enough turns to trigger summarization ──────
         let system_prompt = "You are a helpful assistant.";
-        let mut session = crate::llm::LlmSession::new(system_prompt, 0);
+        let mut session = crate::llm::LlmSession::new(system_prompt);
 
         let turns = vec![
             ("What is the capital of France?", "The capital of France is Paris, a city known for the Eiffel Tower and its rich cultural heritage."),
@@ -2275,13 +2258,10 @@ mod tests {
             .unwrap_or_else(|_| "http://localhost:8080".to_string());
         let llm_model = std::env::var("LLM_MODEL")
             .unwrap_or_else(|_| "local-model".to_string());
-        let llm_provider = std::env::var("LLM_PROVIDER")
-            .unwrap_or_else(|_| "llama".to_string());
         let llm_api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
         let llm_client = crate::llm::OpenAIClient::new(
-            &llm_url, &llm_model, 400, 0.3, 0, -1,
+            &llm_url, &llm_model, 400, 0.3,
         )
-        .with_provider(&llm_provider)
         .with_api_key(&llm_api_key);
 
         let db_dir = tempfile::TempDir::new().unwrap();
@@ -2293,7 +2273,7 @@ mod tests {
 
         // ── Populate session with conversation turns ─────────────────────────
         let system_prompt = "You are a helpful assistant. Answer briefly.";
-        let mut session = crate::llm::LlmSession::new(system_prompt, 0);
+        let mut session = crate::llm::LlmSession::new(system_prompt);
 
         let turns = vec![
             ("What is the capital of France?", "The capital of France is Paris."),
@@ -2324,7 +2304,7 @@ mod tests {
             let messages = session_clone.all_messages_api();
 
             let t = Instant::now();
-            let (mut rx, _stream_handle) = client.stream(&messages, &[], false).await
+            let (mut rx, _stream_handle) = client.stream(&messages, &[]).await
                 .expect("Failed to start LLM stream");
             let mut ttft_ms: Option<u128> = None;
             let mut response = String::new();

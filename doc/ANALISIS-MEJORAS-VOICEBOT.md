@@ -18,7 +18,7 @@ A continuación se detallan las mejoras y funcionalidades adicionales categoriza
 
 ### 1.1 Optimización de Latencia End-to-End
 
-**Estado actual:** Usa cache_prompt de llama.cpp y streaming parcial de Whisper.
+**Estado actual:** Usa mlx-lm/oMLX con KV-cache implícito y streaming parcial de Whisper.
 
 **Mejoras propuestas:**
 
