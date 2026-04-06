@@ -1,4 +1,7 @@
+use std::sync::{Arc, Mutex};
+
 use super::events::{InputSource, PipelineState, TuiEvent};
+use crate::tools::ConversationMode;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 
 /// Action returned by key event handling.
@@ -45,10 +48,12 @@ pub struct App {
     pub tts_enabled: bool,
     /// Whether the app should quit.
     pub should_quit: bool,
+    /// Shared conversation mode — read each render tick directly from the pipeline.
+    pub conv_mode: Arc<Mutex<ConversationMode>>,
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(conv_mode: Arc<Mutex<ConversationMode>>) -> Self {
         Self {
             messages: Vec::new(),
             streaming_buffer: String::new(),
@@ -58,6 +63,7 @@ impl App {
             scroll: 0,
             tts_enabled: true,
             should_quit: false,
+            conv_mode,
         }
     }
 

@@ -8,6 +8,7 @@ use ratatui::{
 
 use super::app::{App, Role};
 use super::events::{InputSource, PipelineState};
+use crate::tools::ConversationMode;
 
 /// Render the entire TUI frame.
 pub fn render(frame: &mut Frame, app: &App) {
@@ -49,10 +50,12 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let tts_label = if app.tts_enabled { "TTS ON" } else { "TTS OFF" };
-    let tts_color = if app.tts_enabled {
-        Color::Green
-    } else {
-        Color::DarkGray
+    let tts_color = if app.tts_enabled { Color::Green } else { Color::DarkGray };
+
+    let (conv_label, conv_color) = match *app.conv_mode.lock().unwrap() {
+        ConversationMode::Active       => ("ACTIVE",   Color::Cyan),
+        ConversationMode::Ambient      => ("AMBIENT",  Color::DarkGray),
+        ConversationMode::AmbientLocked => ("AMBIENT🔒", Color::Yellow),
     };
 
     let header = Line::from(vec![
@@ -61,6 +64,8 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(state_label, Style::default().fg(state_color).bold()),
         Span::raw(" | "),
         Span::styled(tts_label, Style::default().fg(tts_color)),
+        Span::raw(" | "),
+        Span::styled(conv_label, Style::default().fg(conv_color).bold()),
         Span::raw(" | "),
         Span::styled(
             "Ctrl+T: toggle TTS  Esc: quit",
