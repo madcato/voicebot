@@ -559,9 +559,20 @@ async fn async_main() -> Result<()> {
     })
     .await??;
     let stt = Arc::new(stt);
+
     // Always-running STT: Whisper starts as soon as the user begins speaking
     // so the result is ready (or nearly ready) when VAD fires SpeechEnd.
+    // SttStream owns a dedicated OS thread for all Whisper calls (CoreML
+    // thread-affinity).
     let stt_stream = SttStream::new(Arc::clone(&stt));
+
+    // Warm up CoreML/ANE on the dedicated Whisper thread: the first inference
+    // triggers JIT compilation and kernel caching on the ANE (10-30s).
+    // Running silence through the encoder now prevents the first real utterance
+    // from stalling the pipeline.
+    info!(target: "stt", "Warming up Whisper CoreML (ANE JIT)…");
+    stt_stream.warmup().await;
+    info!(target: "stt", "Whisper warmup done");
 
     // ── Speaker verifier ──────────────────────────────────────────────────────
     let mut speaker_verifier: Option<SpeakerVerifier> =
@@ -1041,12 +1052,13 @@ async fn async_main() -> Result<()> {
                         }
 
                         let current_commits = turn_commit_counter.load(Ordering::SeqCst);
-                        let audio = if current_commits > last_cleared_commit {
+                        if current_commits > last_cleared_commit {
                             last_cleared_commit = current_commits;
-                            speech_buffer.get_samples_from(speech_buffer_start_offset)
-                        } else {
-                            speech_buffer.get_samples()
-                        };
+                        }
+                        // Always slice from speech_buffer_start_offset (set at SpeechStart).
+                        // The old fallback `get_samples()` returned the entire buffer when no
+                        // turn was committed, causing audio to grow unboundedly across utterances.
+                        let audio = speech_buffer.get_samples_from(speech_buffer_start_offset);
                         let duration_ms = audio.len() as u32 * 1000 / source_sample_rate;
 
                         info!(target: "pipeline", "Speech: {}ms (segment {}ms)", duration_ms, segment_duration_ms);
