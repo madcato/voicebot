@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# start-mlx-lm.sh — Launch mlx-lm server optimized for single-user voicebot
+# start-mlx-lm.sh — Launch mlx-lm server optimized for single-user voicebot,
+#                    or print connection info for a remote llama.cpp server.
 #
 # Usage:
 #   ./scripts/start-mlx-lm.sh [model_path_or_hf_repo]
@@ -9,8 +10,12 @@
 #   ./scripts/start-mlx-lm.sh ./models/my-mlx-model
 #   MLX_MODEL=mlx-community/Qwen2.5-7B-Instruct-4bit ./scripts/start-mlx-lm.sh
 #
+# Remote llama.cpp on tesla.local (no local server launched):
+#   MLX_REMOTE_HOST=tesla.local MLX_PORT=8000 ./scripts/start-mlx-lm.sh
+#
 # After launch, set in .env:
-#   LLM_URL=http://127.0.0.1:8000
+#   LLM_URL=http://127.0.0.1:8000          # local mlx-lm
+#   LLM_URL=http://tesla.local:8000        # remote llama.cpp
 
 set -euo pipefail
 
@@ -19,6 +24,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 MODEL="${1:-${MLX_MODEL:-}}"
+REMOTE_HOST="${MLX_REMOTE_HOST:-}"
 HOST="${MLX_HOST:-127.0.0.1}"
 PORT="${MLX_PORT:-8000}"
 MAX_TOKENS="${MLX_MAX_TOKENS:-300}"
@@ -33,6 +39,24 @@ CACHE_SIZE_BYTES="${MLX_CACHE_BYTES:-$((3 * 1024 * 1024 * 1024))}"  # 3 GB
 # (typical utterance = 10–50 tokens, fits in a single chunk).
 # Increase to 1024 or 2048 if you send very long prompts.
 PREFILL_STEP="${MLX_PREFILL_STEP:-512}"
+
+# ---------------------------------------------------------------------------
+# Remote mode — point to an existing llama.cpp (or any OpenAI-compatible) server
+# ---------------------------------------------------------------------------
+
+if [[ -n "$REMOTE_HOST" ]]; then
+  echo "Remote llama.cpp server"
+  echo "  Host:     $REMOTE_HOST"
+  echo "  Endpoint: http://$REMOTE_HOST:$PORT/v1"
+  echo ""
+  echo "Set in .env:"
+  echo "  LLM_URL=http://$REMOTE_HOST:$PORT"
+  echo ""
+  echo "Benchmark:"
+  echo "  BENCH_HOST=$REMOTE_HOST BENCH_PORT=$PORT BENCH_TOKEN='' BENCH_PROVIDER=llamacpp \\"
+  echo "    python3 scripts/bench-omlx-models.py"
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # Validation

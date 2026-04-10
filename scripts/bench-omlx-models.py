@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-bench-omlx-models.py — multi-model KV-cache benchmark (omlx / LM Studio / any OpenAI-compatible server)
+bench-omlx-models.py — multi-model KV-cache benchmark (omlx / LM Studio / llama.cpp / any OpenAI-compatible server)
 
 Tests TTFT, PP (prompt-processing rate), TG (token-generation rate), and KV-cache
 health for a list of models.
@@ -22,9 +22,13 @@ Usage:
   # LM Studio
   BENCH_PORT=1234 BENCH_TOKEN="" BENCH_PROVIDER=lmstudio python3 scripts/bench-omlx-models.py
 
+  # llama.cpp on tesla.local
+  BENCH_HOST=tesla.local BENCH_PORT=8000 BENCH_TOKEN="" BENCH_PROVIDER=llamacpp python3 scripts/bench-omlx-models.py
+
 Env vars:
+  BENCH_HOST       server hostname/IP        (default "127.0.0.1"; use "tesla.local" for remote llama.cpp)
   BENCH_PORT       server port               (default 8000 for omlx, use 1234 for LM Studio)
-  BENCH_TOKEN      Bearer auth token         (default "asdf" for omlx, empty for LM Studio)
+  BENCH_TOKEN      Bearer auth token         (default "asdf" for omlx, empty for LM Studio/llama.cpp)
   BENCH_PROVIDER   label shown in output     (default "omlx")
   BENCH_TRIALS     hot measurement trials    (default 3)
   BENCH_GEN        tokens to generate        (default 80)
@@ -83,13 +87,22 @@ from statistics import mean, stdev
 #     "qwen3.5:35b-a3b-int4",
 # ]
 
+
 ## mlx-lm local
+# MODELS = [
+#     "mlx-community/Qwen3.5-35B-A3B-4bit",
+#     # "mlx-community/Qwen3.5-4B-MLX-4bit",
+#     "mlx-community/gemma-4-26b-a4b-it-4bit",
+#     # "mlx-community/Qwen3-1.7B-4bit",
+#     "baa-ai/Qwen3.5-122B-A10B-RAM-48GB-MLX",
+# ]
+
+## llama.cpp on tesla.local (BENCH_HOST=tesla.local BENCH_PORT=8000 BENCH_TOKEN="" BENCH_PROVIDER=llamacpp)
 MODELS = [
-    "mlx-community/Qwen3.5-35B-A3B-4bit",
-    # "mlx-community/Qwen3.5-4B-MLX-4bit",
-    "mlx-community/gemma-4-26b-a4b-it-4bit",
-    # "mlx-community/Qwen3-1.7B-4bit",
-    "baa-ai/Qwen3.5-122B-A10B-RAM-48GB-MLX",
+    # "Qwen3.5-27B-UD-Q4_K_XL",
+    # "Qwen3.5-35B-A3B-Q4_K_M",
+    # "Qwen3.5-35B-A3B-UD-Q4_K_XL",
+    "gemma-4-31B-it-Q4_K_M",
 ]
 
 # ── Conversation fixture ──────────────────────────────────────────────────────
@@ -152,13 +165,17 @@ NEW_QUESTION = (
 # ── Config ────────────────────────────────────────────────────────────────────
 
 # BENCH_PORT / BENCH_TOKEN take precedence; OMLX_PORT / OMLX_TOKEN are legacy aliases.
-SERVER_PORT  = int(os.environ.get("BENCH_PORT",  os.environ.get("OMLX_PORT",  "1234")))
-SERVER_TOKEN =     os.environ.get("BENCH_TOKEN", os.environ.get("OMLX_TOKEN", "asdf"))
 PROVIDER     =     os.environ.get("BENCH_PROVIDER", "omlx")
+SERVER_PORT  = int(os.environ.get("BENCH_PORT",  os.environ.get("OMLX_PORT",  "8000")))
+# llama.cpp has no auth by default; omlx uses "asdf"; LM Studio uses ""
+_default_token = "" if PROVIDER.lower() in ("llamacpp", "llama.cpp", "lmstudio", "lms") else "asdf"
+SERVER_TOKEN =     os.environ.get("BENCH_TOKEN", os.environ.get("OMLX_TOKEN", _default_token))
+# llama.cpp on tesla.local; all other providers default to localhost
+_default_host = "192.168.1.100" if PROVIDER.lower() in ("llamacpp", "llama.cpp") else "127.0.0.1"
+HOST         =     os.environ.get("BENCH_HOST", _default_host)
+_RESOLVED_HOST = HOST
 TRIALS       = int(os.environ.get("BENCH_TRIALS", "3"))
 GEN_TOKENS   = int(os.environ.get("BENCH_GEN",    "80"))
-
-HOST = "127.0.0.1"
 
 # Rough prompt token estimate (chars / 3.5) used when API doesn't return usage
 _PROMPT_TEXT = (
@@ -178,9 +195,17 @@ def _auth_headers():
 
 
 def _post_stream(port, payload):
-    """POST to /v1/chat/completions with stream=True. Yields SSE content lines."""
+    """POST to /v1/chat/completions with stream=True. Yields SSE content lines.
+
+    Reads the response one byte at a time instead of read(N) to avoid
+    http.client's chunked-encoding accumulation.  read(N) with chunked transfer
+    keeps looping across chunk boundaries until N bytes are collected — with
+    llama.cpp emitting ~200 bytes per SSE event, read(4096) buffers ~20 tokens
+    before the first yield, making TTFT measurements include most of the
+    generation time rather than just the prefill phase.
+    """
     body = json.dumps(payload).encode()
-    conn = http.client.HTTPConnection(HOST, port, timeout=120)
+    conn = http.client.HTTPConnection(_RESOLVED_HOST, port, timeout=120)
     try:
         conn.request(
             "POST", "/v1/chat/completions", body=body,
@@ -191,13 +216,17 @@ def _post_stream(port, payload):
             raise RuntimeError(f"HTTP {resp.status}: {resp.read()[:300].decode()}")
         buf = ""
         while True:
-            chunk = resp.read(4096)
-            if not chunk:
+            byte = resp.read(1)
+            if not byte:
                 break
-            buf += chunk.decode("utf-8", errors="replace")
-            while "\n" in buf:
-                line, buf = buf.split("\n", 1)
-                yield line.rstrip("\r")
+            ch = byte.decode("utf-8", errors="replace")
+            if ch == "\n":
+                yield buf.rstrip("\r")
+                buf = ""
+            else:
+                buf += ch
+        if buf:
+            yield buf.rstrip("\r")
     finally:
         conn.close()
 
@@ -206,7 +235,7 @@ def _post_blocking(port, payload):
     """POST to /v1/chat/completions with stream=False. Returns parsed JSON dict."""
     payload = {**payload, "stream": False}
     body = json.dumps(payload).encode()
-    conn = http.client.HTTPConnection(HOST, port, timeout=120)
+    conn = http.client.HTTPConnection(_RESOLVED_HOST, port, timeout=120)
     try:
         conn.request(
             "POST", "/v1/chat/completions", body=body,
@@ -223,7 +252,7 @@ def _post_blocking(port, payload):
 
 def _get_models(port):
     """Return list of model IDs from /v1/models."""
-    conn = http.client.HTTPConnection(HOST, port, timeout=10)
+    conn = http.client.HTTPConnection(_RESOLVED_HOST, port, timeout=10)
     try:
         conn.request("GET", "/v1/models", headers=_auth_headers())
         resp = conn.getresponse()
@@ -239,7 +268,7 @@ def _wait_ready(port, timeout=180):
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            conn = http.client.HTTPConnection(HOST, port, timeout=2)
+            conn = http.client.HTTPConnection(_RESOLVED_HOST, port, timeout=2)
             conn.request("GET", "/v1/models", headers=_auth_headers())
             r = conn.getresponse()
             r.read()
@@ -255,7 +284,12 @@ def _wait_ready(port, timeout=180):
 # ── Conversation builder ──────────────────────────────────────────────────────
 
 def _build_messages(include_new_question=True):
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+    system_content = SYSTEM_PROMPT
+    # llama.cpp + Qwen3: /no_think prefix is the most reliable way to disable
+    # chain-of-thought when chat_template_kwargs alone may be ignored.
+    if PROVIDER.lower() in ("llamacpp", "llama.cpp"):
+        system_content = "/no_think\n\n" + system_content
+    msgs = [{"role": "system", "content": system_content}]
     for role, content in HISTORY:
         msgs.append({"role": role, "content": content})
     if include_new_question:
@@ -272,9 +306,10 @@ def _base_payload(model_id, max_tokens, stream):
         "stream":               stream,
         # Disable reasoning/thinking via all known API conventions:
         # - top-level field (omlx, some mlx-lm builds)
-        # - chat_template_kwargs (mlx-lm, omlx)
+        # - chat_template_kwargs (mlx-lm, omlx, llama.cpp ≥ b3800)
         # - thinking budget = 0 (LM Studio / some OpenAI-compat servers)
         # - think: false (Ollama)
+        # llama.cpp + Qwen3: belt-and-suspenders with /no_think in system prompt
         "enable_thinking":      False,
         "chat_template_kwargs": {"enable_thinking": False},
         "thinking":             {"type": "disabled"},
@@ -333,8 +368,10 @@ def measure_pp(port, model_id):
             prompt_tokens_api = chunk["usage"].get("prompt_tokens")
 
         delta = (chunk.get("choices") or [{}])[0].get("delta", {})
-        token = (delta.get("content") or delta.get("reasoning_content")
-                 or delta.get("reasoning") or delta.get("thinking") or "")
+        # Only count actual content tokens for TTFT — reasoning_content/thinking
+        # tokens would give a false (too-early) first-token time if thinking
+        # leaks through despite the disable flags.
+        token = delta.get("content") or ""
         if token and t_first is None:
             t_first = time.perf_counter()
 
@@ -375,8 +412,8 @@ def measure_hot(port, model_id):
         except json.JSONDecodeError:
             continue
         delta   = (chunk.get("choices") or [{}])[0].get("delta", {})
-        content = (delta.get("content") or delta.get("reasoning_content")
-                   or delta.get("reasoning") or delta.get("thinking") or "")
+        # Only count actual content tokens — ignore reasoning/thinking leakage.
+        content = delta.get("content") or ""
         if content:
             now = time.perf_counter()
             if t_first is None:
