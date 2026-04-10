@@ -768,12 +768,14 @@ async fn async_main() -> Result<()> {
         let tools_c             = Arc::clone(&tools);
         let shared_history_c    = Arc::clone(&shared_history);
         let turn_commit_c       = Arc::clone(&turn_commit_counter);
+        let proactive_tx_c      = proactive_tx.clone();
         #[cfg(feature = "tui")]
         let tui_tx_c = tui_tx.clone();
         tokio::spawn(async move {
             llm_task(
                 shared_c, events_c, llm_session_c, llm_client_c,
                 db_c, session_id, tools_c, shared_history_c, turn_commit_c,
+                proactive_tx_c,
                 #[cfg(feature = "tui")]
                 tui_tx_c,
             ).await;
@@ -1317,6 +1319,7 @@ async fn llm_task(
     tools: Arc<ToolRegistry>,
     shared_history: Arc<RwLock<String>>,
     turn_commit_counter: Arc<AtomicU64>,
+    proactive_tx: mpsc::Sender<ProactiveEvent>,
     #[cfg(feature = "tui")]
     tui_tx: tui::events::TuiEventTx,
 ) {
@@ -1489,11 +1492,44 @@ async fn llm_task(
 
                 match tool_call {
                     Some((name, args)) => {
-                        // Announce "Buscando." via TTS while web_search runs.
-                        if name == "web_search" {
-                            shared.assistant_text.lock().unwrap().push_str("Buscando. ");
+                        if tools.is_background(&name) {
+                            // Background tool: acknowledge immediately via TTS, run in a
+                            // separate task, deliver the result via ProactiveEvent.
+                            let ack = match name.as_str() {
+                                "web_search" => "Buscando.",
+                                "run_shell"  => "Ejecutando.",
+                                _            => "Procesando en segundo plano, le aviso al terminar.",
+                            };
+                            {
+                                let mut text = shared.assistant_text.lock().unwrap();
+                                text.push_str(ack);
+                            }
                             events.llm_post_received.notify_one();
+                            shared.llm_post_finished.store(true, Ordering::SeqCst);
+                            events.llm_post_received.notify_one(); // flush SEN
+                            events.llm_post_finished.notify_one(); // wake consolidation
+
+                            let tools_c      = Arc::clone(&tools);
+                            let name_c       = name.clone();
+                            let args_c       = args.clone();
+                            let proactive_c  = proactive_tx.clone();
+                            tokio::spawn(async move {
+                                info!(target: "pipeline", "Background tool `{}` started", name_c);
+                                let result = tools_c.execute(&name_c, &args_c).await;
+                                info!(target: "pipeline", "Background tool `{}` finished ({} chars)", name_c, result.len());
+                                proactive_c.send(ProactiveEvent::AgentResult {
+                                    task: name_c,
+                                    result,
+                                }).await.ok();
+                            });
+
+                            // Fall through to the commit block so the ACK is saved to
+                            // session and DB as the assistant turn for this pipeline run.
+                            final_response = ack.to_string();
+                            break 'tool_loop;
                         }
+
+                        // Synchronous tool: execute inline and loop back to LLM.
                         let result = tools.execute(&name, &args).await;
                         info!(target: "pipeline", "Tool[{}] `{}` → {}", iter, name, result);
                         #[cfg(feature = "tui")]
@@ -2096,10 +2132,12 @@ async fn run_pipeline(
         let db_c = db.clone();
         let tools_c = Arc::clone(&tools);
         let shared_history_c = Arc::clone(&shared_history);
+        let (test_proactive_tx, _test_proactive_rx) = mpsc::channel::<ProactiveEvent>(8);
         tokio::spawn(async move {
             llm_task(
                 shared_c, events_c, llm_session_c, llm_client_c,
                 db_c, session_id, tools_c, shared_history_c, turn_commit_c,
+                test_proactive_tx,
                 #[cfg(feature = "tui")]
                 { let (tx, _) = tokio::sync::mpsc::unbounded_channel(); tx },
             ).await;

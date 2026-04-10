@@ -34,6 +34,11 @@ pub trait Tool: Send + Sync {
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({"type": "object", "properties": {}})
     }
+    /// If true, the pipeline runs this tool in a background task and delivers the
+    /// result via ProactiveEvent instead of blocking the LLM turn for another round-trip.
+    fn is_background(&self) -> bool {
+        false
+    }
     /// Execute the tool with optional args and return the result as a string.
     async fn run(&self, args: &str) -> String;
 }
@@ -102,6 +107,11 @@ impl ToolRegistry {
         };
 
         self.tools.contains_key(&name).then_some((name, args))
+    }
+
+    /// Returns true if the named tool should run in the background.
+    pub fn is_background(&self, name: &str) -> bool {
+        self.tools.get(name).map(|t| t.is_background()).unwrap_or(false)
     }
 
     /// Execute a registered tool by name with the given args.
@@ -245,6 +255,21 @@ mod tests {
     fn tool_definitions_empty_for_empty_registry() {
         let r = ToolRegistry::new();
         assert!(r.tool_definitions().is_empty());
+    }
+
+    // ── is_background ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn current_time_is_not_background() {
+        let mut r = ToolRegistry::new();
+        r.register(CurrentTimeTool);
+        assert!(!r.is_background("current_time"));
+    }
+
+    #[test]
+    fn is_background_unknown_tool_returns_false() {
+        let r = ToolRegistry::new();
+        assert!(!r.is_background("nonexistent"));
     }
 
     // ── parse → execute round-trip ────────────────────────────────────────────

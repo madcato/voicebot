@@ -80,6 +80,10 @@ impl Tool for WebSearchTool {
          fragmento y URL."
     }
 
+    fn is_background(&self) -> bool {
+        true
+    }
+
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -219,6 +223,11 @@ mod tests {
     #[test]
     fn name_is_web_search() {
         assert_eq!(tool().name(), "web_search");
+    }
+
+    #[test]
+    fn is_background_true() {
+        assert!(tool().is_background());
     }
 
     #[test]

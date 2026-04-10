@@ -51,6 +51,10 @@ impl Tool for RunShellTool {
          Do NOT run destructive commands (delete, overwrite, format) without explicit user confirmation."
     }
 
+    fn is_background(&self) -> bool {
+        true
+    }
+
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -193,5 +197,10 @@ mod tests {
     #[tokio::test]
     async fn description_is_non_empty() {
         assert!(!tool().description().is_empty());
+    }
+
+    #[test]
+    fn is_background_true() {
+        assert!(tool().is_background());
     }
 }
