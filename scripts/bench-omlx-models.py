@@ -49,14 +49,13 @@ from statistics import mean, stdev
 
 ## OMLX
 # MODELS = [
-#     "Bonsai-8B-mlx-1bit",
-#     "LFM2-24B-A2B-MLX-4bit",
-#     "LFM2.5-350M-MLX-8bit",
-#     "Qwen3-30B-A3B-Instruct-2507-MLX-4bit",
-#     "Qwen3.5-27B-oQ3",
-#     "Qwen3.5-2B-4bit",
 #     "Qwen3.5-35B-A3B-4bit",
-#     "Qwen3.5-35B-A3B-MLX-oQ4",
+#     "gemma-4-26b-a4b-it-4bit",
+#     "Qwen3-30B-A3B-4bit",
+#     "Qwen3.5-35B-A3B-UD-Q4_K_XL-mlx",
+#     # "Qwen2.5-3B-Instruct-4bit",
+# #     "Qwen3.5-122B-A10B-RAM-48GB-MLX",
+# #     "Qwen3.5-122B-A10B-oQ2",
 # ]
 
 ## LM Studio
@@ -86,17 +85,11 @@ from statistics import mean, stdev
 
 ## mlx-lm local
 MODELS = [
-    # "Brooooooklyn/Qwen3.5-35B-A3B-UD-Q4_K_XL-mlx",
-    # "Brooooooklyn/Qwen3.5-27B-unsloth-mlx",
     "mlx-community/Qwen3.5-35B-A3B-4bit",
-    # "mlx-community/Qwen3.5-9B-MLX-4bit",
-    "mlx-community/Qwen3.5-4B-MLX-4bit",
+    # "mlx-community/Qwen3.5-4B-MLX-4bit",
     "mlx-community/gemma-4-26b-a4b-it-4bit",
-    # "mlx-community/gemma-4-31b-it-4bit",
-    # "mlx-community/gemma-4-e4b-it-4bit",
-    # "unsloth/gemma-4-26b-a4b-it-UD-MLX-4bit",
-    "mlx-community/Qwen3-1.7B-4bit",
-    "mlx-community/gemma-4-e2b-it-4bit",
+    # "mlx-community/Qwen3-1.7B-4bit",
+    "baa-ai/Qwen3.5-122B-A10B-RAM-48GB-MLX",
 ]
 
 # ── Conversation fixture ──────────────────────────────────────────────────────
