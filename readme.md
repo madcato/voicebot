@@ -346,6 +346,9 @@ Most configuration is done via environment variables (or `.env` file):
 | **Web Search (SearXNG)** || |
 | `SEARXNG_URL` | — (disabled) | Base URL of SearXNG instance (e.g. `http://tesla.local:8080`). Enables the `web_search` tool. |
 | `SEARXNG_SECRET` | (empty) | Bearer token for SearXNG API authentication. |
+| **MCP (Model Context Protocol)** || |
+| `MCP_COMMAND` | — (disabled) | Command to spawn an MCP stdio server (e.g. `bunx apple-mcp@latest`). All tools advertised by the server via `tools/list` are registered dynamically. Calls run in background — Jarvis acknowledges and speaks the result when ready. Compatible with any MCP server using stdio transport. |
+| `MCP_TOOL_TIMEOUT_SECS` | `30` | Hard timeout per MCP tool call in seconds. |
 | **Speaker Verification** || |
 | `SPEAKER_MODEL` | auto-detect | Path to sherpa-onnx speaker embedding ONNX model. Auto-detected at `models/speaker_embedding.onnx`; disabled if absent. |
 | `SPEAKER_ENROLLMENT_PATH` | `data/speaker.emb` | Base path for speaker profiles. Profiles saved as `speaker_0.emb`, `speaker_1.emb`, etc. in the same directory. |

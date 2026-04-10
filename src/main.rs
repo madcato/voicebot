@@ -5,6 +5,7 @@ mod daemon;
 mod db;
 mod eyes;
 mod llm;
+mod mcp;
 mod memory;
 mod profile;
 mod stt;
@@ -115,8 +116,8 @@ use crate::stt::{WhisperStt, SttStream};
 use whisper_rs::install_logging_hooks;
 use crate::tools::{
     format_history, ActiveAcpTask, ConversationMode, CurrentTimeTool, HermesAcpWriter, JsonRpcMessage,
-    OpenAppTool, ReadClipboardTool, RunAgentTool, RunShellTool, SetClipboardTool, SetConversationModeTool,
-    TakeScreenshotTool, ToolRegistry, WebSearchTool,
+    McpToolProxy, OpenAppTool, ReadClipboardTool, RunAgentTool, RunShellTool, SetClipboardTool,
+    SetConversationModeTool, TakeScreenshotTool, ToolRegistry, WebSearchTool,
 };
 use crate::tts::{SentenceSplitter, TtsEngine};
 #[cfg(feature = "kokoro")]
@@ -449,6 +450,39 @@ async fn async_main() -> Result<()> {
                 *inbound_arc.lock().await = taken_rx;
             }
         });
+    }
+
+    // ── MCP tools ─────────────────────────────────────────────────────────────
+    // If MCP_COMMAND is set, spawn the MCP server, run the initialize handshake,
+    // and register all discovered tools into the registry as McpToolProxy entries.
+    // Each MCP tool is background (is_background = true) — it runs in a spawned
+    // task and delivers the result via ProactiveEvent.
+    if let Some(ref mcp_cmd) = config.mcp_command {
+        info!(target: "mcp", "Spawning MCP server: {}", mcp_cmd);
+        match mcp::McpClient::spawn_and_init(mcp_cmd, config.mcp_tool_timeout_secs).await {
+            Ok((client, tool_defs)) => {
+                let client = std::sync::Arc::new(client);
+                let count = tool_defs.len();
+                for def in tool_defs {
+                    info!(
+                        target: "mcp",
+                        "Tool `{}`: schema={}",
+                        def.name,
+                        serde_json::to_string(&def.input_schema).unwrap_or_default(),
+                    );
+                    tool_registry.register(McpToolProxy::new(
+                        def.name,
+                        def.description,
+                        def.input_schema,
+                        std::sync::Arc::clone(&client),
+                    ));
+                }
+                info!(target: "mcp", "Registered {} MCP tool(s)", count);
+            }
+            Err(e) => {
+                warn!(target: "mcp", "MCP server failed to start — MCP tools disabled: {e}");
+            }
+        }
     }
 
     let tools = Arc::new(tool_registry);
@@ -1516,7 +1550,7 @@ async fn llm_task(
                             tokio::spawn(async move {
                                 info!(target: "pipeline", "Background tool `{}` started", name_c);
                                 let result = tools_c.execute(&name_c, &args_c).await;
-                                info!(target: "pipeline", "Background tool `{}` finished ({} chars)", name_c, result.len());
+                                info!(target: "pipeline", "Background tool `{}` finished ({} chars): {:?}", name_c, result.len(), result);
                                 proactive_c.send(ProactiveEvent::AgentResult {
                                     task: name_c,
                                     result,

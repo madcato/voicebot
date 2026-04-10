@@ -1,6 +1,7 @@
 pub mod clipboard;
 pub mod conversation_mode;
 pub mod current_time;
+pub mod mcp_tool;
 pub mod open_app;
 pub mod read_file;
 pub mod run_agent;
@@ -16,6 +17,7 @@ use tracing::info;
 pub use clipboard::{ReadClipboardTool, SetClipboardTool};
 pub use conversation_mode::{ConversationMode, SetConversationModeTool};
 pub use current_time::CurrentTimeTool;
+pub use mcp_tool::McpToolProxy;
 pub use open_app::OpenAppTool;
 pub use run_agent::{
     format_history, ActiveAcpTask, HermesAcpWriter, JsonRpcMessage, RunAgentTool,

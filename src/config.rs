@@ -180,6 +180,14 @@ pub struct Config {
     /// (AMBIENT_BUFFER_MAX_ENTRIES, default 30).
     pub ambient_buffer_max_entries: usize,
 
+    // ── MCP (Model Context Protocol) ─────────────────────────────────────────
+    /// Command to spawn the MCP server subprocess (MCP_COMMAND).
+    /// None = MCP disabled. Example: `bunx apple-mcp@latest`.
+    /// The server must speak stdio-transport MCP (JSON-RPC 2.0 over stdin/stdout).
+    pub mcp_command: Option<String>,
+    /// Hard timeout in seconds for each MCP tool call (MCP_TOOL_TIMEOUT_SECS, default 30).
+    pub mcp_tool_timeout_secs: u64,
+
     // ── Remote device (WebSocket) ──────────────────────────────────────────────
     /// WebSocket server port. None = disabled (WS_PORT).
     pub ws_port: Option<u16>,
@@ -409,6 +417,13 @@ impl Config {
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .context("Invalid AMBIENT_BUFFER_MAX_ENTRIES")?,
+
+            // MCP
+            mcp_command: env::var("MCP_COMMAND").ok(),
+            mcp_tool_timeout_secs: env::var("MCP_TOOL_TIMEOUT_SECS")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .context("Invalid MCP_TOOL_TIMEOUT_SECS")?,
 
             // Remote device (WebSocket)
             ws_port: env::var("WS_PORT")
