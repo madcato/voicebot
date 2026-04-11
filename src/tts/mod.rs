@@ -32,6 +32,7 @@ pub enum TtsEngine {
 }
 
 impl TtsEngine {
+    #[allow(unreachable_patterns)]
     pub fn synthesize(&self, text: &str) -> anyhow::Result<Vec<f32>> {
         match self {
             #[cfg(feature = "avspeech")]
@@ -40,9 +41,11 @@ impl TtsEngine {
             Self::Kokoro(t) => t.synthesize(text),
             #[cfg(test)]
             Self::Mock(t) => t.synthesize(text),
+            _ => unreachable!("no TTS backend enabled"),
         }
     }
 
+    #[allow(unreachable_patterns)]
     pub fn sample_rate(&self) -> u32 {
         match self {
             #[cfg(feature = "avspeech")]
@@ -51,6 +54,7 @@ impl TtsEngine {
             Self::Kokoro(t) => t.sample_rate(),
             #[cfg(test)]
             Self::Mock(t) => t.sample_rate(),
+            _ => unreachable!("no TTS backend enabled"),
         }
     }
 }
