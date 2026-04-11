@@ -43,17 +43,17 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 fn render_message_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut all_lines: Vec<Line<'static>> = vec![];
 
-    // Add streaming buffer
-    if !app.streaming_buffer.is_empty() {
-        let streaming_lines = render_streaming_lines(&app.streaming_buffer, area.width as usize);
-        all_lines.extend(streaming_lines);
-        all_lines.push(Line::raw(""));
-    }
-
     // Render each message (oldest to newest)
     for msg in app.messages.iter() {
         let lines = message_lines(msg, area.width);
         all_lines.extend(lines);
+        all_lines.push(Line::raw(""));
+    }
+
+    // Add streaming buffer AFTER messages — appears at bottom during streaming
+    if !app.streaming_buffer.is_empty() {
+        let streaming_lines = render_streaming_lines(&app.streaming_buffer, area.width as usize);
+        all_lines.extend(streaming_lines);
         all_lines.push(Line::raw(""));
     }
 
