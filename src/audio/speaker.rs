@@ -11,7 +11,11 @@ use sherpa_rs::speaker_id::{EmbeddingExtractor, ExtractorConfig};
 #[allow(dead_code)]
 pub enum SpeakerVerdict {
     /// Matched an enrolled profile. `id=0` is always the main user.
-    Known { id: u8, label: String, similarity: f32 },
+    Known {
+        id: u8,
+        label: String,
+        similarity: f32,
+    },
     /// No profile matched above the threshold.
     Unknown { similarity: f32 },
     /// First utterance from a new speaker — auto-enrolled as a new profile.
@@ -116,13 +120,21 @@ impl SpeakerVerifier {
             let best = self
                 .profiles
                 .iter()
-                .map(|p| (p.id, p.label.clone(), cosine_similarity(&embedding, &p.embedding)))
+                .map(|p| {
+                    (
+                        p.id,
+                        p.label.clone(),
+                        cosine_similarity(&embedding, &p.embedding),
+                    )
+                })
                 .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
 
             match best {
-                Some((id, label, sim)) if sim >= self.threshold => {
-                    SpeakerVerdict::Known { id, label, similarity: sim }
-                }
+                Some((id, label, sim)) if sim >= self.threshold => SpeakerVerdict::Known {
+                    id,
+                    label,
+                    similarity: sim,
+                },
                 Some((_, _, sim)) if self.profiles.len() >= self.max_profiles as usize => {
                     // No match and registry is full.
                     SpeakerVerdict::Unknown { similarity: sim }
@@ -141,7 +153,11 @@ impl SpeakerVerifier {
                     } else {
                         info!(target: "speaker", "Speaker {} enrolled → {:?}", label, path);
                     }
-                    self.profiles.push(SpeakerProfile { id, label: label.clone(), embedding });
+                    self.profiles.push(SpeakerProfile {
+                        id,
+                        label: label.clone(),
+                        embedding,
+                    });
                     SpeakerVerdict::Enrolled { id, label }
                 }
             }
@@ -149,10 +165,15 @@ impl SpeakerVerifier {
         #[cfg(not(feature = "speaker"))]
         {
             let _ = (sample_rate, samples);
-            SpeakerVerdict::Known { id: 0, label: "Usuario".to_string(), similarity: 1.0 }
+            SpeakerVerdict::Known {
+                id: 0,
+                label: "Usuario".to_string(),
+                similarity: 1.0,
+            }
         }
     }
 
+    #[allow(dead_code)]
     fn profile_path(&self, id: u8) -> PathBuf {
         self.profiles_dir.join(format!("speaker_{id}.emb"))
     }
@@ -161,7 +182,11 @@ impl SpeakerVerifier {
     /// Handles backward compatibility: if `speaker_0.emb` is missing but the
     /// legacy `enrollment_path` file exists, it is treated as profile 0.
     #[cfg(feature = "speaker")]
-    fn load_profiles(profiles_dir: &Path, legacy_path: &Path, max_profiles: u8) -> Vec<SpeakerProfile> {
+    fn load_profiles(
+        profiles_dir: &Path,
+        legacy_path: &Path,
+        max_profiles: u8,
+    ) -> Vec<SpeakerProfile> {
         let mut profiles = Vec::new();
         for id in 0..max_profiles {
             let path = profiles_dir.join(format!("speaker_{id}.emb"));
@@ -177,7 +202,11 @@ impl SpeakerVerifier {
                 } else {
                     format!("Speaker_{id}")
                 };
-                profiles.push(SpeakerProfile { id, label, embedding });
+                profiles.push(SpeakerProfile {
+                    id,
+                    label,
+                    embedding,
+                });
             } else {
                 break; // IDs are contiguous — stop at first gap.
             }
@@ -205,8 +234,7 @@ impl SpeakerVerifier {
             std::fs::create_dir_all(parent)?;
         }
         let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
-        std::fs::write(path, &bytes)
-            .with_context(|| format!("Failed to write profile to {path:?}"))
+        std::fs::write(path, &bytes).with_context(|| format!("Failed to write profile to {path:?}"))
     }
 }
 
@@ -265,7 +293,11 @@ mod tests {
         let verdict = sv.verify(16000, &samples);
         assert_eq!(
             verdict,
-            SpeakerVerdict::Known { id: 0, label: "Usuario".to_string(), similarity: 1.0 }
+            SpeakerVerdict::Known {
+                id: 0,
+                label: "Usuario".to_string(),
+                similarity: 1.0
+            }
         );
     }
 }

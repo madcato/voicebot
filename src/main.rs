@@ -97,7 +97,6 @@ impl PipelineEvents {
         }
     }
 }
-use uuid::Uuid;
 
 use crate::agents::ProactiveEvent;
 use crate::profile::extract_facts;
@@ -1327,6 +1326,7 @@ async fn async_main() -> Result<()> {
 }
 
 /// Await a pending playback handle, logging any error. No-op if `None`.
+#[allow(dead_code)]
 async fn drain_play(handle: &mut Option<tokio::task::JoinHandle<anyhow::Result<()>>>) {
     if let Some(h) = handle.take() {
         match h.await {
@@ -1928,15 +1928,13 @@ async fn run_consolidation_cycle(
         let through_id = db
             .get_message_id_at_offset(session_id, prev_through_id, turns_to_summarize.saturating_sub(1))
             .await
-            .ok()
-            .flatten()
-            .unwrap_or(0);
-        if through_id > 0 {
-            if let Err(e) = db.save_summary(session_id, summary_text, through_id).await {
-                warn!(target: "db", "Failed to persist summary: {}", e);
-            }
-        }
-    }
+             .ok()
+             .flatten()
+             .unwrap_or(0);
+         if through_id > 0 && let Err(e) = db.save_summary(session_id, summary_text, through_id).await {
+             warn!(target: "db", "Failed to persist summary: {}", e);
+         }
+     }
 
     let fresh_profile = db.load_user_profile().await.unwrap_or_default();
     let fresh_profile_facts: Vec<crate::profile::ProfileFact> = fresh_profile
@@ -1994,8 +1992,8 @@ async fn consolidation_task(
             let idle_wait = if idle_consolidation_secs > 0 {
                 let elapsed = last_turn_at.elapsed().as_secs();
                 let remaining = idle_consolidation_secs.saturating_sub(elapsed);
-                // Check at most every 60s so we don't spin tight.
-                Duration::from_secs(remaining.min(60).max(1))
+               // Check at most every 60s so we don't spin tight.
+                 Duration::from_secs(remaining.clamp(1, 60))
             } else {
                 Duration::from_secs(3600) // effectively disabled
             };

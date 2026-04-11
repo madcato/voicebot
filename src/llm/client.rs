@@ -259,8 +259,7 @@ impl OpenAIClient {
 
                 buf.push_str(&String::from_utf8_lossy(&bytes));
 
-                loop {
-                    let Some(newline) = buf.find('\n') else { break };
+                while let Some(newline) = buf.find('\n') {
                     let line = buf[..newline].trim().to_string();
                     buf = buf[newline + 1..].to_string();
 
@@ -296,12 +295,11 @@ impl OpenAIClient {
                         if let Some(calls) = json["choices"][0]["delta"]["tool_calls"].as_array() {
                             if !calls.is_empty() {
                                 if let Some(call) = calls.first() {
-                                    if let Some(name) = call["function"]["name"].as_str() {
-                                        if !name.is_empty() {
+                                    if let Some(name) = call["function"]["name"].as_str()
+                                        && !name.is_empty() {
                                             tracing::debug!(target: "llm", "Tool call detected: {}", name);
                                             tool_name = Some(name.to_string());
                                         }
-                                    }
                                     if let Some(frag) = call["function"]["arguments"].as_str() {
                                         tool_args.push_str(frag);
                                     }
@@ -335,9 +333,8 @@ impl OpenAIClient {
                     // Regular content token.
                     if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
                         if content.is_empty() { continue; }
-                        if let Some(filtered) = think.process(content) {
-                            if tx.send(StreamToken::Content(filtered)).await.is_err() { return; }
-                        }
+                        if let Some(filtered) = think.process(content)
+                            && tx.send(StreamToken::Content(filtered)).await.is_err() { return; }
                     }
                 }
             }

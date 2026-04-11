@@ -2,9 +2,9 @@ use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, StreamConfig};
 use rubato::{FftFixedIn, Resampler};
-use std::sync::{Arc, Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use tracing::{info, debug};
+use std::sync::{Arc, Condvar, Mutex};
+use tracing::{debug, info};
 
 pub struct AudioOutput {
     /// `None` in the null/headless variant — `play_blocking` returns immediately.
@@ -45,7 +45,10 @@ impl AudioOutput {
             buffer_size: cpal::BufferSize::Default,
         };
 
-        Ok(Self { device: Some(device), config })
+        Ok(Self {
+            device: Some(device),
+            config,
+        })
     }
 
     /// Find an output device by name, handling duplicates (e.g. USB vs Bluetooth).
@@ -88,14 +91,20 @@ impl AudioOutput {
         );
 
         if let Some(idx) = index {
-            return candidates
-                .into_iter()
-                .nth(idx)
-                .ok_or_else(|| anyhow!("Output device index #{} out of range for '{}'", idx, name_filter));
+            return candidates.into_iter().nth(idx).ok_or_else(|| {
+                anyhow!(
+                    "Output device index #{} out of range for '{}'",
+                    idx,
+                    name_filter
+                )
+            });
         }
 
         for device in candidates {
-            let desc = device.description().map(|d| d.name().to_string()).unwrap_or_default();
+            let desc = device
+                .description()
+                .map(|d| d.name().to_string())
+                .unwrap_or_default();
             match device.default_output_config() {
                 Ok(cfg) => {
                     info!(
@@ -122,6 +131,7 @@ impl AudioOutput {
     /// Null/headless audio output — `play_blocking` discards all audio immediately.
     ///
     /// Used in tests and CI environments where no sound device is available.
+    #[allow(dead_code)]
     pub fn null() -> Self {
         Self {
             device: None,
@@ -180,13 +190,17 @@ impl AudioOutput {
     ///
     /// If this is a null/headless output (no device), returns immediately
     /// without producing any audio.
-    pub fn play_blocking(&self, samples: &[f32], source_rate: u32, cancel: &Arc<AtomicBool>) -> Result<()> {
+    pub fn play_blocking(
+        &self,
+        samples: &[f32],
+        source_rate: u32,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<()> {
         let Some(device) = &self.device else {
             return Ok(());
         };
 
-        let prepared =
-            Self::prepare(samples, source_rate, self.sample_rate(), self.channels())?;
+        let prepared = Self::prepare(samples, source_rate, self.sample_rate(), self.channels())?;
 
         if prepared.is_empty() {
             return Ok(());
@@ -208,7 +222,8 @@ impl AudioOutput {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(150);
-        let drain_samples = (self.sample_rate() as usize * self.channels() as usize) * drain_ms / 1000;
+        let drain_samples =
+            (self.sample_rate() as usize * self.channels() as usize) * drain_ms / 1000;
         let stop_pos = total + drain_samples;
 
         let buf = Arc::new(prepared);
@@ -273,17 +288,11 @@ impl AudioOutput {
 const RESAMPLE_CHUNK: usize = 1024;
 
 fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>> {
-    let expected_out =
-        (samples.len() as f64 * to_rate as f64 / from_rate as f64).ceil() as usize;
+    let expected_out = (samples.len() as f64 * to_rate as f64 / from_rate as f64).ceil() as usize;
 
-    let mut resampler = FftFixedIn::<f32>::new(
-        from_rate as usize,
-        to_rate as usize,
-        RESAMPLE_CHUNK,
-        2,
-        1,
-    )
-    .context("Failed to create resampler")?;
+    let mut resampler =
+        FftFixedIn::<f32>::new(from_rate as usize, to_rate as usize, RESAMPLE_CHUNK, 2, 1)
+            .context("Failed to create resampler")?;
 
     // Pad to a multiple of RESAMPLE_CHUNK so every chunk is full.
     let padded_len = samples.len().div_ceil(RESAMPLE_CHUNK) * RESAMPLE_CHUNK;

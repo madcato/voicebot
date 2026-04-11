@@ -94,9 +94,9 @@ impl SentenceSplitter {
 
             // Fallback: if buffer is very long without any punctuation, split at the
             // last whitespace before MAX_CHARS to avoid holding tokens indefinitely.
-            if self.buffer.len() >= EARLY_SPLIT_MAX_CHARS {
-                if let Some(pos) = self.buffer[..EARLY_SPLIT_MAX_CHARS].rfind(' ') {
-                    if pos >= EARLY_SPLIT_MIN_CHARS {
+            if self.buffer.len() >= EARLY_SPLIT_MAX_CHARS
+                && let Some(pos) = self.buffer[..EARLY_SPLIT_MAX_CHARS].rfind(' ')
+                    && pos >= EARLY_SPLIT_MIN_CHARS {
                         let sentence = self.buffer[..pos].trim().to_string();
                         self.buffer = self.buffer[pos + 1..].to_string();
                         if !sentence.is_empty() {
@@ -104,8 +104,6 @@ impl SentenceSplitter {
                             return Some(sentence);
                         }
                     }
-                }
-            }
         }
 
         None

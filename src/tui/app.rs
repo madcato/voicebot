@@ -12,12 +12,13 @@ pub enum Action {
 }
 
 /// Role label for conversation messages.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Role {
     User(InputSource),
     Assistant,
     Tool,
     Error,
+    Splash,
 }
 
 /// A single message in the conversation view.
@@ -32,8 +33,6 @@ pub struct ChatMessage {
 pub struct App {
     /// Finalized conversation messages.
     pub messages: Vec<ChatMessage>,
-    /// How many messages have been pushed to terminal scrollback via insert_before.
-    pub printed_count: usize,
     /// Current streaming assistant text (accumulates tokens).
     pub streaming_buffer: String,
     /// Current pipeline state.
@@ -53,15 +52,14 @@ pub struct App {
 impl App {
     pub fn new(conv_mode: Arc<Mutex<ConversationMode>>) -> Self {
         Self {
-            messages: Vec::new(),
-            printed_count: 0,
-            streaming_buffer: String::new(),
-            state: PipelineState::Idle,
             input: String::new(),
             cursor: 0,
+            messages: Vec::new(),
+            streaming_buffer: String::new(),
+            state: PipelineState::Idle,
             tts_enabled: true,
-            should_quit: false,
             conv_mode,
+            should_quit: false,
         }
     }
 
@@ -80,9 +78,6 @@ impl App {
             }
             TuiEvent::AssistantToken(token) => {
                 self.streaming_buffer.push_str(&token);
-                // Do not reset scroll — if the user has scrolled up to read,
-                // preserve their position. scroll == 0 already tracks the bottom
-                // dynamically as content grows.
             }
             TuiEvent::AssistantDone => {
                 if !self.streaming_buffer.is_empty() {
@@ -93,7 +88,6 @@ impl App {
                         timestamp: chrono::Local::now(),
                     });
                 }
-                // Preserve scroll position — user may be reading earlier content.
             }
             TuiEvent::Error(msg) => {
                 self.messages.push(ChatMessage {
@@ -103,7 +97,6 @@ impl App {
                 });
             }
             TuiEvent::ToolCall { name, result } => {
-                // Truncate long results for display.
                 let short = if result.len() > 120 {
                     format!("{}...", &result[..120])
                 } else {
@@ -112,6 +105,13 @@ impl App {
                 self.messages.push(ChatMessage {
                     role: Role::Tool,
                     content: format!("{name} -> {short}"),
+                    timestamp: chrono::Local::now(),
+                });
+            }
+            TuiEvent::Splash => {
+                self.messages.push(ChatMessage {
+                    role: Role::Splash,
+                    content: String::new(),
                     timestamp: chrono::Local::now(),
                 });
             }
@@ -132,9 +132,7 @@ impl App {
         };
 
         match (modifiers, code) {
-            (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc) => {
-                Some(Action::Quit)
-            }
+            (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc) => Some(Action::Quit),
             (KeyModifiers::CONTROL, KeyCode::Char('t')) => Some(Action::ToggleTts),
             (_, KeyCode::Enter) => {
                 let text = self.input.trim().to_string();
@@ -147,7 +145,6 @@ impl App {
             }
             (_, KeyCode::Backspace) => {
                 if self.cursor > 0 {
-                    // Find previous char boundary.
                     let prev = self.input[..self.cursor]
                         .char_indices()
                         .next_back()
@@ -160,7 +157,6 @@ impl App {
             }
             (_, KeyCode::Delete) => {
                 if self.cursor < self.input.len() {
-                    // Find next char boundary after cursor.
                     let next = self.input[self.cursor..]
                         .char_indices()
                         .nth(1)
