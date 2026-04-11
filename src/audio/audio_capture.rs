@@ -25,7 +25,7 @@ impl AudioCapture {
     ///
     /// # Arguments
     /// * `device_name` - Optional device name to use. If None, uses the default input device.
-    ///                   The name can be a partial match (case-insensitive).
+    ///   The name can be a partial match (case-insensitive).
     pub fn new(device_name: Option<&str>) -> Result<Self> {
         let host = cpal::default_host();
 
@@ -63,11 +63,10 @@ impl AudioCapture {
 
     /// Parse a device name that may include an index suffix: "Name#N" → ("name", Some(N))
     fn parse_device_name(name: &str) -> (&str, Option<usize>) {
-        if let Some(pos) = name.rfind('#') {
-            if let Ok(idx) = name[pos + 1..].parse::<usize>() {
+        if let Some(pos) = name.rfind('#')
+            && let Ok(idx) = name[pos + 1..].parse::<usize>() {
                 return (&name[..pos], Some(idx));
             }
-        }
         (name, None)
     }
 
@@ -139,7 +138,7 @@ impl AudioCapture {
         ))
     }
 
-    /// List all available input devices
+    // List all available input devices
     // pub fn list_devices() -> Result<Vec<String>> {
     //     let host = cpal::default_host();
     //     let devices = host

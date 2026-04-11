@@ -187,14 +187,13 @@ impl LlmSession {
 
         let mut conversation = String::new();
         for msg in &self.messages[..summarize_count] {
-            if let (Some(role), Some(content)) = (msg["role"].as_str(), msg["content"].as_str()) {
-                if role == "user" || role == "assistant" {
+            if let (Some(role), Some(content)) = (msg["role"].as_str(), msg["content"].as_str())
+                && (role == "user" || role == "assistant") {
                     conversation.push_str(role);
                     conversation.push_str(": ");
                     conversation.push_str(content);
                     conversation.push_str("\n\n");
                 }
-            }
         }
 
         Some(vec![

@@ -32,6 +32,8 @@ pub enum TuiEvent {
     ToolCall { name: String, result: String },
     /// A pipeline error occurred that the user should see.
     Error(String),
+    /// Show the VOICEBOT splash screen on first render.
+    Splash,
 }
 
 pub type TuiEventTx = mpsc::UnboundedSender<TuiEvent>;

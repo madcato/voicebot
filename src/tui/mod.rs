@@ -12,14 +12,14 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
+use crossterm::event::{self, Event};
 use ratatui::{Terminal, Viewport, backend::CrosstermBackend, widgets::Paragraph};
 
 use crate::tools::ConversationMode;
 use crate::{PipelineEvents, SharedSession};
 use app::{Action, App};
-use events::TuiEventRx;
+use events::{TuiEvent, TuiEventRx};
 use input::KeyReader;
-use ui::VIEWPORT_HEIGHT;
 
 const TICK_MS: u64 = 33; // ~30fps
 
@@ -31,31 +31,38 @@ pub async fn run(
     tts_muted: Arc<AtomicBool>,
     conv_mode: Arc<Mutex<ConversationMode>>,
 ) -> Result<()> {
-    enable_raw_mode()?;
-    // No alternate screen — use inline viewport so terminal scrollback works.
+      enable_raw_mode()?;
+    // Clear screen once at startup, then use full terminal with ratatui's built-in scrolling
+    execute!(io::stdout(), crossterm::cursor::Hide)?;
+    execute!(io::stdout(), crossterm::terminal::Clear(crossterm::terminal::ClearType::All))?;
     let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::with_options(
-        backend,
-        ratatui::TerminalOptions {
-            viewport: Viewport::Inline(VIEWPORT_HEIGHT),
-        },
-    )?;
+    let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(conv_mode);
     let mut keys = KeyReader::new();
     let tick = tokio::time::Duration::from_millis(TICK_MS);
 
-    loop {
-        // Push any new finalized messages to terminal scrollback via insert_before.
-        flush_new_messages(&mut terminal, &mut app)?;
+    // Send splash event on startup
+    app.handle_tui_event(TuiEvent::Splash);
 
-        terminal.draw(|frame| ui::render(frame, &app))?;
+    loop {
+        // Render to terminal - no manual clearing needed with proper viewport
+        terminal.draw(|frame| ui::render(frame, &mut app))?;
 
         tokio::select! {
             Some(tui_event) = event_rx.recv() => {
                 app.handle_tui_event(tui_event);
                 while let Ok(ev) = event_rx.try_recv() {
                     app.handle_tui_event(ev);
+                }
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                // Check for resize events
+                if event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
+                    if let Event::Resize(_, _) = event::read().unwrap_or(Event::Key(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Enter, crossterm::event::KeyModifiers::empty()))) {
+                        // Clear and redraw on resize - re-render everything
+                        terminal.clear().unwrap_or_default();
+                    }
                 }
             }
             key_result = keys.next() => {
@@ -93,30 +100,16 @@ pub async fn run(
 
     // Flush any remaining messages before exiting.
     flush_new_messages(&mut terminal, &mut app)?;
-    terminal.clear()?;
     disable_raw_mode()?;
     // Move cursor to a fresh line so the shell prompt appears cleanly.
     execute!(io::stdout(), crossterm::cursor::MoveToNextLine(1))?;
     Ok(())
 }
 
-/// Push messages that haven't been printed yet into the terminal scrollback buffer.
+/// No-op - messages are rendered directly by ui::render now
 fn flush_new_messages(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut App,
+    _terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    _app: &mut App,
 ) -> Result<()> {
-    while app.printed_count < app.messages.len() {
-        let msg = &app.messages[app.printed_count];
-        let width = terminal.size()?.width;
-        let lines = ui::message_lines(msg, width);
-        let height = lines.len() as u16;
-        terminal.insert_before(height, |buf| {
-            let area = buf.area();
-            use ratatui::widgets::Widget;
-            let text = ratatui::text::Text::from(lines);
-            Paragraph::new(text).render(*area, buf);
-        })?;
-        app.printed_count += 1;
-    }
     Ok(())
 }

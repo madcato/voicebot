@@ -31,7 +31,7 @@ impl AmbientBuffer {
     pub fn push(&mut self, speaker_label: String, transcript: String) {
         // Evict entries older than the rolling window.
         let cutoff = Instant::now() - self.max_duration;
-        while self.entries.front().map_or(false, |e| e.timestamp < cutoff) {
+        while self.entries.front().is_some_and(|e| e.timestamp < cutoff) {
             self.entries.pop_front();
         }
         // Evict oldest if at capacity.

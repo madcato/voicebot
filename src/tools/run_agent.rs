@@ -87,6 +87,7 @@ async fn call_agent(command: String, query: String) -> String {
 /// Strip structural lines Hermes emits even in quiet mode:
 ///   - Box borders: lines whose trimmed content starts with ╭, ╰, or │
 ///   - Session trailer: lines starting with "session_id:"
+/// 
 /// Everything else is kept; leading/trailing whitespace is removed.
 fn strip_hermes_cli_noise(raw: &str) -> String {
     let lines: Vec<&str> = raw.lines().collect();
@@ -748,6 +749,7 @@ impl HermesAcpWriter {
     }
 
     /// Create a new session (without re-initializing the process).
+    #[allow(dead_code)]
     pub async fn send_new_session(&mut self, cwd: &str) -> anyhow::Result<u64> {
         self.send_request("session/new", serde_json::json!({
             "cwd": cwd,
@@ -756,6 +758,7 @@ impl HermesAcpWriter {
     }
 
     /// Fork an existing session.
+    #[allow(dead_code)]
     pub async fn send_fork_session(&mut self, session_id: &str, cwd: &str) -> anyhow::Result<u64> {
         self.send_request("session/fork", serde_json::json!({
             "sessionId": session_id,
@@ -764,6 +767,7 @@ impl HermesAcpWriter {
     }
 
     /// Load a previous session by ID.
+    #[allow(dead_code)]
     pub async fn send_load_session(&mut self, session_id: &str, cwd: &str) -> anyhow::Result<u64> {
         self.send_request("session/load", serde_json::json!({
             "sessionId": session_id,
@@ -772,6 +776,7 @@ impl HermesAcpWriter {
     }
 
     /// Resume a suspended session.
+    #[allow(dead_code)]
     pub async fn send_resume_session(&mut self, session_id: &str, cwd: &str) -> anyhow::Result<u64> {
         self.send_request("session/resume", serde_json::json!({
             "sessionId": session_id,
@@ -780,6 +785,7 @@ impl HermesAcpWriter {
     }
 
     /// List active sessions.
+    #[allow(dead_code)]
     pub async fn send_list_sessions(&mut self, cwd: &str) -> anyhow::Result<u64> {
         self.send_request("session/list", serde_json::json!({
             "cwd": cwd
@@ -797,6 +803,7 @@ impl HermesAcpWriter {
 
 /// Tracks a single in-flight ACP task.
 pub struct ActiveAcpTask {
+    #[allow(dead_code)]
     pub session_id: String,
     /// The JSON-RPC request id for the prompt, used for cancellation.
     pub prompt_request_id: u64,
