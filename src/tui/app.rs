@@ -2,15 +2,13 @@ use std::sync::{Arc, Mutex};
 
 use super::events::{InputSource, PipelineState, TuiEvent};
 use crate::tools::ConversationMode;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 /// Action returned by key event handling.
 pub enum Action {
     Quit,
     Submit(String),
     ToggleTts,
-    ScrollUp,
-    ScrollDown,
 }
 
 /// Role label for conversation messages.
@@ -34,6 +32,8 @@ pub struct ChatMessage {
 pub struct App {
     /// Finalized conversation messages.
     pub messages: Vec<ChatMessage>,
+    /// How many messages have been pushed to terminal scrollback via insert_before.
+    pub printed_count: usize,
     /// Current streaming assistant text (accumulates tokens).
     pub streaming_buffer: String,
     /// Current pipeline state.
@@ -42,8 +42,6 @@ pub struct App {
     pub input: String,
     /// Cursor position within input.
     pub cursor: usize,
-    /// Scroll offset in conversation view (0 = bottom, positive = lines above bottom).
-    pub scroll: u16,
     /// TTS enabled.
     pub tts_enabled: bool,
     /// Whether the app should quit.
@@ -56,11 +54,11 @@ impl App {
     pub fn new(conv_mode: Arc<Mutex<ConversationMode>>) -> Self {
         Self {
             messages: Vec::new(),
+            printed_count: 0,
             streaming_buffer: String::new(),
             state: PipelineState::Idle,
             input: String::new(),
             cursor: 0,
-            scroll: 0,
             tts_enabled: true,
             should_quit: false,
             conv_mode,
@@ -79,7 +77,6 @@ impl App {
                     content: text,
                     timestamp: chrono::Local::now(),
                 });
-                self.scroll = 0; // auto-scroll to bottom
             }
             TuiEvent::AssistantToken(token) => {
                 self.streaming_buffer.push_str(&token);
@@ -104,7 +101,6 @@ impl App {
                     content: msg,
                     timestamp: chrono::Local::now(),
                 });
-                self.scroll = 0;
             }
             TuiEvent::ToolCall { name, result } => {
                 // Truncate long results for display.
@@ -118,23 +114,13 @@ impl App {
                     content: format!("{name} -> {short}"),
                     timestamp: chrono::Local::now(),
                 });
-                self.scroll = 0;
             }
         }
     }
 
     /// Process a crossterm key event. Returns an Action if one should be taken.
     pub fn handle_key_event(&mut self, event: Event) -> Option<Action> {
-        if let Event::Mouse(mouse) = event {
-            match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    self.scroll = self.scroll.saturating_add(3);
-                }
-                MouseEventKind::ScrollDown => {
-                    self.scroll = self.scroll.saturating_sub(3);
-                }
-                _ => {}
-            }
+        if let Event::Mouse(_) = event {
             return None;
         }
 
@@ -150,8 +136,6 @@ impl App {
                 Some(Action::Quit)
             }
             (KeyModifiers::CONTROL, KeyCode::Char('t')) => Some(Action::ToggleTts),
-            (_, KeyCode::PageUp) => Some(Action::ScrollUp),
-            (_, KeyCode::PageDown) => Some(Action::ScrollDown),
             (_, KeyCode::Enter) => {
                 let text = self.input.trim().to_string();
                 if text.is_empty() {
