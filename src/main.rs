@@ -49,6 +49,8 @@ pub(crate) struct SharedSession {
     pub(crate) t_vad_end: Mutex<Option<Instant>>,
     /// Timestamp of the POST sent to LLM - used to calculate TTFT
     pub(crate) t_llm_post_send: Mutex<Option<Instant>>,
+    /// Track if first sentence playback has been logged
+    first_speech_played: AtomicBool,
     /// True while the consolidation task is running. The LLM task will not
     /// process new input until this flag is cleared.
     pub(crate) consolidation_active: AtomicBool,
@@ -65,6 +67,7 @@ impl SharedSession {
             text_input_pending: AtomicBool::new(false),
             t_vad_end: Mutex::new(None),
             t_llm_post_send: Mutex::new(None),
+            first_speech_played: AtomicBool::new(false),
             consolidation_active: AtomicBool::new(false),
         }
     }
@@ -1696,7 +1699,13 @@ async fn sen_task(shared: Arc<SharedSession>, events: Arc<PipelineEvents>) {
             if !first_sentence_logged {
                 first_sentence_logged = true;
                 if let Some(t0) = shared.t_vad_end.lock().unwrap().as_ref() {
-                    info!(target: "performance", "[+{}ms] first sentence ready → TTS queue", t0.elapsed().as_millis());
+                    let tts_queue_ms = t0.elapsed().as_millis();
+                    // TTFT alternativo: tiempo desde VAD end hasta tener primer texto listo para TTS
+                    info!(target: "performance", "[+{}ms] first sentence → TTS queue", tts_queue_ms);
+                    // Latencia parcial: VAD→LLM→TTS (sin contar síntesis/playback)
+                    if let Some(t_llm_sent) = shared.t_llm_post_send.lock().unwrap().as_ref() {
+                        info!(target: "performance", "  └─ LLM processing: {}ms", t_llm_sent.elapsed().as_millis());
+                    }
                 }
             }
             shared.sentences.lock().unwrap().push_back(sentence);
@@ -1821,8 +1830,11 @@ async fn tts_task(
 
         if first_sentence {
             first_sentence = false;
+            // Mark that we've started playing the first sentence (synthesis done, playback starting)
+            shared.first_speech_played.store(true, Ordering::SeqCst);
             if let Some(t0) = shared.t_vad_end.lock().unwrap().as_ref() {
-                info!(target: "performance", "[+{}ms] Latency s2s", t0.elapsed().as_millis());
+                let latency_ms = t0.elapsed().as_millis();
+                info!(target: "performance", "[+{}ms] SpeechStart → FirstAudioPlayback", latency_ms);
             }
         }
         // Route audio: remote WebSocket if connected, otherwise local CPAL.

@@ -273,6 +273,14 @@ impl AudioOutput {
 
         stream.play().context("Failed to start output stream")?;
 
+        // Log actual playback start for first-speech timing
+        if std::env::var("RUST_LOG")
+            .unwrap_or_default()
+            .contains("performance")
+        {
+            info!(target: "performance", "  └─ Playback started on device");
+        }
+
         let (lock, cvar) = &*done;
         let mut finished = lock.lock().unwrap();
         while !*finished {
