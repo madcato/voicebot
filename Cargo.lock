@@ -243,30 +243,10 @@ dependencies = [
  "proc-macro2",
  "quote",
  "regex",
- "rustc-hash 1.1.0",
+ "rustc-hash",
  "shlex",
  "syn",
  "which",
-]
-
-[[package]]
-name = "bindgen"
-version = "0.71.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f58bf3d7db68cfbac37cfc485a8d711e87e064c3d0fe0435b92f7a407f9d6b3"
-dependencies = [
- "bitflags 2.11.0",
- "cexpr",
- "clang-sys",
- "itertools 0.13.0",
- "log",
- "prettyplease",
- "proc-macro2",
- "quote",
- "regex",
- "rustc-hash 2.1.1",
- "shlex",
- "syn",
 ]
 
 [[package]]
@@ -1009,7 +989,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eeb333310ae915d57961a6bbc67f53ef7b313a9ee80d393d55c0f27f1b65c848"
 dependencies = [
- "bindgen 0.69.5",
+ "bindgen",
  "cmake",
  "glob",
 ]
@@ -1145,12 +1125,6 @@ checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
 ]
-
-[[package]]
-name = "fs_extra"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
 name = "futures"
@@ -3288,12 +3262,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
-name = "rustc-hash"
-version = "2.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
-
-[[package]]
 name = "rustfft"
 version = "6.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3570,7 +3538,7 @@ version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "591c9432b20f41d47f622a73c2888b188c321e313d820824df7d9fa51dbada43"
 dependencies = [
- "bindgen 0.69.5",
+ "bindgen",
  "bzip2",
  "cmake",
  "dirs",
@@ -4674,7 +4642,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "voice_activity_detector",
- "whisper-rs",
+ "whisper-cpp-plus",
  "wiremock",
 ]
 
@@ -4903,24 +4871,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "whisper-rs"
-version = "0.15.1"
+name = "whisper-cpp-plus"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71ea5d2401f30f51d08126a2d133fee4c1955136519d7ac6cf6f5ac0a91e6bc8"
+checksum = "9de6b64f1ea273a0cfb4f586f20b07e7f9f4317243099192def35879143d4ead"
 dependencies = [
- "whisper-rs-sys",
+ "flate2",
+ "num_cpus",
+ "thiserror 1.0.69",
+ "whisper-cpp-plus-sys",
 ]
 
 [[package]]
-name = "whisper-rs-sys"
-version = "0.14.1"
+name = "whisper-cpp-plus-sys"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5e2a6e06e7ac7b8f53c53a5f50bb0bc823ba69b63ecd887339f807a5598bbd2"
+checksum = "631b412ee374ccbc15e46a477acfabf557d748627bd3101c335d5c2893dae6cd"
 dependencies = [
- "bindgen 0.71.1",
- "cfg-if",
+ "bindgen",
+ "cc",
  "cmake",
- "fs_extra",
+ "flate2",
+ "tar",
+ "ureq 2.12.1",
 ]
 
 [[package]]

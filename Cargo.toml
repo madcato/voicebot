@@ -47,24 +47,54 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 # Base64 encoding (screenshot → vision model)
 base64 = "0.22"
 
-# STT — whisper.cpp embedded
-# On Linux: plain CPU backend
-whisper-rs = { version = "0.15" }
+# STT — whisper-cpp-plus (true streaming audio-to-text with VAD support)
+# On macOS: enable Metal GPU acceleration for whisper-cpp-plus
+[target.'cfg(target_os = "macos")'.dependencies.whisper-cpp-plus]
+version = "0.1.4"
+features = ["metal"]
 
-# Sentence boundary detection for TTS streaming
-regex = "1"
+# On Linux: CPU-only backend  
+[target.'cfg(not(target_os = "macos"))'.dependencies.whisper-cpp-plus]
+version = "0.1.4"
+
+[dependencies.regex]
+version = "1"
 
 # TTS — Kokoro (optional, enable with: cargo build --features kokoro)
 # Requires: brew install espeak-ng
 # Models: kokoro-v1.0.onnx + voices-v1.0.bin (download from HuggingFace)
-kokorox = { version = "0.1", optional = true }
+[dependencies.kokorox]
+version = "0.1"
+optional = true
 
 # Speaker verification (optional, enable with: cargo build --features speaker)
 # Requires: models/speaker_embedding.onnx (sherpa-onnx speaker-id model)
-sherpa-rs = { version = "0.6.8", optional = true }
+[dependencies.sherpa-rs]
+version = "0.6.8"
+optional = true
 
-# TTS — macOS AVSpeechSynthesizer native bindings (optional, enable with: cargo build --features avspeech)
-# Uses objc2 for safe ObjC FFI into AVFAudio framework.
+# TUI — terminal user interface (optional, enable with: cargo build --features tui)
+[target.'cfg(not(target_os = "macos"))'.dependencies.ratatui]
+version = "0.29"
+optional = true
+
+[target.'cfg(not(target_os = "macos"))'.dependencies.crossterm]
+version = "0.28"
+features = ["event-stream"]
+optional = true
+
+# Remote device WebSocket server (optional, enable with: cargo build --features remote)
+[target.'cfg(not(target_os = "macos"))'.dependencies.axum]
+version = "0.8"
+features = ["ws"]
+optional = true
+
+[target.'cfg(not(target_os = "macos"))'.dependencies.tower]
+version = "0.5"
+optional = true
+
+# macOS-specific dependencies
+[target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", optional = true }
 block2 = { version = "0.6", optional = true }
 objc2-foundation = { version = "0.3", features = ["NSString", "NSArray"], optional = true }
@@ -75,12 +105,8 @@ objc2-avf-audio = { version = "0.3.1", features = [
     "AVAudioTypes",        # AVAudioFrameCount
     "block2",              # DynBlock callback type for writeUtterance:toBufferCallback:
 ], optional = true }
-
-# TUI — terminal user interface (optional, enable with: cargo build --features tui)
 ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", features = ["event-stream"], optional = true }
-
-# Remote device WebSocket server (optional, enable with: cargo build --features remote)
 axum = { version = "0.8", features = ["ws"], optional = true }
 tower = { version = "0.5", optional = true }
 
@@ -91,11 +117,6 @@ avspeech = ["dep:objc2", "dep:block2", "dep:objc2-foundation", "dep:objc2-avf-au
 tui = ["dep:ratatui", "dep:crossterm"]
 remote = ["dep:axum", "dep:tower"]
 
-# On macOS: enable CoreML (Neural Engine) + Metal GPU acceleration for whisper
-# CoreML requires models/ggml-<name>-encoder.mlmodelc alongside the .bin file
-[target.'cfg(target_os = "macos")'.dependencies]
-whisper-rs = { version = "0.15", features = ["coreml", "metal"] }
-
 [[bin]]
 name = "voicebot"
 path = "src/main.rs"
@@ -105,8 +126,8 @@ name = "acp_agent_chat"
 path = "src/bin/acp_agent_chat.rs"
 
 [[bin]]
-name = "bench_pipeline"
-path = "src/bin/bench_pipeline.rs"
+name = "test_stt_plus"
+path = "src/bin/test_stt_plus.rs"
 
 [dependencies.hound]
 version = "3"

@@ -12,13 +12,13 @@ if [[ -f "$SCRIPT_DIR/.env" ]]; then
     set +a
 fi
 
-# WHISPER_COREML=1 RUST_LOG=info exec cargo run --release --bin voicebot --features avspeech,tui -- "$@"
+WHISPER_COREML=1 RUST_LOG=info exec cargo run --release --bin voicebot --features avspeech,tui -- "$@" 2>/dev/null
 
 ## STT Performance
-# WHISPER_COREML=1 RUST_LOG=performance=debug exec cargo run --release --bin voicebot --features avspeech,tui -- "$@"
+# WHISPER_COREML=1 RUST_LOG=performance=debug exec cargo run --release --bin voicebot --features avspeech,tui -- "$@" 2>/dev/null
 
 ## Performance
-# RUST_LOG=performance=info exec cargo run --release --bin voicebot --features avspeech,tui -- "$@"
+# WHISPER_COREML=1 RUST_LOG=performance=info exec cargo run --release --bin voicebot --features avspeech,tui -- "$@" 2>/dev/null
 
 ## Tools and agent debugging
-RUST_LOG=pipeline=debug,llm=debug,tools=debug,agent=debug exec cargo run --release --bin voicebot --features avspeech,tui -- "$@"
+# WHISPER_COREML=1 RUST_LOG=pipeline=debug,llm=debug,tools=debug,agent=debug exec cargo run --release --bin voicebot --features avspeech,tui -- "$@" 2>/dev/null
