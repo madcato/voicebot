@@ -38,6 +38,17 @@ pub struct Config {
     /// result is ready (or nearly ready) by SpeechEnd. Default: 500ms.
     /// Set to 0 to disable speculative submission entirely.
     pub stt_submit_interval_ms: u32,
+    /// A1 Conservative Early Reuse: enable checking for ready speculative results
+    /// before waiting for the final complete decode. Default: false (disabled).
+    pub stt_early_reuse_enabled: bool,
+    /// A1 Conservative Early Reuse: minimum tokens to consider an early result valid.
+    /// Results shorter than this are ignored and we wait for the final decode.
+    /// Default: 6 tokens.
+    pub stt_early_min_tokens: usize,
+    /// A1 Conservative Early Reuse: require terminal punctuation (. ! ?) on early
+    /// results. If true, incomplete sentences are not reused even if they meet
+    /// the token threshold. Default: true.
+    pub stt_early_require_punctuation: bool,
 
     // ── LLM ──────────────────────────────────────────────────────────────────
     /// LLM server base URL (OpenAI-compatible, default http://127.0.0.1:8000 for mlx-lm)
@@ -238,20 +249,31 @@ impl Config {
                 .parse()
                 .context("Invalid WHISPER_THREADS")?,
             stt_min_submit_ms: env::var("STT_MIN_SUBMIT_MS")
-                .unwrap_or_else(|_| "1000".to_string())
+                .unwrap_or_else(|_| "800".to_string())
                 .parse()
                 .context("Invalid STT_MIN_SUBMIT_MS")?,
             stt_submit_interval_ms: env::var("STT_SUBMIT_INTERVAL_MS")
-                .unwrap_or_else(|_| "500".to_string())
+                .unwrap_or_else(|_| "400".to_string())
                 .parse()
                 .context("Invalid STT_SUBMIT_INTERVAL_MS")?,
+            // A1 Conservative Early Reuse (reserved for future use)
+            stt_early_reuse_enabled: env::var("STT_EARLY_REUSE_ENABLED")
+                .unwrap_or_else(|_| "false".to_string())
+                .parse()
+                .context("Invalid STT_EARLY_REUSE_ENABLED")?,
+            stt_early_min_tokens: env::var("STT_EARLY_MIN_TOKENS")
+                .unwrap_or_else(|_| "6".to_string())
+                .parse()
+                .context("Invalid STT_EARLY_MIN_TOKENS")?,
+            stt_early_require_punctuation: env::var("STT_EARLY_REQUIRE_PUNCTUATION")
+                .unwrap_or_else(|_| "true".to_string())
+                .parse()
+                .context("Invalid STT_EARLY_REQUIRE_PUNCTUATION")?,
 
             // LLM
-            llm_url: env::var("LLM_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:8000".to_string()),
+            llm_url: env::var("LLM_URL").unwrap_or_else(|_| "http://127.0.0.1:8000".to_string()),
             llm_api_key: env::var("LLM_API_KEY").unwrap_or_default(),
-            llm_model: env::var("LLM_MODEL")
-                .unwrap_or_else(|_| "local-model".to_string()),
+            llm_model: env::var("LLM_MODEL").unwrap_or_else(|_| "local-model".to_string()),
             llm_max_tokens: env::var("LLM_MAX_TOKENS")
                 .unwrap_or_else(|_| "200".to_string())
                 .parse()
@@ -272,8 +294,7 @@ impl Config {
                 .context("Invalid LLM_TEMPERATURE")?,
 
             // TTS
-            tts_provider: env::var("TTS_PROVIDER")
-                .unwrap_or_else(|_| "avspeech".to_string()),
+            tts_provider: env::var("TTS_PROVIDER").unwrap_or_else(|_| "avspeech".to_string()),
             avspeech_voice: env::var("AVSPEECH_VOICE")
                 .unwrap_or_else(|_| "Jorge (Enhanced)".to_string()),
             avspeech_rate: env::var("AVSPEECH_RATE")
@@ -284,10 +305,8 @@ impl Config {
                 .unwrap_or_else(|_| "models/kokoro-v1.0.onnx".to_string()),
             kokoro_voices: env::var("KOKORO_VOICES")
                 .unwrap_or_else(|_| "models/voices-v1.0.bin".to_string()),
-            kokoro_voice: env::var("KOKORO_VOICE")
-                .unwrap_or_else(|_| "af_bella".to_string()),
-            kokoro_language: env::var("KOKORO_LANGUAGE")
-                .unwrap_or_else(|_| "en-us".to_string()),
+            kokoro_voice: env::var("KOKORO_VOICE").unwrap_or_else(|_| "af_bella".to_string()),
+            kokoro_language: env::var("KOKORO_LANGUAGE").unwrap_or_else(|_| "en-us".to_string()),
 
             // Context consolidation
             llm_context_tokens: env::var("LLM_CONTEXT_TOKENS")
@@ -433,8 +452,7 @@ impl Config {
                 .context("Invalid WS_PORT")?,
 
             // DB
-            db_path: env::var("DB_PATH")
-                .unwrap_or_else(|_| "data/voicebot.db".to_string()),
+            db_path: env::var("DB_PATH").unwrap_or_else(|_| "data/voicebot.db".to_string()),
         })
     }
 
@@ -463,7 +481,10 @@ mod tests {
     fn system_prompt_uses_default_when_env_var_absent() {
         temp_env::with_var("LLM_SYSTEM_PROMPT", None::<&str>, || {
             let config = Config::from_env().unwrap();
-            assert!(!config.llm_system_prompt.is_empty(), "default must not be empty");
+            assert!(
+                !config.llm_system_prompt.is_empty(),
+                "default must not be empty"
+            );
             // The default is the built-in Spanish assistant prompt.
             assert!(
                 config.llm_system_prompt.contains("asistente"),
@@ -531,8 +552,7 @@ mod tests {
             let system_prompt = config.llm_system_prompt.clone();
 
             // Step 3: create session (mirrors main.rs line 95-100)
-            let mut session =
-                LlmSession::new(&system_prompt);
+            let mut session = LlmSession::new(&system_prompt);
             session.add_user_turn("¿Qué hora es?");
 
             // Step 4: verify the payload that would be sent to the LLM
@@ -591,7 +611,9 @@ mod tests {
                 msgs[0].content
             );
             assert!(msgs[0].content.contains("[CONVERSATION SUMMARY]"));
-            assert!(msgs[0].content.contains("Resumen de la conversación anterior."));
+            assert!(msgs[0]
+                .content
+                .contains("Resumen de la conversación anterior."));
         });
     }
 }

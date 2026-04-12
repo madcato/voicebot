@@ -112,7 +112,7 @@ use crate::llm::{OpenAIClient, LlmSession, StreamToken};
 use crate::memory::{build_memory_context, extract_memories};
 use crate::profile::{build_profile_context, ProfileFact};
 use crate::stt::{WhisperStt, SttStream};
-use whisper_rs::install_logging_hooks;
+// whisper-cpp-plus logs directly via printf (no config hooks available)
 use crate::tools::{
     format_history, ActiveAcpTask, ConversationMode, CurrentTimeTool, HermesAcpWriter, JsonRpcMessage,
     McpToolProxy, OpenAppTool, ReadClipboardTool, RunAgentTool, RunShellTool, SetClipboardTool,
@@ -193,8 +193,8 @@ fn build_system_prompt(
 }
 
 async fn async_main() -> Result<()> {
-    // Disable whisper prints into console
-    install_logging_hooks();
+    // whisper-cpp-plus logs directly via printf/stderr (no hooks available)
+    // install_logging_hooks(); // Removed - not available in whisper-cpp-plus
 
     #[cfg(feature = "tui")]
     {
@@ -1182,15 +1182,16 @@ async fn async_main() -> Result<()> {
                         // Submit audio to STT for all speakers — ambient buffer
                         // needs transcripts from non-main speakers too.
                         let utterance_id = utterance_epoch.load(Ordering::SeqCst);
-                        let min_stt_gen = stt_stream.submit(audio, utterance_id);
+                        stt_stream.submit(audio.clone(), utterance_id); // fire-and-forget background transcription
 
                         // ── Non-main speaker: buffer transcript, skip LLM ─────
                         if !is_main_speaker {
                             let stt_c = Arc::clone(&stt_stream);
                             let amb_c = Arc::clone(&ambient_buffer);
                             let label = speaker_label.clone();
+                            let audio_for_task = audio.clone();
                             tokio::spawn(async move {
-                                if let Ok(text) = stt_c.await_result(min_stt_gen).await {
+                                if let Ok(text) = stt_c.await_result(audio_for_task).await {
                                     if !text.is_empty() {
                                         amb_c.lock().unwrap().push(label.clone(), text.clone());
                                         debug!(target: "pipeline", "Ambient buffer ← {label}: {text}");
@@ -1209,8 +1210,9 @@ async fn async_main() -> Result<()> {
                         // ── ACP permission gate ───────────────────────────────
                         if let Some(resp_tx) = pending_agent_question.take() {
                             let stt_c = Arc::clone(&stt_stream);
+                            let audio_for_task = audio.clone();
                             tokio::spawn(async move {
-                                let answer = stt_c.await_result(min_stt_gen).await.unwrap_or_default();
+                                let answer = stt_c.await_result(audio_for_task).await.unwrap_or_default();
                                 let outcome = map_answer_to_outcome(&answer);
                                 info!(target: "acp", "Permission answer: {:?} → {}", answer, outcome);
                                 let _ = resp_tx.send(outcome);
@@ -1227,8 +1229,9 @@ async fn async_main() -> Result<()> {
                         let conv_mode_c  = Arc::clone(&conv_mode);
                         let epoch        = utterance_epoch.load(Ordering::SeqCst);
                         let epoch_ref    = Arc::clone(&utterance_epoch);
+                        let audio_for_task = audio.clone();
                         tokio::spawn(async move {
-                            let text = match stt_c.await_result(min_stt_gen).await {
+                            let text = match stt_c.await_result(audio_for_task).await {
                                 Err(_e) => {
                                     shared_c.sentences.lock().unwrap()
                                         .push_back("Lo siento, hubo un error al procesar tu voz.".to_string());
@@ -2109,7 +2112,7 @@ const MAX_TOOL_ITERATIONS: usize = 5;
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn run_pipeline(
-    _min_stt_gen: u64,
+    _audio: Vec<f32>,
     _stt_stream: Arc<crate::stt::SttStream>,
     _cancel: Arc<AtomicBool>,
     tts: Arc<crate::tts::TtsEngine>,
@@ -2131,7 +2134,7 @@ async fn run_pipeline(
 ) {
     use std::sync::atomic::Ordering;
 
-    let transcript = match _stt_stream.await_result(_min_stt_gen).await {
+    let transcript = match _stt_stream.await_result(_audio).await {
         Ok(t) => t,
         Err(_) => return,
     };
