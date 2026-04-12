@@ -83,7 +83,7 @@ fn render_splash(text: &str, width: usize) -> Vec<Line<'static>> {
 
     // Add splash content with blue styling
     for line in text.lines() {
-        let trimmed = line.trim().to_string();
+        let trimmed = line.trim_end().to_string();
         if !trimmed.is_empty() {
             lines.push(Line::from(vec![
                 Span::raw("│ "),
@@ -145,12 +145,13 @@ pub fn message_lines(msg: &ChatMessage, width: u16) -> Vec<Line<'static>> {
         Role::Splash => {
             // Splash screen - show VOICEBOT ASCII art
             let splash_text = r#"
-  __  __          _              ___         _ 
- |  \/  |___ _  _(_)__ _ _  _   / __|___ _ _ | |
- | |\/| / _ \ || | / _` | || | | (_ / -_) ' \|_|
- |_| |_\___/\_,_|_\__, |\_, |  \___\___|_||_(_) 
-                   |___/ |__/                    
- "#;
+  _    _     _            ______             
+ | |  | |   (_)          (____  \       _    
+ | |  | |__  _  ____ ____ ____)  ) ___ | |_  
+  \ \/ / _ \| |/ ___) _  )  __  ( / _ \|  _) 
+   \  / |_| | ( (__( (/ /| |__)  ) |_| | |__ 
+    \/ \___/|_|\____)____)______/ \___/ \___)
+"#;
             lines.extend(render_splash(splash_text, w));
         }
         Role::User(source) => {
