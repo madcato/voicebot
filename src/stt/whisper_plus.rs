@@ -9,29 +9,43 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 use whisper_cpp_plus::{FullParams, SamplingStrategy, WhisperContext, WhisperState};
 
+/// Check if whisper-cpp-plus verbose output should be suppressed.
+/// Set WHISPER_SILENCE=1 to silence all whisper.cpp logs (Metal init, GPU detection, etc.)
+fn should_silence_whisper_logs() -> bool {
+    std::env::var("WHISPER_SILENCE")
+        .map(|v| v == "1" || v.to_lowercase() == "true" || v.to_lowercase() == "yes")
+        .unwrap_or(false)
+}
+
 pub struct WhisperSttPlus {
     ctx: Arc<WhisperContext>,
     language: String,
     threads: u32,
+    /// If true, suppress verbose whisper.cpp output (Metal/GPU initialization logs)
+    silence_logs: bool,
 }
 
 impl WhisperSttPlus {
     pub fn new(model_path: &str, language: &str, threads: u32) -> Result<Self> {
+        let silence_logs = should_silence_whisper_logs();
+
         let ctx = WhisperContext::new(model_path)
             .context("Failed to load Whisper model from whisper-cpp-plus")?;
 
         tracing::info!(
             target: "stt",
-            "Whisper model loaded via whisper-cpp-plus: {} (language: {}, threads: {})",
+            "Whisper model loaded via whisper-cpp-plus: {} (language: {}, threads: {}{})",
             model_path,
             language,
-            if threads == 0 { "auto".to_string() } else { threads.to_string() }
+            if threads == 0 { "auto".to_string() } else { threads.to_string() },
+            if silence_logs { ", logs silenced" } else { "" }
         );
 
         Ok(Self {
             ctx: Arc::new(ctx),
             language: language.to_string(),
             threads,
+            silence_logs,
         })
     }
 
@@ -50,6 +64,9 @@ impl WhisperSttPlus {
         // Create a fresh state for each transcription (safe and thread-local)
         let mut state = self.ctx.create_state()?;
 
+        // Note: WHISPER_SILENCE only affects initialization logs from whisper.cpp C++ backend
+        // (Metal/GPU detection). These are printed via printf before Rust code runs.
+        // The print_* flags below suppress per-inference output during transcription.
         let params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 })
             .language(&self.language)
             .print_special(false)
@@ -91,7 +108,12 @@ impl WhisperSttPlus {
     /// Create streaming transcriptor for incremental processing during speech.
     /// This is the KEY feature for true low-latency streaming.
     pub fn create_streamer(&self) -> WhisperStreamer {
-        WhisperStreamer::new(Arc::clone(&self.ctx), &self.language, self.threads)
+        WhisperStreamer::new(
+            Arc::clone(&self.ctx),
+            &self.language,
+            self.threads,
+            self.silence_logs,
+        )
     }
 }
 
@@ -103,11 +125,12 @@ pub struct WhisperStreamer {
     state: WhisperState,
     language: String,
     threads: u32,
+    silence_logs: bool,
     accumulated_audio: Vec<f32>,
 }
 
 impl WhisperStreamer {
-    fn new(ctx: Arc<WhisperContext>, language: &str, threads: u32) -> Self {
+    fn new(ctx: Arc<WhisperContext>, language: &str, threads: u32, silence_logs: bool) -> Self {
         let state = ctx
             .create_state()
             .expect("Failed to create state for streamer");
@@ -117,6 +140,7 @@ impl WhisperStreamer {
             state,
             language: language.to_string(),
             threads,
+            silence_logs,
             accumulated_audio: Vec::new(),
         }
     }
@@ -153,6 +177,9 @@ impl WhisperStreamer {
     }
 
     fn transcribe_accumulated(&mut self) -> Result<()> {
+        // Note: WHISPER_SILENCE only affects initialization logs from whisper.cpp C++ backend
+        // (Metal/GPU detection). These are printed via printf before Rust code runs.
+        // The print_* flags below suppress per-inference output during transcription.
         let params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 })
             .language(&self.language)
             .print_special(false)
