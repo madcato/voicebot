@@ -21,7 +21,7 @@ pub struct WhisperSttPlus {
     ctx: Arc<WhisperContext>,
     language: String,
     threads: u32,
-    /// If true, suppress verbose whisper.cpp output (Metal/GPU initialization logs)
+    #[allow(dead_code)]
     silence_logs: bool,
 }
 
@@ -56,6 +56,7 @@ impl WhisperSttPlus {
     }
 
     /// Transcribe with prompt context (for speculative/continuation scenarios).
+    #[allow(dead_code)]
     pub fn transcribe_with_prompt(&self, audio: &[f32], prompt: &str) -> Result<String> {
         self.transcribe_with_prompt_internal(audio, prompt)
     }
@@ -107,6 +108,7 @@ impl WhisperSttPlus {
 
     /// Create streaming transcriptor for incremental processing during speech.
     /// This is the KEY feature for true low-latency streaming.
+    #[allow(dead_code)]
     pub fn create_streamer(&self) -> WhisperStreamer {
         WhisperStreamer::new(
             Arc::clone(&self.ctx),
@@ -119,6 +121,7 @@ impl WhisperSttPlus {
 
 /// Streaming whisper processor — feeds audio chunks incrementally
 /// and gets partial transcripts as decoding progresses.
+#[allow(dead_code)]
 pub struct WhisperStreamer {
     #[allow(dead_code)] // kept for future streaming features
     ctx: Arc<WhisperContext>,
@@ -129,6 +132,7 @@ pub struct WhisperStreamer {
     accumulated_audio: Vec<f32>,
 }
 
+#[allow(dead_code)]
 impl WhisperStreamer {
     fn new(ctx: Arc<WhisperContext>, language: &str, threads: u32, silence_logs: bool) -> Self {
         let state = ctx

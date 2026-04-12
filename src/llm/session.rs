@@ -14,6 +14,7 @@ impl Message {
     pub fn user(content: impl Into<String>) -> Self {
         Self { role: "user".into(), content: content.into() }
     }
+    #[allow(dead_code)]
     pub fn assistant(content: impl Into<String>) -> Self {
         Self { role: "assistant".into(), content: content.into() }
     }
@@ -111,6 +112,7 @@ impl LlmSession {
     /// Returns `Vec<Message>` for callers that need the legacy struct format.
     /// Tool-call messages (null content) are skipped since `Message` cannot
     /// represent them — they are only relevant to the OpenAI API format.
+    #[allow(dead_code)]
     pub fn all_messages(&self) -> Vec<Message> {
         let mut msgs = vec![Message::system(self.system_content())];
         for m in &self.messages {
@@ -167,6 +169,7 @@ impl LlmSession {
     /// Uses chars/3.5 as a rough token estimate. Triggers at 75% of the limit.
     /// Kept for backward compatibility — prefer [`needs_consolidation`] with an
     /// explicit threshold percentage.
+    #[allow(dead_code)]
     pub fn needs_summarization(&self, context_limit_tokens: usize) -> bool {
         self.needs_consolidation(context_limit_tokens, 75)
     }

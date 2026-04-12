@@ -4,7 +4,6 @@ use std::collections::VecDeque;
 pub struct AudioBuffer {
     buffer: VecDeque<f32>,
     max_size: usize,
-    sample_rate: u32,
 }
 
 impl AudioBuffer {
@@ -13,7 +12,6 @@ impl AudioBuffer {
         Self {
             buffer: VecDeque::with_capacity(max_size),
             max_size,
-            sample_rate,
         }
     }
 
@@ -27,11 +25,6 @@ impl AudioBuffer {
         }
     }
 
-    /// Get all buffered samples
-    pub fn get_samples(&self) -> Vec<f32> {
-        self.buffer.iter().copied().collect()
-    }
-
     /// Clear the buffer
     pub fn clear(&mut self) {
         self.buffer.clear();
@@ -41,11 +34,6 @@ impl AudioBuffer {
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.buffer.len()
-    }
-
-    /// Get buffer duration in milliseconds
-    pub fn duration_ms(&self) -> u32 {
-        ((self.buffer.len() as f32 / self.sample_rate as f32) * 1000.0) as u32
     }
 
     #[allow(dead_code)]

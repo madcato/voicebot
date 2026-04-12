@@ -3,8 +3,7 @@ use block2::RcBlock;
 use core::ptr::NonNull;
 use objc2::rc::autoreleasepool;
 use objc2_avf_audio::{
-    AVAudioBuffer, AVAudioPCMBuffer, AVSpeechSynthesizer, AVSpeechSynthesisVoice,
-    AVSpeechUtterance,
+    AVAudioBuffer, AVAudioPCMBuffer, AVSpeechSynthesisVoice, AVSpeechSynthesizer, AVSpeechUtterance,
 };
 use objc2_foundation::NSString;
 use std::sync::{Arc, Condvar, Mutex};
@@ -55,15 +54,15 @@ impl AvSpeechTts {
     /// `rate` — normalized speech rate [0.0, 1.0]. 0.5 is the system default (~180 wpm).
     /// Use ~0.55 for ~215 wpm.
     pub fn new(voice_name: &str, rate: f32) -> Result<Self> {
-        let identifier = find_voice_identifier(voice_name)
-            .with_context(|| format!(
+        let identifier = find_voice_identifier(voice_name).with_context(|| {
+            format!(
                 "Voice '{}' not found — run `say -v ?` to list available voices",
                 voice_name
-            ))?;
+            )
+        })?;
 
         // Probe the sample rate by synthesizing a minimal utterance.
-        let sample_rate = probe_sample_rate(&identifier, rate)
-            .unwrap_or(22050);
+        let sample_rate = probe_sample_rate(&identifier, rate).unwrap_or(22050);
 
         tracing::info!(
             target: "tts",
@@ -71,7 +70,11 @@ impl AvSpeechTts {
             voice_name, identifier, rate, sample_rate
         );
 
-        Ok(Self { voice_identifier: identifier, rate, sample_rate })
+        Ok(Self {
+            voice_identifier: identifier,
+            rate,
+            sample_rate,
+        })
     }
 
     /// Synthesize `text` into mono f32 PCM samples at `self.sample_rate` Hz.
@@ -101,7 +104,9 @@ impl AvSpeechTts {
                 let lang = voice.language().to_string();
                 let identifier = voice.identifier().to_string();
                 let quality = match voice.quality() {
-                    q if q == objc2_avf_audio::AVSpeechSynthesisVoiceQuality::Enhanced => "Enhanced",
+                    q if q == objc2_avf_audio::AVSpeechSynthesisVoiceQuality::Enhanced => {
+                        "Enhanced"
+                    }
                     q if q == objc2_avf_audio::AVSpeechSynthesisVoiceQuality::Premium => "Premium",
                     _ => "Default",
                 };
@@ -110,15 +115,27 @@ impl AvSpeechTts {
                     g if g == objc2_avf_audio::AVSpeechSynthesisVoiceGender::Female => "Female",
                     _ => "Unspecified",
                 };
-                entries.push((name, lang, quality.to_string(), gender.to_string(), identifier));
+                entries.push((
+                    name,
+                    lang,
+                    quality.to_string(),
+                    gender.to_string(),
+                    identifier,
+                ));
             }
             entries.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
 
             println!("Available voices for TTS provider: avspeech");
-            println!("{:<30} {:<10} {:<10} {:<12} {}", "Name", "Language", "Quality", "Gender", "Identifier");
+            println!(
+                "{:<30} {:<10} {:<10} {:<12} {}",
+                "Name", "Language", "Quality", "Gender", "Identifier"
+            );
             println!("{}", "-".repeat(100));
             for (name, lang, quality, gender, identifier) in &entries {
-                println!("{:<30} {:<10} {:<10} {:<12} {}", name, lang, quality, gender, identifier);
+                println!(
+                    "{:<30} {:<10} {:<10} {:<12} {}",
+                    name, lang, quality, gender, identifier
+                );
             }
             println!("\nTotal: {} voices", entries.len());
         });
@@ -158,37 +175,32 @@ fn synth_sample_rate(identifier: &str, rate: f32) -> Option<u32> {
     let rate_cb = Arc::clone(&rate_cell);
     let pair_cb = Arc::clone(&pair);
 
-    let block = RcBlock::new(move |buf: NonNull<AVAudioBuffer>| {
-        unsafe {
-            let pcm = buf.cast::<AVAudioPCMBuffer>().as_ref();
-            let frame_length = pcm.frameLength();
+    let block = RcBlock::new(move |buf: NonNull<AVAudioBuffer>| unsafe {
+        let pcm = buf.cast::<AVAudioPCMBuffer>().as_ref();
+        let frame_length = pcm.frameLength();
 
-            if frame_length == 0 {
-                let (lock, cvar) = &*pair_cb;
-                *lock.lock().unwrap() = true;
-                cvar.notify_one();
-                return;
-            }
+        if frame_length == 0 {
+            let (lock, cvar) = &*pair_cb;
+            *lock.lock().unwrap() = true;
+            cvar.notify_one();
+            return;
+        }
 
-            if rate_cb.lock().unwrap().is_none() {
-                let sr = pcm.format().sampleRate() as u32;
-                *rate_cb.lock().unwrap() = Some(sr);
-            }
+        if rate_cb.lock().unwrap().is_none() {
+            let sr = pcm.format().sampleRate() as u32;
+            *rate_cb.lock().unwrap() = Some(sr);
         }
     });
 
-    let block_ptr = RcBlock::as_ptr(&block)
-        as *mut block2::DynBlock<dyn Fn(NonNull<AVAudioBuffer>)>;
+    let block_ptr =
+        RcBlock::as_ptr(&block) as *mut block2::DynBlock<dyn Fn(NonNull<AVAudioBuffer>)>;
 
     // Dispatch synthesis onto the main queue and wait for completion.
     let synth_handle = dispatch_synth_on_main(".", identifier, rate, block_ptr);
 
     let (lock, cvar) = &*pair;
-    let _result = cvar.wait_timeout_while(
-        lock.lock().unwrap(),
-        Duration::from_secs(5),
-        |done| !*done,
-    );
+    let _result =
+        cvar.wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(5), |done| !*done);
 
     // Drop synthesizer and block now that callbacks are done.
     drop(synth_handle);
@@ -205,40 +217,36 @@ fn synth_text(text: &str, identifier: &str, rate: f32) -> Result<Vec<f32>> {
     let samples_cb = Arc::clone(&samples);
     let pair_cb = Arc::clone(&pair);
 
-    let block = RcBlock::new(move |buf: NonNull<AVAudioBuffer>| {
-        unsafe {
-            let pcm = buf.cast::<AVAudioPCMBuffer>().as_ref();
-            let frame_length = pcm.frameLength() as usize;
+    let block = RcBlock::new(move |buf: NonNull<AVAudioBuffer>| unsafe {
+        let pcm = buf.cast::<AVAudioPCMBuffer>().as_ref();
+        let frame_length = pcm.frameLength() as usize;
 
-            if frame_length == 0 {
-                let (lock, cvar) = &*pair_cb;
-                *lock.lock().unwrap() = true;
-                cvar.notify_one();
-                return;
-            }
-
-            let channel_ptrs = pcm.floatChannelData();
-            if channel_ptrs.is_null() {
-                return;
-            }
-            let ch0: *const f32 = (*channel_ptrs).as_ptr();
-            let slice = std::slice::from_raw_parts(ch0, frame_length);
-            samples_cb.lock().unwrap().extend_from_slice(slice);
+        if frame_length == 0 {
+            let (lock, cvar) = &*pair_cb;
+            *lock.lock().unwrap() = true;
+            cvar.notify_one();
+            return;
         }
+
+        let channel_ptrs = pcm.floatChannelData();
+        if channel_ptrs.is_null() {
+            return;
+        }
+        let ch0: *const f32 = (*channel_ptrs).as_ptr();
+        let slice = std::slice::from_raw_parts(ch0, frame_length);
+        samples_cb.lock().unwrap().extend_from_slice(slice);
     });
 
-    let block_ptr = RcBlock::as_ptr(&block)
-        as *mut block2::DynBlock<dyn Fn(NonNull<AVAudioBuffer>)>;
+    let block_ptr =
+        RcBlock::as_ptr(&block) as *mut block2::DynBlock<dyn Fn(NonNull<AVAudioBuffer>)>;
 
     // Dispatch synthesis onto the main queue and wait for completion.
     let synth_handle = dispatch_synth_on_main(text, identifier, rate, block_ptr);
 
     let (lock, cvar) = &*pair;
-    let result = cvar.wait_timeout_while(
-        lock.lock().unwrap(),
-        Duration::from_secs(30),
-        |done| !*done,
-    ).unwrap();
+    let result = cvar
+        .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(30), |done| !*done)
+        .unwrap();
 
     if result.1.timed_out() {
         tracing::warn!(target: "tts", "AvSpeechTts: synthesis timed out for {:?}", text);
@@ -256,6 +264,7 @@ fn synth_text(text: &str, identifier: &str, rate: f32) -> Result<Vec<f32>> {
 /// Opaque wrapper so we can send the synthesizer pointer across threads.
 /// The synthesizer is created on the main thread and dropped by the caller
 /// after all callbacks have fired.
+#[allow(dead_code)]
 struct SynthHandle(*mut std::ffi::c_void);
 unsafe impl Send for SynthHandle {}
 
@@ -294,7 +303,11 @@ fn dispatch_synth_on_main(
     let ctx_ptr = Box::into_raw(ctx) as *mut std::ffi::c_void;
 
     unsafe {
-        dispatch_async_f(std::ptr::addr_of!(DISPATCH_MAIN_Q), ctx_ptr, synth_trampoline);
+        dispatch_async_f(
+            std::ptr::addr_of!(DISPATCH_MAIN_Q),
+            ctx_ptr,
+            synth_trampoline,
+        );
     }
     synth_out
 }

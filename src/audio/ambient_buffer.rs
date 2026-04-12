@@ -45,10 +45,6 @@ impl AmbientBuffer {
         });
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
     /// Format buffered entries as a `[Contexto reciente]` block for the LLM.
     /// Returns `None` if the buffer is empty.
     pub fn format_context(&self) -> Option<String> {
@@ -69,19 +65,39 @@ pub fn has_referential(text: &str) -> bool {
     let lower = text.to_lowercase();
     // Spanish referentials
     let es = [
-        "eso", "esa", "ese", "esto", "aquello",
-        "lo que dijo", "lo que dijeron", "lo que decían",
-        "lo que dijiste", "lo que mencionó", "lo que mencionaron",
-        "de qué hablan", "de qué hablaban", "qué dijeron",
-        "qué dijo", "qué decían",
+        "eso",
+        "esa",
+        "ese",
+        "esto",
+        "aquello",
+        "lo que dijo",
+        "lo que dijeron",
+        "lo que decían",
+        "lo que dijiste",
+        "lo que mencionó",
+        "lo que mencionaron",
+        "de qué hablan",
+        "de qué hablaban",
+        "qué dijeron",
+        "qué dijo",
+        "qué decían",
     ];
     // English referentials
     let en = [
-        "that thing", "what they said", "what he said", "what she said",
-        "what they were", "what was that", "what is that",
-        "what are they", "that particle", "that topic",
+        "that thing",
+        "what they said",
+        "what he said",
+        "what she said",
+        "what they were",
+        "what was that",
+        "what is that",
+        "what are they",
+        "that particle",
+        "that topic",
     ];
-    es.iter().chain(en.iter()).any(|&phrase| lower.contains(phrase))
+    es.iter()
+        .chain(en.iter())
+        .any(|&phrase| lower.contains(phrase))
 }
 
 #[cfg(test)]
@@ -92,7 +108,10 @@ mod tests {
     fn push_and_format() {
         let mut buf = AmbientBuffer::new(10, 3);
         buf.push("Speaker_1".to_string(), "Hola, ¿cómo estás?".to_string());
-        buf.push("Ambiente".to_string(), "Scientists discovered a new particle.".to_string());
+        buf.push(
+            "Ambiente".to_string(),
+            "Scientists discovered a new particle.".to_string(),
+        );
 
         let ctx = buf.format_context().unwrap();
         assert!(ctx.contains("[Contexto reciente]"));

@@ -13,7 +13,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode},
 };
 use crossterm::event::{self, Event};
-use ratatui::{Terminal, Viewport, backend::CrosstermBackend, widgets::Paragraph};
+use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::tools::ConversationMode;
 use crate::{PipelineEvents, SharedSession};

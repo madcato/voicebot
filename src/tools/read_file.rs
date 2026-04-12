@@ -4,12 +4,14 @@ use super::Tool;
 
 /// Maximum bytes returned from a single file read.
 /// Large enough for most source files; prevents overwhelming the LLM context.
+#[allow(dead_code)]
 const MAX_BYTES: usize = 16 * 1024; // 16 KB
 
 /// Reads the contents of a file and returns them as text.
 ///
 /// Binary files are detected by the presence of null bytes and rejected.
 /// Output is capped at `MAX_BYTES` with a truncation notice.
+#[allow(dead_code)]
 pub struct ReadFileTool;
 
 #[async_trait]
@@ -84,6 +86,7 @@ impl Tool for ReadFileTool {
 }
 
 /// Expands a leading `~` to the user's home directory.
+#[allow(dead_code)]
 fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/")
         && let Ok(home) = std::env::var("HOME") {

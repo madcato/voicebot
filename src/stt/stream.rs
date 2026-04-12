@@ -9,25 +9,27 @@ use crate::stt::whisper_plus::WhisperSttPlus;
 /// - await_result(audio) does immediate synchronous transcription
 pub struct SttStream {
     stt: Arc<WhisperSttPlus>,
+    #[allow(dead_code)]
     epoch: AtomicU64,
 }
 
 impl SttStream {
-    pub fn new(stt: Arc<WhisperSttPlus>) -> Arc<Self> {
-        Arc::new(Self {
-            stt,
-            epoch: AtomicU64::new(0),
-        })
-    }
-
-    /// Get current utterance epoch
+    #[allow(dead_code)]
     pub fn get_epoch(&self) -> u64 {
         self.epoch.load(Ordering::SeqCst)
     }
 
     /// Increment epoch (called at SpeechStart)
+    #[allow(dead_code)]
     pub fn next_epoch(&self) -> u64 {
         self.epoch.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn new(stt: Arc<WhisperSttPlus>) -> Arc<Self> {
+        Arc::new(Self {
+            stt,
+            epoch: AtomicU64::new(0),
+        })
     }
 
     /// Warm up the model (JIT compilation on first inference)
