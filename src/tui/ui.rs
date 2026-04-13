@@ -368,7 +368,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         PipelineState::Idle => ("● IDLE", Color::Rgb(100, 100, 100)),
         PipelineState::Listening => ("● LISTENING", Color::Green),
         PipelineState::Transcribing => ("● TRANSCRIBING", Color::Yellow),
-        PipelineState::Thinking => ("● THINKING", Color::Blue),
+        PipelineState::Thinking => ("● THINKING", Color::Rgb(100, 100, 255)),
         PipelineState::Speaking => ("● SPEAKING", Color::Magenta),
     };
 
