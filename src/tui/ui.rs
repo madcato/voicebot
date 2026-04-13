@@ -43,30 +43,38 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 fn render_message_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut all_lines: Vec<Line<'static>> = vec![];
 
-    // Render each message (oldest to newest)
     for msg in app.messages.iter() {
         let lines = message_lines(msg, area.width);
         all_lines.extend(lines);
         all_lines.push(Line::raw(""));
     }
 
-    // Add streaming buffer AFTER messages — appears at bottom during streaming
     if !app.streaming_buffer.is_empty() {
         let streaming_lines = render_streaming_lines(&app.streaming_buffer, area.width as usize);
         all_lines.extend(streaming_lines);
         all_lines.push(Line::raw(""));
     }
 
-    // Auto-scroll: only clip if content exceeds viewport height
+    app.total_lines = all_lines.len();
+
     let visible_height = area.height as usize;
-    let display = if all_lines.len() <= visible_height {
-        Text::from(all_lines)
+    let total_lines = all_lines.len();
+
+    let max_scroll = total_lines.saturating_sub(visible_height);
+    let scroll_offset = if total_lines > visible_height {
+        if app.scroll_lock {
+            app.scroll_offset.min(max_scroll) as u16
+        } else {
+            max_scroll as u16
+        }
     } else {
-        let skip = all_lines.len() - visible_height;
-        Text::from(all_lines[skip..].to_vec())
+        0u16
     };
 
-    frame.render_widget(Paragraph::new(display), area);
+    frame.render_widget(
+        Paragraph::new(Text::from(all_lines)).scroll((scroll_offset, 0u16)),
+        area,
+    );
 }
 
 /// Render the VOICEBOT splash screen (blue, centered).
@@ -159,9 +167,8 @@ pub fn message_lines(msg: &ChatMessage, width: u16) -> Vec<Line<'static>> {
                 InputSource::Voice => "voice",
                 InputSource::Text => "text",
             };
-            let time = msg.timestamp.format("%H:%M:%S").to_string();
+            let time = msg.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
 
-            // User message header
             lines.push(Line::from(vec![
                 Span::raw("┌ "),
                 Span::styled(
@@ -174,14 +181,13 @@ pub fn message_lines(msg: &ChatMessage, width: u16) -> Vec<Line<'static>> {
                 Span::styled(time, Style::default().fg(Color::Rgb(100, 100, 100))),
             ]));
 
-            // User message content with border - wrap at width-2 (for "│ " prefix)
             for content_line in msg.content.lines() {
                 let wrapped = word_wrap_plain(content_line, w.saturating_sub(2));
                 for line in wrapped {
                     lines.push(Line::from(vec![Span::raw("│ "), Span::raw(line)]));
                 }
             }
-            // Add closing border line if we have content lines
+
             let content_lines = msg.content.lines().count();
             if content_lines > 0 {
                 lines.push(Line::from(vec![
@@ -192,9 +198,8 @@ pub fn message_lines(msg: &ChatMessage, width: u16) -> Vec<Line<'static>> {
             }
         }
         Role::Assistant => {
-            let time = msg.timestamp.format("%H:%M:%S").to_string();
+            let time = msg.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
 
-            // Assistant message header
             lines.push(Line::from(vec![
                 Span::raw("┌ "),
                 Span::styled(
@@ -207,14 +212,13 @@ pub fn message_lines(msg: &ChatMessage, width: u16) -> Vec<Line<'static>> {
                 Span::styled(time, Style::default().fg(Color::Rgb(100, 100, 100))),
             ]));
 
-            // Assistant message content with border - wrap at width-2 (for "│ " prefix)
             for content_line in msg.content.lines() {
                 let wrapped = word_wrap_plain(content_line, w.saturating_sub(2));
                 for line in wrapped {
                     lines.push(Line::from(vec![Span::raw("│ "), Span::raw(line)]));
                 }
             }
-            // Add closing border line if we have content lines
+
             let content_lines = msg.content.lines().count();
             if content_lines > 0 {
                 lines.push(Line::from(vec![
@@ -235,9 +239,8 @@ pub fn message_lines(msg: &ChatMessage, width: u16) -> Vec<Line<'static>> {
             }
         }
         Role::Error => {
-            let time = msg.timestamp.format("%H:%M:%S").to_string();
+            let time = msg.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
 
-            // Error header
             lines.push(Line::from(vec![
                 Span::raw("┌ "),
                 Span::styled(
@@ -248,17 +251,16 @@ pub fn message_lines(msg: &ChatMessage, width: u16) -> Vec<Line<'static>> {
                 Span::styled(time, Style::default().fg(Color::Rgb(100, 100, 100))),
             ]));
 
-            // Error content with border - wrap at width-2 (for "│ " prefix)
             for content_line in msg.content.lines() {
                 let wrapped = word_wrap_plain(content_line, w.saturating_sub(2));
                 for line in wrapped {
                     lines.push(Line::from(vec![
-                        Span::raw("│ "),
+                        Span::styled("│ ", Style::default().fg(Color::Red)),
                         Span::styled(line, Style::default().fg(Color::Red)),
                     ]));
                 }
             }
-            // Add closing border line if we have content lines
+
             let content_lines = msg.content.lines().count();
             if content_lines > 0 {
                 lines.push(Line::from(vec![

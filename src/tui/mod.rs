@@ -32,7 +32,7 @@ pub async fn run(
     conv_mode: Arc<Mutex<ConversationMode>>,
 ) -> Result<()> {
       enable_raw_mode()?;
-    // Clear screen once at startup, then use full terminal with ratatui's built-in scrolling
+    execute!(io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
     execute!(io::stdout(), crossterm::cursor::Hide)?;
     execute!(io::stdout(), crossterm::terminal::Clear(crossterm::terminal::ClearType::All))?;
     let backend = CrosstermBackend::new(io::stdout());
@@ -100,6 +100,7 @@ pub async fn run(
 
     // Flush any remaining messages before exiting.
     flush_new_messages(&mut terminal, &mut app)?;
+    execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen)?;
     disable_raw_mode()?;
     // Move cursor to a fresh line so the shell prompt appears cleanly.
     execute!(io::stdout(), crossterm::cursor::MoveToNextLine(1))?;
