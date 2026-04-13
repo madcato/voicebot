@@ -6,8 +6,26 @@
 /// - Lower latency (~400-700ms vs ~1000-1500ms)
 /// - Built-in VAD support (though we keep Silero for event callbacks)
 use anyhow::{Context, Result};
+use std::borrow::Cow;
 use std::sync::Arc;
 use whisper_cpp_plus::{FullParams, SamplingStrategy, WhisperContext, WhisperState};
+
+/// Minimum audio length fed to Whisper. Audio shorter than this is padded with
+/// trailing silence so the model has enough context to decode short utterances
+/// reliably ("yes", "ok", "sí", etc.).
+const MIN_AUDIO_SAMPLES: usize = 16_000; // 1 second at 16 kHz
+
+/// Pad `audio` with trailing zeros if shorter than `min_samples`.
+/// Returns a `Cow` to avoid allocation when padding is not needed.
+fn pad_to_min_duration(audio: &[f32], min_samples: usize) -> Cow<'_, [f32]> {
+    if audio.len() >= min_samples {
+        Cow::Borrowed(audio)
+    } else {
+        let mut padded = audio.to_vec();
+        padded.resize(min_samples, 0.0);
+        Cow::Owned(padded)
+    }
+}
 
 /// Check if whisper-cpp-plus verbose output should be suppressed.
 /// Set WHISPER_SILENCE=1 to silence all whisper.cpp logs (Metal init, GPU detection, etc.)
@@ -65,10 +83,13 @@ impl WhisperSttPlus {
         // Create a fresh state for each transcription (safe and thread-local)
         let mut state = self.ctx.create_state()?;
 
+        // Pad audio to minimum duration so short utterances decode reliably
+        let audio = pad_to_min_duration(audio, MIN_AUDIO_SAMPLES);
+
         // Note: WHISPER_SILENCE only affects initialization logs from whisper.cpp C++ backend
         // (Metal/GPU detection). These are printed via printf before Rust code runs.
         // The print_* flags below suppress per-inference output during transcription.
-        let params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 })
+        let params = FullParams::new(SamplingStrategy::Greedy { best_of: 0 })
             .language(&self.language)
             .print_special(false)
             .print_progress(false)
@@ -87,7 +108,7 @@ impl WhisperSttPlus {
             params = params.n_threads(self.threads as i32);
         }
 
-        state.full(params, audio)?;
+        state.full(params, &audio)?;
 
         // Collect text from all segments
         let num_segments = state.full_n_segments();
@@ -184,7 +205,7 @@ impl WhisperStreamer {
         // Note: WHISPER_SILENCE only affects initialization logs from whisper.cpp C++ backend
         // (Metal/GPU detection). These are printed via printf before Rust code runs.
         // The print_* flags below suppress per-inference output during transcription.
-        let params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 })
+        let params = FullParams::new(SamplingStrategy::Greedy { best_of: 0 })
             .language(&self.language)
             .print_special(false)
             .print_progress(false)
