@@ -34,9 +34,13 @@ impl VoiceActivityDetector {
             .chunk_size(VAD_FRAME_SIZE)
             .build()?;
 
-        // Each Silero frame is VAD_FRAME_SIZE samples at 16kHz = 32ms.
-        let silence_frames_needed = ((silence_ms as f32 / 32.0).round() as u32).max(1);
-        tracing::debug!(target: "audio", "VAD silence threshold: {}ms ({} frames)", silence_ms, silence_frames_needed);
+        // One Silero frame = 512 samples @ 16kHz = 32ms of actual time.
+        // To detect silence_ms worth of silence, we count Silero frames.
+        // Example: 500ms silence ÷ 32ms per frame ≈ 16 consecutive silent frames.
+        let silero_frame_duration_ms = (VAD_FRAME_SIZE as f32 / VAD_SAMPLE_RATE as f32) * 1000.0;
+        let silence_frames_needed =
+            ((silence_ms as f32 / silero_frame_duration_ms).round() as u32).max(1);
+        tracing::debug!(target: "audio", "VAD silence threshold: {}ms ({} Silero frames, each {}ms)", silence_ms, silence_frames_needed, silero_frame_duration_ms as u32);
 
         Ok(Self {
             detector,

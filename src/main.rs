@@ -1201,14 +1201,14 @@ async fn async_main() -> Result<()> {
                             continue;
                         }
 
-                        // ── Finalize streaming STT segment ───────────────────────────────
-                        // Each VAD segment becomes one independent user message to LLM.
-                        // If LLM is busy, enqueue in pending_messages instead of interrupting.
-                        let segment_text = match whisper_streamer.take() {
-                            None => String::new(),
-                            Some(mut s) => s.finalize().unwrap_or_default(),
-                        };
+                        // ── Await STT result from background submission ───────────────────────────────
+                        // Audio was submitted at line 1166; now await the result asynchronously.
+                        // This avoids blocking the audio capture thread during transcription.
+                        let segment_text = stt_stream.await_result(audio.clone()).await.unwrap_or_default();
                         debug!(target: "stt", "Segment final: {}", segment_text);
+                        
+                        // Clear the streaming state for this utterance
+                        whisper_streamer = None;
 
                         if segment_text.trim().is_empty() {
                             debug!(target: "pipeline", "Empty transcription — skipping");
