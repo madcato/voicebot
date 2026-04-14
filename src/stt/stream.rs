@@ -62,12 +62,21 @@ impl SttStream {
     /// Transcribe audio synchronously. Returns immediately with result.
     /// This is the fast path for final transcription when VAD ends.
     pub async fn await_result(&self, audio: Vec<f32>) -> anyhow::Result<String> {
+        use std::time::Instant;
+        
+        let t0 = Instant::now();
+        let audio_len = audio.len();
         let stt = Arc::clone(&self.stt);
         
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             stt.transcribe_complete(&audio)
         })
-        .await?
+        .await?;
+        
+        tracing::info!(target: "stt", "await_result: audio_samples={}, duration_ms={}", 
+            audio_len, t0.elapsed().as_millis());
+        
+        Ok(result?)
     }
 }
 

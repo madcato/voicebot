@@ -543,3 +543,23 @@ Built with:
 *Voice is the future of computing.*
 
 </div>
+
+## Building with CoreML Support
+
+To use Apple's Neural Engine (ANE) via CoreML for faster encoding:
+
+```bash
+# Clean previous build
+cargo clean -p whisper-cpp-plus-sys
+
+# Build with CoreML enabled  
+CARGO_CFG_WHISPER_USE_COREML=1 WHISPER_USE_COREML=1 \
+  cargo build --release --features metal
+```
+
+**Requirements:**
+- You must have `<model>-encoder.mlmodelc` in your models directory
+- For `ggml-large-v3-turbo.bin`, you need `ggml-large-v3-turbo-encoder.mlmodelc`
+- CoreML provides ANE acceleration (faster than GPU for encoding)
+
+Your current setup already has the CoreML encoder files in `models/`.

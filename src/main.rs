@@ -1160,22 +1160,18 @@ async fn async_main() -> Result<()> {
                             }
                         }
 
-                        // Submit audio to STT for all speakers — ambient buffer
-                        // needs transcripts from non-main speakers too.
-                        let utterance_id = utterance_epoch.load(Ordering::SeqCst);
-                        stt_stream.submit(audio.clone(), utterance_id); // fire-and-forget background transcription
-
-                        // ── Non-main speaker: buffer transcript, skip LLM ─────
+                        // ── Non-main speaker: spawn background transcription to avoid blocking main flow ─────
                         if !is_main_speaker {
                             let stt_c = Arc::clone(&stt_stream);
                             let amb_c = Arc::clone(&ambient_buffer);
                             let label = speaker_label.clone();
                             let audio_for_task = audio.clone();
                             tokio::spawn(async move {
+                                let t0 = Instant::now();
                                 if let Ok(text) = stt_c.await_result(audio_for_task).await {
                                     if !text.is_empty() {
                                         amb_c.lock().unwrap().push(label.clone(), text.clone());
-                                        debug!(target: "pipeline", "Ambient buffer ← {label}: {text}");
+                                        debug!(target: "pipeline", "Ambient buffer ← {label}: {text} ({}ms)", t0.elapsed().as_millis());
                                     }
                                 }
                             });
@@ -1193,7 +1189,9 @@ async fn async_main() -> Result<()> {
                             let stt_c = Arc::clone(&stt_stream);
                             let audio_for_task = audio.clone();
                             tokio::spawn(async move {
+                                let t0 = Instant::now();
                                 let answer = stt_c.await_result(audio_for_task).await.unwrap_or_default();
+                                info!(target: "acp", "STT for permission question took {}ms", t0.elapsed().as_millis());
                                 let outcome = map_answer_to_outcome(&answer);
                                 info!(target: "acp", "Permission answer: {:?} → {}", answer, outcome);
                                 let _ = resp_tx.send(outcome);
@@ -1201,10 +1199,12 @@ async fn async_main() -> Result<()> {
                             continue;
                         }
 
-                        // ── Await STT result from background submission ───────────────────────────────
-                        // Audio was submitted at line 1166; now await the result asynchronously.
-                        // This avoids blocking the audio capture thread during transcription.
+                        // ── Main user: await STT result directly (no redundancy) ───────────────────────
+                        let t_stt_start = Instant::now();
                         let segment_text = stt_stream.await_result(audio.clone()).await.unwrap_or_default();
+                        let stt_elapsed_ms = t_stt_start.elapsed().as_millis();
+                        info!(target: "performance", "[+{}ms] STT transcription complete (audio={}samples, {}chars)", 
+                            stt_elapsed_ms, audio.len(), segment_text.len());
                         debug!(target: "stt", "Segment final: {}", segment_text);
                         
                         // Clear the streaming state for this utterance
