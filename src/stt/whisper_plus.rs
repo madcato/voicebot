@@ -80,15 +80,25 @@ impl WhisperSttPlus {
     }
 
     fn transcribe_with_prompt_internal(&self, audio: &[f32], prompt: &str) -> Result<String> {
-        // Create a fresh state for each transcription (safe and thread-local)
+        use std::time::Instant;
+
+        let t0 = Instant::now();
         let mut state = self.ctx.create_state()?;
+        let state_creation_ms = t0.elapsed().as_millis();
 
-        // Pad audio to minimum duration so short utterances decode reliably
+        let t0 = Instant::now();
         let audio = pad_to_min_duration(audio, MIN_AUDIO_SAMPLES);
+        let padding_ms = t0.elapsed().as_millis();
 
-        // Note: WHISPER_SILENCE only affects initialization logs from whisper.cpp C++ backend
-        // (Metal/GPU detection). These are printed via printf before Rust code runs.
-        // The print_* flags below suppress per-inference output during transcription.
+        let t0 = Instant::now();
+        // Optimized parameters for speed vs accuracy trade-off
+        // - Greedy with best_of=1 (fastest)
+        // - n_threads from config (or auto)
+        // - single_segment=true for short utterances
+        // Optimized parameters for speed vs accuracy trade-off
+        // - Greedy with best_of=0 (fastest single decode)
+        // - single_segment=true for short utterances
+        // - No timestamps overhead
         let params = FullParams::new(SamplingStrategy::Greedy { best_of: 0 })
             .language(&self.language)
             .print_special(false)
@@ -107,8 +117,17 @@ impl WhisperSttPlus {
         if self.threads > 0 {
             params = params.n_threads(self.threads as i32);
         }
+        // If threads == 0, whisper.cpp uses its default (auto-detect)
 
+        let params_setup_ms = t0.elapsed().as_millis();
+
+        let t0 = Instant::now();
         state.full(params, &audio)?;
+        let inference_ms = t0.elapsed().as_millis();
+
+        let total_ms = state_creation_ms + padding_ms + params_setup_ms + inference_ms;
+        tracing::info!(target: "stt", "transcribe_complete: state={}ms, inference={}ms, TOTAL={}ms, audio_samples={}, result_chars={}", 
+            state_creation_ms, inference_ms, total_ms, audio.len(), MIN_AUDIO_SAMPLES);
 
         // Collect text from all segments
         let num_segments = state.full_n_segments();
@@ -172,21 +191,27 @@ impl WhisperStreamer {
 
     /// Feed audio chunk incrementally. Returns None until enough audio accumulates.
     pub fn feed_chunk(&mut self, chunk: &[f32]) -> Result<Option<String>> {
+        use std::time::Instant;
+
         // Accumulate audio
         self.accumulated_audio.extend_from_slice(chunk);
 
-        // Need at least ~500ms of audio before first transcription attempt
         const MIN_AUDIO_SAMPLES: usize = 8_000; // 500ms @ 16kHz
 
         if self.accumulated_audio.len() < MIN_AUDIO_SAMPLES {
             return Ok(None);
         }
 
-        // Perform transcription on accumulated audio so far
+        let t0 = Instant::now();
         self.transcribe_accumulated()?;
+        let transcribe_ms = t0.elapsed().as_millis();
 
-        // Get current result (partial or complete)
+        let t0 = Instant::now();
         let text = self.get_current_result()?;
+        let get_result_ms = t0.elapsed().as_millis();
+
+        tracing::debug!(target: "stt", "feed_chunk: accumulate={}, total_audio={}, transcribe={}ms, get_result={}ms",
+            chunk.len(), self.accumulated_audio.len(), transcribe_ms, get_result_ms);
 
         Ok(Some(text))
     }
