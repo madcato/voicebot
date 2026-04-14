@@ -119,7 +119,7 @@ use crate::db::{Database, Memory};
 use crate::llm::{OpenAIClient, LlmSession, StreamToken};
 use crate::memory::{build_memory_context, extract_memories};
 use crate::profile::{build_profile_context, ProfileFact};
-use crate::stt::{WhisperStt, SttStream};
+use crate::stt::{WhisperSTTVAD, WhisperSTTVADConfig, SpeechEvent};
 // whisper-cpp-plus logs directly via printf (no config hooks available)
 use crate::tools::{
     format_history, ActiveAcpTask, ConversationMode, CurrentTimeTool, HermesAcpWriter, JsonRpcMessage,
@@ -591,29 +591,16 @@ async fn async_main() -> Result<()> {
         }
     }
 
-    // ── STT (whisper) ─────────────────────────────────────────────────────────
-    let whisper_model = config.whisper_model.clone();
-    let whisper_language = config.language.clone();
-    let whisper_threads = config.whisper_threads;
-    let stt = tokio::task::spawn_blocking(move || {
-        WhisperStt::new(&whisper_model, &whisper_language, whisper_threads)
-    })
-    .await??;
-    let stt = Arc::new(stt);
-
-    // Always-running STT: Whisper starts as soon as the user begins speaking
-    // so the result is ready (or nearly ready) when VAD fires SpeechEnd.
-    // SttStream owns a dedicated OS thread for all Whisper calls (CoreML
-    // thread-affinity).
-    let stt_stream = SttStream::new(Arc::clone(&stt));
-
-    // Warm up CoreML/ANE on the dedicated Whisper thread: the first inference
-    // triggers JIT compilation and kernel caching on the ANE (10-30s).
-    // Running silence through the encoder now prevents the first real utterance
-    // from stalling the pipeline.
-    info!(target: "stt", "Warming up Whisper CoreML (ANE JIT)…");
-    stt_stream.warmup().await;
-    info!(target: "stt", "Whisper warmup done");
+    // ── STT + VAD unified processor ────────────────────────────────────────────
+    let sttvad_config = WhisperSTTVADConfig {
+        whisper_model: config.whisper_model.clone(),
+        vad_model: config.vad_model.clone(),
+        language: config.language.clone(),
+        silence_ms: config.vad_silence_ms,
+    };
+    let mut sttvad = WhisperSTTVAD::new(sttvad_config)?;
+    info!(target: "stt", "Initialized unified WhisperSTTVAD (whisper: {}, vad: {})", 
+        config.whisper_model, config.vad_model);
 
     // ── Speaker verifier ──────────────────────────────────────────────────────
     let mut speaker_verifier: Option<SpeakerVerifier> =
@@ -722,30 +709,16 @@ async fn async_main() -> Result<()> {
     let (tx, rx) = bounded(AUDIO_CHANNEL_CAPACITY);
     let _stream = audio_capture.start_capture(tx.clone(), samples_per_chunk)?;
 
-    let mut vad = SttVoiceActivityDetector::new(&config.vad_model, config.vad_silence_ms)?;
-    info!(target: "vad", "Initialized whisper-cpp-plus VAD with model: {}", config.vad_model);
+    // Event channel for STT+VAD events  
+    let (stt_tx, mut stt_rx) = mpsc::channel::<SpeechEvent>(32);
+    
     let mut speech_buffer = AudioBuffer::new(source_sample_rate, MAX_SPEECH_BUFFER_SECS);
-    let mut pre_roll: VecDeque<Vec<f32>> = VecDeque::with_capacity(PRE_ROLL_CHUNKS + 1);
     let mut t_speech_start: Option<Instant> = None;
 
     // ── Continuous audio accumulation ─────────────────────────────────────────
-    // speech_buffer is no longer cleared at SpeechEnd; it accumulates audio
-    // across short mid-thought pauses so all speech reaches Whisper as one chunk.
-    // It is cleared at the next SpeechStart only after a turn has been committed
-    // (i.e. add_user_turn was called in run_pipeline).
     let turn_commit_counter = Arc::new(AtomicU64::new(0));
     let mut last_cleared_commit: u64 = 0;
-    // Sample count in speech_buffer at the start of the current speech segment
-    // (recorded before pre-roll is flushed).  Used to trim old committed audio
-    // when a turn commits mid-segment.
     let mut speech_buffer_start_offset: usize = 0;
-
-    // ── Streaming STT ─────────────────────────────────────────────────────────
-    // WhisperStreamer persists across all utterances in the session. Each VAD
-    // segment produces one independent user message. If LLM is busy when a segment
-    // ends, the transcription is queued for next available LLM slot.
-    let mut whisper_streamer: Option<crate::stt::whisper_plus::WhisperStreamer> =
-        None;
 
     // ── Ambient state machine ─────────────────────────────────────────────────
     // Counts consecutive VAD segments where the speaker was NOT the enrolled user.
@@ -1004,125 +977,146 @@ async fn async_main() -> Result<()> {
                     chunk.samples
                 };
 
-                match vad.process(&mono) {
-                    VadEvent::SpeechStart => {
-                        t_speech_start = Some(Instant::now());
-                        info!(target: "performance", "[+0ms] SpeechStart");
-                        #[cfg(feature = "tui")]
-                        tui_tx.send(tui::events::TuiEvent::StateChange(
-                            tui::events::PipelineState::Listening,
-                        )).ok();
-                        last_speech_at = Instant::now();
+                // Process audio through unified STT+VAD - dispatches events asynchronously
+                sttvad.process_audio(&mono, &stt_tx).await.ok();
 
-                        // Always fire VAD_DETECTED on new speech to cancel active LLM/TTS.
-                        // This ensures Option B behavior: user speaking always interrupts LLM.
-                        info!(target: "pipeline", "SpeechStart — firing VAD_DETECTED");
-                        events.cancel_tx.send(()).ok();
-                        play_cancel.store(true, Ordering::SeqCst);
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                        play_cancel.store(false, Ordering::SeqCst);
-                        if let Some(announcement) = current_agent_announcement.take() {
-                            info!(target: "pipeline", "SpeechStart interrupted agent announcement — re-queueing");
-                            pending_agent_results.push_front(announcement);
-                        }
+                // Consume events from the channel immediately
+                while let Ok(event) = stt_rx.try_recv() {
+                    match event {
+                        SpeechEvent::SpeechStart => {
+                            t_speech_start = Some(Instant::now());
+                            info!(target: "performance", "[+0ms] SpeechStart");
+                            #[cfg(feature = "tui")]
+                            tui_tx.send(tui::events::TuiEvent::StateChange(
+                                tui::events::PipelineState::Listening,
+                            )).ok();
+                            last_speech_at = Instant::now();
 
-                        // If a turn was committed since the last clear, start fresh.
-                        let current_commits = turn_commit_counter.load(Ordering::SeqCst);
-                        if current_commits > last_cleared_commit {
-                            speech_buffer.clear();
-                            last_cleared_commit = current_commits;
-                        }
-                        speech_buffer_start_offset = speech_buffer.sample_count();
-
-                        for pre in pre_roll.drain(..) {
-                            speech_buffer.push(&pre);
-                        }
-                        speech_buffer.push(&mono);
-
-                        // Create fresh WhisperStreamer for this VAD segment.
-                        whisper_streamer = Some(stt.create_streamer().unwrap());
-
-                        // Invalidate any stale STT→vad_finish tasks from prior utterance.
-                        utterance_epoch.fetch_add(1, Ordering::SeqCst);
-                    }
-                    VadEvent::Speech => {
-                        speech_buffer.push(&mono);
-
-                        // Feed streaming chunks to WhisperStreamer for progressive transcription.
-                        if let Some(ref mut streamer) = whisper_streamer {
-                            if let Ok(Some(partial)) = streamer.feed_chunk(&mono) {
-                                debug!(target: "stt", "Partial: {}", partial);
+                            // Always fire VAD_DETECTED on new speech to cancel active LLM/TTS.
+                            info!(target: "pipeline", "SpeechStart — firing VAD_DETECTED");
+                            events.cancel_tx.send(()).ok();
+                            play_cancel.store(true, Ordering::SeqCst);
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                            play_cancel.store(false, Ordering::SeqCst);
+                            if let Some(announcement) = current_agent_announcement.take() {
+                                info!(target: "pipeline", "SpeechStart interrupted agent announcement — re-queueing");
+                                pending_agent_results.push_front(announcement);
                             }
+
+                            // If a turn was committed since the last clear, start fresh.
+                            let current_commits = turn_commit_counter.load(Ordering::SeqCst);
+                            if current_commits > last_cleared_commit {
+                                speech_buffer.clear();
+                                last_cleared_commit = current_commits;
+                            }
+                            speech_buffer_start_offset = speech_buffer.sample_count();
+                            speech_buffer.push(&mono);
+
+                            // Invalidate any stale results from prior utterance.
+                            utterance_epoch.fetch_add(1, Ordering::SeqCst);
                         }
-                    }
-                    VadEvent::SpeechEnd => {
-                        speech_buffer.push(&mono);
-                        pre_roll.clear();
-
-                        let segment_duration_ms = t_speech_start.as_ref()
-                            .map(|t| t.elapsed().as_millis() as u32)
-                            .unwrap_or(0);
-
-                        if segment_duration_ms < MIN_SPEECH_DURATION_MS {
-                            debug!(target: "pipeline", "Too short ({}ms), skipping", segment_duration_ms);
-                            continue;
+                        SpeechEvent::Speech(partial_text) => {
+                            speech_buffer.push(&mono);
+                            debug!(target: "stt", "Partial: {}", partial_text);
+                            // #[cfg(feature = "tui")]
+                            // tui_tx.send(tui::events::TuiEvent::UserMessage(partial_text, InputSource::Voice)).ok();
                         }
+                        SpeechEvent::SpeechEnd(final_stream_text) => {
+                            speech_buffer.push(&mono);
 
-                        let current_commits = turn_commit_counter.load(Ordering::SeqCst);
-                        if current_commits > last_cleared_commit {
-                            last_cleared_commit = current_commits;
-                        }
-                        // Always slice from speech_buffer_start_offset (set at SpeechStart).
-                        // The old fallback `get_samples()` returned the entire buffer when no
-                        // turn was committed, causing audio to grow unboundedly across utterances.
-                        let audio = speech_buffer.get_samples_from(speech_buffer_start_offset);
-                        let duration_ms = audio.len() as u32 * 1000 / source_sample_rate;
+                            let segment_duration_ms = t_speech_start.as_ref()
+                                .map(|t| t.elapsed().as_millis() as u32)
+                                .unwrap_or(0);
 
-                        info!(target: "pipeline", "Speech: {}ms (segment {}ms)", duration_ms, segment_duration_ms);
-                        #[cfg(feature = "tui")]
-                        tui_tx.send(tui::events::TuiEvent::StateChange(
-                            tui::events::PipelineState::Transcribing,
-                        )).ok();
-                        let vad_elapsed = t_speech_start.take()
-                            .map(|t| t.elapsed().as_millis()).unwrap_or(0);
-                        info!(target: "performance", "[+{}ms] VAD end ({}ms speech)", vad_elapsed, duration_ms);
-                        *shared.t_vad_end.lock().unwrap() = Some(Instant::now());
+                            if segment_duration_ms < MIN_SPEECH_DURATION_MS {
+                                debug!(target: "pipeline", "Too short ({}ms), skipping", segment_duration_ms);
+                                continue;
+                            }
 
-                        last_speech_at = Instant::now();
+                            let current_commits = turn_commit_counter.load(Ordering::SeqCst);
+                            if current_commits > last_cleared_commit {
+                                last_cleared_commit = current_commits;
+                            }
+                            let audio = speech_buffer.get_samples_from(speech_buffer_start_offset);
+                            let duration_ms = audio.len() as u32 * 1000 / source_sample_rate;
 
-                        // ── Speaker verification ──────────────────────────────
-                        // Determines whether this segment is from the main user
-                        // (id=0) or someone else. Non-main speakers are buffered
-                        // for context but never routed to the LLM directly.
-                        let mut is_main_speaker = true;
-                        let mut speaker_label = "Usuario".to_string();
-
-                        if let Some(ref mut sv) = speaker_verifier {
-                            match sv.verify(config.sample_rate, &audio) {
-                                SpeakerVerdict::Enrolled { id, ref label } => {
-                                    speaker_label = label.clone();
-                                    if id == 0 {
-                                        info!(target: "speaker", "Main speaker enrolled — processing utterance");
-                                        non_user_streak = 0;
-                                    } else {
-                                        info!(target: "speaker", "Speaker {} enrolled — buffering", label);
-                                        is_main_speaker = false;
-                                    }
+                            info!(target: "pipeline", "Speech: {}ms (segment {}ms)", duration_ms, segment_duration_ms);
+                            
+                            // Use streaming transcription result - it's already complete when SpeechEnd fires
+                            let mut segment_text = final_stream_text;
+                            
+                            // Fallback to transcribe_complete if streaming didn't produce text
+                            if segment_text.trim().is_empty() {
+                                if let Ok(text) = sttvad.transcribe_complete(&audio) {
+                                    segment_text = text;
                                 }
-                                SpeakerVerdict::Known { id, ref label, similarity } => {
-                                    speaker_label = label.clone();
-                                    if id == 0 {
-                                        debug!(target: "speaker", "Main speaker verified (similarity={similarity:.3})");
-                                        non_user_streak = 0;
-                                    } else {
+                            }
+
+                            #[cfg(feature = "tui")]
+                            tui_tx.send(tui::events::TuiEvent::StateChange(
+                                tui::events::PipelineState::Transcribing,
+                            )).ok();
+                            
+                            let vad_elapsed = t_speech_start.take()
+                                .map(|t| t.elapsed().as_millis()).unwrap_or(0);
+                            info!(target: "performance", "[+{}ms] VAD end ({}ms speech)", vad_elapsed, duration_ms);
+                            *shared.t_vad_end.lock().unwrap() = Some(Instant::now());
+
+                            last_speech_at = Instant::now();
+
+                            // ── Speaker verification ──────────────────────────────
+                            let mut is_main_speaker = true;
+                            let mut speaker_label = "Usuario".to_string();
+
+                            if let Some(ref mut sv) = speaker_verifier {
+                                match sv.verify(config.sample_rate, &audio) {
+                                    SpeakerVerdict::Enrolled { id, ref label } => {
+                                        speaker_label = label.clone();
+                                        if id == 0 {
+                                            info!(target: "speaker", "Main speaker enrolled — processing utterance");
+                                            non_user_streak = 0;
+                                        } else {
+                                            info!(target: "speaker", "Speaker {} enrolled — buffering", label);
+                                            is_main_speaker = false;
+                                        }
+                                    }
+                                    SpeakerVerdict::Known { id, ref label, similarity } => {
+                                        speaker_label = label.clone();
+                                        if id == 0 {
+                                            debug!(target: "speaker", "Main speaker verified (similarity={similarity:.3})");
+                                            non_user_streak = 0;
+                                        } else {
+                                            info!(
+                                                target: "speaker",
+                                                "Speaker {} (similarity={similarity:.3}) — buffering \
+                                                 (streak={}/{})",
+                                                label, non_user_streak, config.speaker_ambient_trigger
+                                            );
+                                            is_main_speaker = false;
+                                            non_user_streak = non_user_streak.saturating_add(1);
+                                            if non_user_streak >= config.speaker_ambient_trigger {
+                                                let mut mode = conv_mode.lock().unwrap();
+                                                if *mode == ConversationMode::Active {
+                                                    *mode = ConversationMode::Ambient;
+                                                    info!(
+                                                        target: "pipeline",
+                                                        "Ambient mode: {} consecutive non-user voices — switching automatically",
+                                                        non_user_streak
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    SpeakerVerdict::Unknown { similarity } => {
+                                        speaker_label = "Ambiente".to_string();
+                                        non_user_streak = non_user_streak.saturating_add(1);
                                         info!(
                                             target: "speaker",
-                                            "Speaker {} (similarity={similarity:.3}) — buffering \
-                                             (streak={}/{})",
-                                            label, non_user_streak, config.speaker_ambient_trigger
+                                            "Unknown speaker (similarity={similarity:.3}) — buffering \
+                                             (streak={non_user_streak}/{})",
+                                            config.speaker_ambient_trigger
                                         );
                                         is_main_speaker = false;
-                                        non_user_streak = non_user_streak.saturating_add(1);
                                         if non_user_streak >= config.speaker_ambient_trigger {
                                             let mut mode = conv_mode.lock().unwrap();
                                             if *mode == ConversationMode::Active {
@@ -1136,154 +1130,146 @@ async fn async_main() -> Result<()> {
                                         }
                                     }
                                 }
-                                SpeakerVerdict::Unknown { similarity } => {
-                                    speaker_label = "Ambiente".to_string();
-                                    non_user_streak = non_user_streak.saturating_add(1);
-                                    info!(
-                                        target: "speaker",
-                                        "Unknown speaker (similarity={similarity:.3}) — buffering \
-                                         (streak={non_user_streak}/{})",
-                                        config.speaker_ambient_trigger
-                                    );
-                                    is_main_speaker = false;
-                                    if non_user_streak >= config.speaker_ambient_trigger {
-                                        let mut mode = conv_mode.lock().unwrap();
-                                        if *mode == ConversationMode::Active {
-                                            *mode = ConversationMode::Ambient;
-                                            info!(
-                                                target: "pipeline",
-                                                "Ambient mode: {} consecutive non-user voices — switching automatically",
-                                                non_user_streak
-                                            );
+                            }
+
+                            // ── Non-main speaker: spawn background transcription ─────
+                            if !is_main_speaker {
+                                let amb_c = Arc::clone(&ambient_buffer);
+                                let label = speaker_label.clone();
+                                let audio_for_task = audio.clone();
+                                let lang = config.language.clone();
+                                let wm = config.whisper_model.clone();
+                                let vm = config.vad_model.clone();
+                                let sms = config.vad_silence_ms;
+                                
+                                // Spawn background transcription using transcribe_complete  
+                                tokio::spawn(async move {
+                                    let t0 = Instant::now();
+                                    let config = WhisperSTTVADConfig {
+                                        whisper_model: wm,
+                                        vad_model: vm,
+                                        language: lang,
+                                        silence_ms: sms,
+                                    };
+                                    if let Ok(vad) = WhisperSTTVAD::new(config) {
+                                        if let Ok(text) = vad.transcribe_complete(&audio_for_task) {
+                                            if !text.is_empty() {
+                                                amb_c.lock().unwrap().push(label.clone(), text.clone());
+                                                debug!(target: "pipeline", "Ambient buffer ← {label}: {text} ({}ms)", t0.elapsed().as_millis());
+                                            }
                                         }
                                     }
-                                }
+                                });
+                                continue;
                             }
-                        }
 
-                        // ── Non-main speaker: spawn background transcription to avoid blocking main flow ─────
-                        if !is_main_speaker {
-                            let stt_c = Arc::clone(&stt_stream);
-                            let amb_c = Arc::clone(&ambient_buffer);
-                            let label = speaker_label.clone();
-                            let audio_for_task = audio.clone();
-                            tokio::spawn(async move {
-                                let t0 = Instant::now();
-                                if let Ok(text) = stt_c.await_result(audio_for_task).await {
-                                    if !text.is_empty() {
-                                        amb_c.lock().unwrap().push(label.clone(), text.clone());
-                                        debug!(target: "pipeline", "Ambient buffer ← {label}: {text} ({}ms)", t0.elapsed().as_millis());
-                                    }
-                                }
-                            });
-                            vad.reset();
-                            continue;
-                        }
+                            let mode_snapshot = conv_mode.lock().unwrap().clone();
+                            let ambient_locked = mode_snapshot == ConversationMode::AmbientLocked;
+                            let ambient_auto   = mode_snapshot == ConversationMode::Ambient;
+                            let wake_word_check = config.wake_word.clone();
 
-                        let mode_snapshot = conv_mode.lock().unwrap().clone();
-                        let ambient_locked = mode_snapshot == ConversationMode::AmbientLocked;
-                        let ambient_auto   = mode_snapshot == ConversationMode::Ambient;
-                        let wake_word_check = config.wake_word.clone();
+                            // ── ACP permission gate ───────────────────────────────
+                            if let Some(resp_tx) = pending_agent_question.take() {
+                                let audio_for_task = audio.clone();
+                                let wm = config.whisper_model.clone();
+                                let vm = config.vad_model.clone();
+                                let lang = config.language.clone();
+                                let sms = config.vad_silence_ms;
+                                
+                                tokio::spawn(async move {
+                                    let t0 = Instant::now();
+                                    let config = WhisperSTTVADConfig {
+                                        whisper_model: wm,
+                                        vad_model: vm,
+                                        language: lang,
+                                        silence_ms: sms,
+                                    };
+                                    let answer = if let Ok(vad) = WhisperSTTVAD::new(config) {
+                                        vad.transcribe_complete(&audio_for_task).unwrap_or_default()
+                                    } else {
+                                        String::new()
+                                    };
+                                    info!(target: "acp", "STT for permission question took {}ms", t0.elapsed().as_millis());
+                                    let outcome = map_answer_to_outcome(&answer);
+                                    info!(target: "acp", "Permission answer: {:?} → {}", answer, outcome);
+                                    let _ = resp_tx.send(outcome);
+                                });
+                                continue;
+                            }
 
-                        // ── ACP permission gate ───────────────────────────────
-                        if let Some(resp_tx) = pending_agent_question.take() {
-                            let stt_c = Arc::clone(&stt_stream);
-                            let audio_for_task = audio.clone();
-                            tokio::spawn(async move {
-                                let t0 = Instant::now();
-                                let answer = stt_c.await_result(audio_for_task).await.unwrap_or_default();
-                                info!(target: "acp", "STT for permission question took {}ms", t0.elapsed().as_millis());
-                                let outcome = map_answer_to_outcome(&answer);
-                                info!(target: "acp", "Permission answer: {:?} → {}", answer, outcome);
-                                let _ = resp_tx.send(outcome);
-                            });
-                            continue;
-                        }
+                            // Use streaming result directly - no additional STT call needed
+                            let stt_elapsed_ms = segment_duration_ms as u128;
+                            info!(target: "performance", "[+{}ms] STT transcription complete (audio={}samples, {}chars)", 
+                                stt_elapsed_ms, audio.len(), segment_text.len());
+                            debug!(target: "stt", "Segment final: {}", segment_text);
 
-                        // ── Main user: await STT result directly (no redundancy) ───────────────────────
-                        let t_stt_start = Instant::now();
-                        let segment_text = stt_stream.await_result(audio.clone()).await.unwrap_or_default();
-                        let stt_elapsed_ms = t_stt_start.elapsed().as_millis();
-                        info!(target: "performance", "[+{}ms] STT transcription complete (audio={}samples, {}chars)", 
-                            stt_elapsed_ms, audio.len(), segment_text.len());
-                        debug!(target: "stt", "Segment final: {}", segment_text);
-                        
-                        // Clear the streaming state for this utterance
-                        whisper_streamer = None;
-
-                        if segment_text.trim().is_empty() {
-                            debug!(target: "pipeline", "Empty transcription — skipping");
-                            *shared.t_vad_end.lock().unwrap() = Some(Instant::now());
-                            events.vad_finish.notify_one();
-                            continue;
-                        }
-
-                        let mut final_text = segment_text;
-
-                        // Ambient (locked) — only respond to wake word; buffer everything else.
-                        if ambient_locked {
-                            let lower = final_text.to_lowercase();
-                            if !lower.contains(&wake_word_check) {
-                                ambient_buffer.lock().unwrap()
-                                    .push("Usuario".to_string(), final_text.clone());
-                                debug!(target: "pipeline", "Ambient (locked): no wake word — buffered");
-                                *shared.t_vad_end.lock().unwrap() = Some(Instant::now());
+                            if segment_text.trim().is_empty() {
+                                debug!(target: "pipeline", "Empty transcription — skipping");
                                 events.vad_finish.notify_one();
                                 continue;
                             }
-                            info!(target: "pipeline", "Ambient (locked): wake word detected");
-                        } else if ambient_auto {
-                            *conv_mode.lock().unwrap() = ConversationMode::Active;
-                            info!(target: "pipeline", "Auto-ambient: main user spoke — returning Active");
-                        }
 
-                        // Inject ambient context if query contains a referential.
-                        final_text = {
-                            let buf = ambient_buffer.lock().unwrap();
-                            if crate::audio::ambient_buffer::has_referential(&final_text) {
-                                if let Some(ctx) = buf.format_context() {
-                                    format!("{ctx}\n---\n{final_text}")
+                            let mut final_text = segment_text;
+
+                            // Ambient (locked) — only respond to wake word
+                            if ambient_locked {
+                                let lower = final_text.to_lowercase();
+                                if !lower.contains(&wake_word_check) {
+                                    ambient_buffer.lock().unwrap()
+                                        .push("Usuario".to_string(), final_text.clone());
+                                    debug!(target: "pipeline", "Ambient (locked): no wake word — buffered");
+                                    events.vad_finish.notify_one();
+                                    continue;
+                                }
+                                info!(target: "pipeline", "Ambient (locked): wake word detected");
+                            } else if ambient_auto {
+                                *conv_mode.lock().unwrap() = ConversationMode::Active;
+                                info!(target: "pipeline", "Auto-ambient: main user spoke — returning Active");
+                            }
+
+                            // Inject ambient context if query contains a referential.
+                            final_text = {
+                                let buf = ambient_buffer.lock().unwrap();
+                                if crate::audio::ambient_buffer::has_referential(&final_text) {
+                                    if let Some(ctx) = buf.format_context() {
+                                        format!("{ctx}\n---\n{final_text}")
+                                    } else {
+                                        final_text
+                                    }
                                 } else {
                                     final_text
                                 }
-                            } else {
-                                final_text
+                            };
+
+                           if final_text.trim().is_empty() {
+                                debug!(target: "pipeline", "Empty after context injection — skipping");
+                                events.vad_finish.notify_one();
+                                continue;
                             }
-                        };
 
-                       if final_text.trim().is_empty() {
-                            debug!(target: "pipeline", "Empty after context injection — skipping");
-                            *shared.t_vad_end.lock().unwrap() = Some(Instant::now());
+                            // Store transcript and trigger LLM processing
+                            *shared.transliterated_text.lock().unwrap() = final_text;
+                            shared.stt_result_pending.store(true, Ordering::SeqCst);
+                            if let Some(t0) = shared.t_vad_end.lock().unwrap().as_ref() {
+                                info!(target: "performance", "[+{}ms] STT done → VAD_FINISH", t0.elapsed().as_millis());
+                            }
                             events.vad_finish.notify_one();
-                            continue;
                         }
-
-                        // Always store transcript directly since prior LLM processing was cancelled.
-                        // The epoch stale check above already ensures no stale results pass through.
-                        *shared.transliterated_text.lock().unwrap() = final_text;
-                        shared.stt_result_pending.store(true, Ordering::SeqCst);
-                        if let Some(t0) = shared.t_vad_end.lock().unwrap().as_ref() {
-                            info!(target: "performance", "[+{}ms] STT done → VAD_FINISH", t0.elapsed().as_millis());
-                        }
-                        events.vad_finish.notify_one();
-                    }
-                    VadEvent::Silence => {
-                        pre_roll.push_back(mono);
-                        if pre_roll.len() > PRE_ROLL_CHUNKS {
-                            pre_roll.pop_front();
-                        }
-                        {
-                            let mut mode = conv_mode.lock().unwrap();
-                            if *mode == ConversationMode::Active
-                                && last_speech_at.elapsed().as_secs() >= config.ambient_clear_secs
+                        SpeechEvent::Silence => {
+                            // Manage ambient mode transitions on silence
                             {
-                                *mode = ConversationMode::Ambient;
-                                non_user_streak = 0;
-                                info!(
-                                    target: "pipeline",
-                                    "Ambient mode: {}s of silence — returning to Ambient",
-                                    config.ambient_clear_secs
-                                );
+                                let mut mode = conv_mode.lock().unwrap();
+                                if *mode == ConversationMode::Active
+                                    && last_speech_at.elapsed().as_secs() >= config.ambient_clear_secs
+                                {
+                                    *mode = ConversationMode::Ambient;
+                                    non_user_streak = 0;
+                                    info!(
+                                        target: "pipeline",
+                                        "Ambient mode: {}s of silence — returning to Ambient",
+                                        config.ambient_clear_secs
+                                    );
+                                }
                             }
                         }
                     }

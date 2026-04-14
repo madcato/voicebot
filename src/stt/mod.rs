@@ -8,8 +8,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use whisper_cpp_plus::{
-    enhanced::{EnhancedVadParams, EnhancedWhisperVadProcessor},
-    FullParams, SamplingStrategy, WhisperContext, WhisperStream,
+    FullParams, SamplingStrategy, WhisperContext, WhisperStream, enhanced::{EnhancedVadParamsBuilder, EnhancedWhisperVadProcessor}
 };
 
 /// Events sent to the event channel during processing
@@ -111,10 +110,18 @@ impl WhisperSTTVAD {
             return Ok(());
         }
 
+        let vad_params = EnhancedVadParamsBuilder::new()
+            .threshold(0.5)
+            .max_segment_duration(30.0)  // Aggregate up to 30 seconds
+            .merge_segments(true)         // Merge adjacent segments
+            .min_gap_ms(100)              // Minimum 100ms gap to keep segments separate
+            .speech_pad_ms(400)           // Add 400ms padding around speech
+            .build();
+
         // Use enhanced whisper-cpp-plus VAD to detect speech with aggregation
         let chunks = match self
             .vad_processor
-            .process_with_aggregation(audio, &EnhancedVadParams::default())
+            .process_with_aggregation(audio, &vad_params)
         {
             Ok(chunks) => chunks,
             Err(_) => return Ok(()),
@@ -156,6 +163,57 @@ impl WhisperSTTVAD {
         }
 
         Ok(())
+    }
+
+    /// Transcribe audio without streaming - returns complete text synchronously.
+    /// Useful for non-streaming scenarios like verifying speaker transcripts.
+    pub fn transcribe_complete(&self, audio: &[f32]) -> Result<String> {
+        use std::time::Instant;
+
+        let t0 = Instant::now();
+        let mut state = self.ctx.create_state()?;
+
+        let params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 })
+            .language(&self.language)
+            .print_special(false)
+            .print_progress(false)
+            .print_realtime(false)
+            .no_timestamps(true)
+            .single_segment(true);
+
+        state.full(params.clone(), audio)?;
+
+        let inference_ms = t0.elapsed().as_millis();
+
+        // Collect text from all segments
+        let num_segments = state.full_n_segments();
+        let mut text = String::new();
+
+        for i in 0..num_segments {
+            if i > 0 {
+                text.push(' ');
+            }
+            if let Ok(seg_text) = state.full_get_segment_text(i) {
+                text.push_str(seg_text.trim());
+            }
+        }
+
+        tracing::debug!(target: "sttvad", "transcribe_complete: inference={}ms, chars={}", 
+            inference_ms, text.len());
+
+Ok(text.trim().to_string())
+    }
+
+    /// Reset the streaming state for a new conversation turn.
+    pub fn reset_stream(&mut self) {
+        // Create a fresh stream to clear any accumulated context
+        let params =
+            FullParams::new(SamplingStrategy::Greedy { best_of: 1 }).language(&self.language);
+
+        self.stream = match WhisperStream::new(&self.ctx, params) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
     }
 }
 
