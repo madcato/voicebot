@@ -18,6 +18,8 @@ pub struct Config {
     /// Milliseconds of continuous silence before SpeechEnd fires.
     /// Lower = faster response; higher = fewer false cuts mid-sentence.
     pub vad_silence_ms: u32,
+    /// Path to Silero VAD model file (.bin) used by whisper-cpp-plus
+    pub vad_model: String,
 
     // ── Language ─────────────────────────────────────────────────────────────
     /// "es" (default) or "en"
@@ -228,6 +230,8 @@ impl Config {
                 .unwrap_or_else(|_| "500".to_string())
                 .parse()
                 .context("Invalid VAD_SILENCE_MS")?,
+            vad_model: env::var("VAD_MODEL")
+                .unwrap_or_else(|_| "models/ggml-silero-vad.bin".to_string()),
 
             // Language
             language: env::var("VOICEBOT_LANGUAGE").unwrap_or_else(|_| "es".to_string()),

@@ -112,7 +112,8 @@ use crate::audio::buffer::AudioBuffer;
 use crate::audio::output::AudioOutput;
 use crate::audio::ambient_buffer::AmbientBuffer;
 use crate::audio::speaker::{SpeakerVerdict, SpeakerVerifier};
-use crate::audio::vad::{VadResult, VoiceActivityDetector};
+// Temporarily disabled during refactoring
+// use crate::stt::{VadEvent, VoiceActivityDetector as SttVoiceActivityDetector};
 use crate::config::Config;
 use crate::db::{Database, Memory};
 use crate::llm::{OpenAIClient, LlmSession, StreamToken};
@@ -721,8 +722,8 @@ async fn async_main() -> Result<()> {
     let (tx, rx) = bounded(AUDIO_CHANNEL_CAPACITY);
     let _stream = audio_capture.start_capture(tx.clone(), samples_per_chunk)?;
 
-    let mut vad = VoiceActivityDetector::new(source_sample_rate, config.vad_silence_ms)?;
-    info!(target: "audio", "VAD silence threshold: {}ms", config.vad_silence_ms);
+    let mut vad = SttVoiceActivityDetector::new(&config.vad_model, config.vad_silence_ms)?;
+    info!(target: "vad", "Initialized whisper-cpp-plus VAD with model: {}", config.vad_model);
     let mut speech_buffer = AudioBuffer::new(source_sample_rate, MAX_SPEECH_BUFFER_SECS);
     let mut pre_roll: VecDeque<Vec<f32>> = VecDeque::with_capacity(PRE_ROLL_CHUNKS + 1);
     let mut t_speech_start: Option<Instant> = None;
@@ -1004,7 +1005,7 @@ async fn async_main() -> Result<()> {
                 };
 
                 match vad.process(&mono) {
-                    VadResult::SpeechStart => {
+                    VadEvent::SpeechStart => {
                         t_speech_start = Some(Instant::now());
                         info!(target: "performance", "[+0ms] SpeechStart");
                         #[cfg(feature = "tui")]
@@ -1039,12 +1040,12 @@ async fn async_main() -> Result<()> {
                         speech_buffer.push(&mono);
 
                         // Create fresh WhisperStreamer for this VAD segment.
-                        whisper_streamer = Some(stt.create_streamer());
+                        whisper_streamer = Some(stt.create_streamer().unwrap());
 
                         // Invalidate any stale STT→vad_finish tasks from prior utterance.
                         utterance_epoch.fetch_add(1, Ordering::SeqCst);
                     }
-                  VadResult::Speech => {
+                    VadEvent::Speech => {
                         speech_buffer.push(&mono);
 
                         // Feed streaming chunks to WhisperStreamer for progressive transcription.
@@ -1054,7 +1055,7 @@ async fn async_main() -> Result<()> {
                             }
                         }
                     }
-                    VadResult::SpeechEnd => {
+                    VadEvent::SpeechEnd => {
                         speech_buffer.push(&mono);
                         pre_roll.clear();
 
@@ -1266,7 +1267,7 @@ async fn async_main() -> Result<()> {
                         }
                         events.vad_finish.notify_one();
                     }
-                    VadResult::Silence => {
+                    VadEvent::Silence => {
                         pre_roll.push_back(mono);
                         if pre_roll.len() > PRE_ROLL_CHUNKS {
                             pre_roll.pop_front();

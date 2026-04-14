@@ -38,9 +38,6 @@ chrono = { version = "0.4", features = ["serde"] }
 sqlx = { version = "=0.8.6", features = ["sqlite", "runtime-tokio-native-tls"] }
 uuid = { version = "1", features = ["v4"] }
 
-# Voice Activity Detection (Silero)
-voice_activity_detector = "0.2"
-
 # HTTP client for LLM streaming (SSE)
 reqwest = { version = "0.12", features = ["json", "stream"] }
 
@@ -124,10 +121,6 @@ path = "src/main.rs"
 [[bin]]
 name = "acp_agent_chat"
 path = "src/bin/acp_agent_chat.rs"
-
-[[bin]]
-name = "test_stt_plus"
-path = "src/bin/test_stt_plus.rs"
 
 [dependencies.hound]
 version = "3"
