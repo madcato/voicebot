@@ -1,0 +1,3 @@
+[dependencies]
+# Replace whisper-cpp-plus with a known-working version
+whisper-cpp-plus = { version = "0.1.3", features = ["metal"] }
