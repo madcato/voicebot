@@ -54,6 +54,9 @@ pub(crate) struct SharedSession {
     /// True while the consolidation task is running. The LLM task will not
     /// process new input until this flag is cleared.
     pub(crate) consolidation_active: AtomicBool,
+   /// True when an STT result has been obtained but not yet fully processed
+    /// by the LLM (add_user_turn called).
+    pub(crate) stt_result_pending: AtomicBool,
 }
 
 impl SharedSession {
@@ -69,6 +72,7 @@ impl SharedSession {
             t_llm_post_send: Mutex::new(None),
             first_speech_played: AtomicBool::new(false),
             consolidation_active: AtomicBool::new(false),
+            stt_result_pending: AtomicBool::new(false),
         }
     }
 }
@@ -735,22 +739,12 @@ async fn async_main() -> Result<()> {
     // when a turn commits mid-segment.
     let mut speech_buffer_start_offset: usize = 0;
 
-    // ── Speculative STT ───────────────────────────────────────────────────────
-    // Submit growing audio snapshots to Whisper during speech so the transcript
-    // is ready (or near-ready) by the time SpeechEnd fires.
-    //
-    // Two thresholds (both in samples at source_sample_rate):
-    //  stt_min_submit_samples — minimum utterance audio before first submit.
-    //                           Avoids feeding Whisper tiny clips that hallucinate.
-    //  stt_submit_interval_samples — how much NEW audio must arrive before the
-    //                           next speculative submit.  Set to 0 to disable.
-    let stt_min_submit_samples: usize =
-        (config.stt_min_submit_ms as usize * source_sample_rate as usize) / 1000;
-    let stt_submit_interval_samples: usize =
-        (config.stt_submit_interval_ms as usize * source_sample_rate as usize) / 1000;
-    // Tracks total buffer size at the time of the last speculative submit so
-    // we can measure "new audio since last submit".  Reset at every SpeechStart.
-    let mut last_stt_submit_samples: usize = 0;
+    // ── Streaming STT ─────────────────────────────────────────────────────────
+    // WhisperStreamer persists across all utterances in the session. Each VAD
+    // segment produces one independent user message. If LLM is busy when a segment
+    // ends, the transcription is queued for next available LLM slot.
+    let mut whisper_streamer: Option<crate::stt::whisper_plus::WhisperStreamer> =
+        None;
 
     // ── Ambient state machine ─────────────────────────────────────────────────
     // Counts consecutive VAD segments where the speaker was NOT the enrolled user.
@@ -1018,10 +1012,9 @@ async fn async_main() -> Result<()> {
                             tui::events::PipelineState::Listening,
                         )).ok();
                         last_speech_at = Instant::now();
-                        // ── VAD_DETECTED: cancel any active LLM/TTS pipeline ──
-                        // Fired unconditionally: llm_busy becomes false when the LLM
-                        // finishes streaming, but TTS may still be playing sentences.
-                        // All tasks handle stale cancels gracefully.
+
+                        // Always fire VAD_DETECTED on new speech to cancel active LLM/TTS.
+                        // This ensures Option B behavior: user speaking always interrupts LLM.
                         info!(target: "pipeline", "SpeechStart — firing VAD_DETECTED");
                         events.cancel_tx.send(()).ok();
                         play_cancel.store(true, Ordering::SeqCst);
@@ -1045,34 +1038,19 @@ async fn async_main() -> Result<()> {
                         }
                         speech_buffer.push(&mono);
 
-                        // Invalidate any stale STT→vad_finish tasks from a prior utterance.
-                        utterance_epoch.fetch_add(1, Ordering::SeqCst);
+                        // Create fresh WhisperStreamer for this VAD segment.
+                        whisper_streamer = Some(stt.create_streamer());
 
-                        // Reset speculative STT counter for this new utterance.
-                        last_stt_submit_samples = 0;
+                        // Invalidate any stale STT→vad_finish tasks from prior utterance.
+                        utterance_epoch.fetch_add(1, Ordering::SeqCst);
                     }
-                    VadResult::Speech => {
+                  VadResult::Speech => {
                         speech_buffer.push(&mono);
 
-                        // Speculative STT: once enough audio has accumulated, submit a
-                        // growing snapshot to Whisper every stt_submit_interval_ms.
-                        // The watch channel keeps only the latest snapshot — if Whisper
-                        // is still busy the intermediate one is silently dropped.
-                        if stt_submit_interval_samples > 0 {
-                            let utterance_samples =
-                                speech_buffer.sample_count() - speech_buffer_start_offset;
-                            let since_last =
-                                speech_buffer.sample_count().saturating_sub(last_stt_submit_samples);
-                            if utterance_samples >= stt_min_submit_samples
-                                && since_last >= stt_submit_interval_samples
-                            {
-                                let snap =
-                                    speech_buffer.get_samples_from(speech_buffer_start_offset);
-                                stt_stream.submit(snap, utterance_epoch.load(Ordering::SeqCst));
-                                last_stt_submit_samples = speech_buffer.sample_count();
-                                debug!(target: "performance",
-                                    "[Speech] speculative STT: {}ms of utterance audio",
-                                    utterance_samples * 1000 / source_sample_rate as usize);
+                        // Feed streaming chunks to WhisperStreamer for progressive transcription.
+                        if let Some(ref mut streamer) = whisper_streamer {
+                            if let Ok(Some(partial)) = streamer.feed_chunk(&mono) {
+                                debug!(target: "stt", "Partial: {}", partial);
                             }
                         }
                     }
@@ -1223,80 +1201,70 @@ async fn async_main() -> Result<()> {
                             continue;
                         }
 
-                        // ── Fire VAD_FINISH after final STT result is ready ────
-                        // Awaiting in a spawned task keeps the audio loop unblocked.
-                        let stt_c        = Arc::clone(&stt_stream);
-                        let shared_c     = Arc::clone(&shared);
-                        let events_c     = Arc::clone(&events);
-                        let amb_c        = Arc::clone(&ambient_buffer);
-                        let conv_mode_c  = Arc::clone(&conv_mode);
-                        let epoch        = utterance_epoch.load(Ordering::SeqCst);
-                        let epoch_ref    = Arc::clone(&utterance_epoch);
-                        let audio_for_task = audio.clone();
-                        tokio::spawn(async move {
-                            let text = match stt_c.await_result(audio_for_task).await {
-                                Err(_e) => {
-                                    shared_c.sentences.lock().unwrap()
-                                        .push_back("Lo siento, hubo un error al procesar tu voz.".to_string());
-                                    events_c.sentence_ready.notify_one();
-                                    return;
-                                }
-                                Ok(t) if t.is_empty() => {
-                                    shared_c.sentences.lock().unwrap()
-                                        .push_back("No te entendí. ¿Puedes repetirlo?".to_string());
-                                    events_c.sentence_ready.notify_one();
-                                    return;
-                                }
-                                Ok(t) => t,
-                            };
+                        // ── Finalize streaming STT segment ───────────────────────────────
+                        // Each VAD segment becomes one independent user message to LLM.
+                        // If LLM is busy, enqueue in pending_messages instead of interrupting.
+                        let segment_text = match whisper_streamer.take() {
+                            None => String::new(),
+                            Some(mut s) => s.finalize().unwrap_or_default(),
+                        };
+                        debug!(target: "stt", "Segment final: {}", segment_text);
 
-                            // Stale check: if a new SpeechStart fired since this
-                            // task was spawned, the user interrupted — discard.
-                            if epoch_ref.load(Ordering::SeqCst) != epoch {
-                                debug!(target: "pipeline", "Stale STT result (epoch changed) — discarding: {:?}", &text[..text.len().min(40)]);
-                                return;
+                        if segment_text.trim().is_empty() {
+                            debug!(target: "pipeline", "Empty transcription — skipping");
+                            *shared.t_vad_end.lock().unwrap() = Some(Instant::now());
+                            events.vad_finish.notify_one();
+                            continue;
+                        }
+
+                        let mut final_text = segment_text;
+
+                        // Ambient (locked) — only respond to wake word; buffer everything else.
+                        if ambient_locked {
+                            let lower = final_text.to_lowercase();
+                            if !lower.contains(&wake_word_check) {
+                                ambient_buffer.lock().unwrap()
+                                    .push("Usuario".to_string(), final_text.clone());
+                                debug!(target: "pipeline", "Ambient (locked): no wake word — buffered");
+                                *shared.t_vad_end.lock().unwrap() = Some(Instant::now());
+                                events.vad_finish.notify_one();
+                                continue;
                             }
+                            info!(target: "pipeline", "Ambient (locked): wake word detected");
+                        } else if ambient_auto {
+                            *conv_mode.lock().unwrap() = ConversationMode::Active;
+                            info!(target: "pipeline", "Auto-ambient: main user spoke — returning Active");
+                        }
 
-                            // Ambient (locked) — user explicitly requested quiet mode:
-                            // only respond to the wake word; everything else is buffered.
-                            // Stays locked until the user explicitly says "active mode".
-                            if ambient_locked {
-                                let lower = text.to_lowercase();
-                                if lower.contains(&wake_word_check) {
-                                    info!(target: "pipeline", "Ambient (locked): wake word detected — responding (staying locked)");
+                        // Inject ambient context if query contains a referential.
+                        final_text = {
+                            let buf = ambient_buffer.lock().unwrap();
+                            if crate::audio::ambient_buffer::has_referential(&final_text) {
+                                if let Some(ctx) = buf.format_context() {
+                                    format!("{ctx}\n---\n{final_text}")
                                 } else {
-                                    amb_c.lock().unwrap().push("Usuario".to_string(), text.clone());
-                                    debug!(target: "pipeline", "Ambient (locked): no wake word — buffered as context");
-                                    return;
+                                    final_text
                                 }
-                            } else if ambient_auto {
-                                // Auto-ambient — triggered by silence or non-user streak:
-                                // any speech from the main user returns immediately to Active.
-                                *conv_mode_c.lock().unwrap() = ConversationMode::Active;
-                                info!(target: "pipeline", "Auto-ambient: main user spoke — returning to Active");
+                            } else {
+                                final_text
                             }
+                        };
 
-                            // Inject ambient context when the query contains a referential.
-                            let final_text = {
-                                let buf = amb_c.lock().unwrap();
-                                if crate::audio::ambient_buffer::has_referential(&text) {
-                                    if let Some(ctx) = buf.format_context() {
-                                        format!("{ctx}\n---\n{text}")
-                                    } else {
-                                        text
-                                    }
-                                } else {
-                                    text
-                                }
-                            };
+                       if final_text.trim().is_empty() {
+                            debug!(target: "pipeline", "Empty after context injection — skipping");
+                            *shared.t_vad_end.lock().unwrap() = Some(Instant::now());
+                            events.vad_finish.notify_one();
+                            continue;
+                        }
 
-                            // Store final transcript and wake the LLM task.
-                            *shared_c.transliterated_text.lock().unwrap() = final_text;
-                            if let Some(t0) = shared_c.t_vad_end.lock().unwrap().as_ref() {
-                                info!(target: "performance", "[+{}ms] STT done → VAD_FINISH", t0.elapsed().as_millis());
-                            }
-                            events_c.vad_finish.notify_one();
-                        });
+                        // Always store transcript directly since prior LLM processing was cancelled.
+                        // The epoch stale check above already ensures no stale results pass through.
+                        *shared.transliterated_text.lock().unwrap() = final_text;
+                        shared.stt_result_pending.store(true, Ordering::SeqCst);
+                        if let Some(t0) = shared.t_vad_end.lock().unwrap().as_ref() {
+                            info!(target: "performance", "[+{}ms] STT done → VAD_FINISH", t0.elapsed().as_millis());
+                        }
+                        events.vad_finish.notify_one();
                     }
                     VadResult::Silence => {
                         pre_roll.push_back(mono);
@@ -1384,7 +1352,7 @@ async fn llm_task(
 
         shared.llm_busy.store(true, Ordering::SeqCst);
 
-        // Drain accumulated transcription.
+         // Drain accumulated transcription.
         let text = std::mem::take(&mut *shared.transliterated_text.lock().unwrap());
 
         if text.trim().is_empty() {
@@ -1392,6 +1360,9 @@ async fn llm_task(
             while cancel_rx.try_recv().is_ok() {}
             continue;
         }
+
+        // Transcription result has been drained — allow fresh utterances now.
+        shared.stt_result_pending.store(false, Ordering::SeqCst);
 
         // Ambient mode: text pipeline injections bypass the wake-word check
         // because the audio loop already validated them before firing vad_finish.

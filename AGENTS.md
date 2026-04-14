@@ -54,26 +54,29 @@ Microphone → VAD (Silero) → STT (whisper-rs) → LLM (mlx-lm/oMLX SSE) → S
 
 ## Module Boundaries
 
-| Directory | Purpose | Notes |
-|-----------|---------|-------|
-| `src/audio/` | CPAL capture, Silero VAD, resampling (rubato), playback | Fixed pipeline |
-| `src/stt/` | whisper-rs wrapper, 16kHz f32 mono, language detection | CoreML/Metal on macOS |
-| `src/llm/` | HTTP client to `/v1/chat/completions`, session management | Works with mlx-lm (8000) or oMLX (8001) |
-| `src/tts/` | `say.rs` (macOS subprocess), `sentence.rs` (boundary splitting), `kokoro.rs` (ONNX) | First sentence uses aggressive early-splitting |
-| `src/db/` | SQLite persistence: sessions, messages, user_profile, memories | Source of truth for history |
+| Directory | Purpose | Public exports (lib.rs) |
+|-----------|---------|------------------------|
+| `src/audio/` | CPAL capture, Silero VAD, resampling (rubato), playback | `AudioBuffer`, `AudioOutput`, `VoiceActivityDetector` |
+| `src/stt/` | whisper-cpp-plus wrapper, 16kHz f32 mono, language detection | `WhisperStt` (alias for `WhisperSttPlus`) |
+| `src/llm/` | HTTP client to `/v1/chat/completions`, session management | `OpenAIClient`, `LlmSession` |
+| `src/tts/` | `avspeech.rs` (macOS AVSpeechSynthesizer), `say.rs` (subprocess), `sentence.rs` (boundary splitting), `kokoro.rs` (ONNX) | `SentenceSplitter` |
+| `src/db/` | SQLite persistence: sessions, messages, user_profile, memories | `Database` |
+| `src/config.rs` | Environment-based config (`Config::from_env()`) | `Config` |
 | `src/memory/` | Extract persistent notes from conversation, archive outdated | Injects `[MEMORIES]` block into system prompt |
 | `src/profile/` | User profile facts extraction | Startup greeting, name recognition |
 | `src/tools/` | Tool implementations: time, screenshot, notifications, clipboard, open_app, web_search | SearXNG-backed web search |
-| `src/mcp/` | MCP servers (future) | Not yet active |
-| `src/agents/` | Agent delegation for complex tasks | `run_agent` / `run_agent_async` |
+| `src/agents/` | Agent delegation for complex tasks | ACP protocol via stdio |
 | `src/remote/` | WebSocket server for remote audio streaming | Binary PCM i16 LE 16kHz + JSON control |
 | `src/tui/` | Terminal UI (ratatui) | Enable with `--features tui` |
+| `src/bin/acp_agent_chat.rs` | Debug/test TUI chat with ACP agent via JSON-RPC 2.0 over stdio | Run: `cargo run --bin acp_agent_chat` |
+| `src/bin/test_stt_plus.rs` | Test binary for whisper-cpp-plus streaming functionality | Run: `cargo run --bin test_stt_plus --release` |
 
-### Legacy Modules (deprecated)
+### Legacy Modules (do not extend)
 
 - `src/s2s/` — Replaced by `stt/` + `llm/`
 - `src/websocket_client.rs` — No longer needed
 - `provider/` — Python LFM2.5-Audio server (not used)
+- `src/stt/whisper.rs` — Deprecated; replaced by `whisper_plus.rs`
 
 **Do not extend legacy modules.** If you find code there, flag it for removal.
 
@@ -114,7 +117,7 @@ WS_PORT=9090                    # Enable WebSocket server
 ## Testing Quirks
 
 - **VAD/audio tests**: Use synthetic sine waves / silence (see `src/audio/` tests).
-- **Whisper tests**: Skip if model file missing (`#[ignore]`).
+- **STT tests**: Skip if model file missing (`#[ignore]`). Uses `whisper-cpp-plus`.
 - **TTS tests**: macOS requires voices installed; kokoro for Linux CI.
 - **Parallel tests**: Use `temp-env` crate to safely override env vars.
 - **Mock LLM**: Use `wiremock` crate for HTTP client tests.
@@ -124,20 +127,27 @@ Run specific test:
 cargo test <test_name> -- --nocapture
 ```
 
+### Debugging Binary
+
+The `test_stt_plus` binary provides standalone STT testing without full pipeline:
+```bash
+cargo run --bin test_stt_plus --release
+```
+
 ---
 
 ## Build Features & Dependencies
 
 | Feature | Enables | Extra deps | Requirements |
 |---------|---------|------------|--------------|
-| (none) | Core pipeline | whisper-rs, reqwest, sqlx | — |
+| (none) | Core pipeline | whisper-cpp-plus, reqwest, sqlx | — |
 | `kokoro` | Kokoro ONNX TTS | kokorox | `brew install espeak-ng` |
 | `tui` | Terminal UI | ratatui, crossterm | — |
 | `remote` | WebSocket server | axum, tower | — |
 | `speaker` | Speaker verification | sherpa-rs | `models/speaker_embedding.onnx` |
 | `avspeech` | macOS AVSpeechSynthesizer | objc2*, block2 | macOS only |
 
-**On macOS**: whisper-rs uses CoreML + Metal by default (faster STT). Requires `models/*-encoder.mlmodelc` alongside `.bin`.
+**On macOS**: whisper-cpp-plus uses Metal by default (faster STT via whisper-cpp-plus metal feature). Model files: `models/ggml-large-v3-turbo.bin` + `models/*-encoder.mlmodelc` for CoreML encoder fallback.
 
 ---
 
