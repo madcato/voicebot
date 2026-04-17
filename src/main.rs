@@ -1,3 +1,8 @@
+#![allow(unreachable_code)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
+
 mod agents;
 mod audio;
 mod config;
@@ -138,11 +143,6 @@ mod e2e_tests;
 const AUDIO_CHANNEL_CAPACITY: usize = 200;
 const MAX_SPEECH_BUFFER_SECS: u32 = 30;
 const MIN_SPEECH_DURATION_MS: u32 = 300;
-/// Pre-roll chunks kept before speech onset to recover VAD onset delay (~32ms with
-/// SPEECH_FRAMES_NEEDED=1). Each CPAL chunk is ~110ms at typical source rates, so
-/// 3 chunks ≈ 330ms — enough to cover the onset frame plus margin. Was 15 (1700ms),
-/// which inflated Whisper input by >1s for short utterances.
-const PRE_ROLL_CHUNKS: usize = 3;
 
 // When the `avspeech` feature is enabled, the main thread must run CFRunLoop
 // so that AVSpeechSynthesizer buffer callbacks are delivered.  The tokio
@@ -334,8 +334,8 @@ async fn async_main() -> Result<()> {
     }
 
     // Web search (SearXNG) — enabled when SEARXNG_URL is set and WEB_SEARCH_ENABLED != 0
-    if config.web_search_enabled {
-        if let Some(ref searxng_url) = config.searxng_url {
+    if config.web_search_enabled
+        && let Some(ref searxng_url) = config.searxng_url {
             let mut wst = WebSearchTool::new(searxng_url.clone(), config.searxng_secret.clone());
             if let Some(ref sec) = secondary_llm_client {
                 wst = wst.with_synthesis(std::sync::Arc::new(sec.clone()));
@@ -343,7 +343,6 @@ async fn async_main() -> Result<()> {
             }
             tool_registry.register(wst);
             info!(target: "voicebot", "web_search tool enabled (url={})", searxng_url);
-        }
     }
 
     // External agent delegation — unified RunAgentTool (CLI or ACP mode)
@@ -902,8 +901,8 @@ async fn async_main() -> Result<()> {
         _ = async {
             loop {
                 // If idle and there are pending agent results, inject the next one.
-                if !shared.llm_busy.load(Ordering::SeqCst) && current_agent_announcement.is_none() {
-                    if let Some((task, result)) = pending_agent_results.pop_front() {
+                if !shared.llm_busy.load(Ordering::SeqCst) && current_agent_announcement.is_none()
+                    && let Some((task, result)) = pending_agent_results.pop_front() {
                         let notification = format!(
                             "[Sistema: una tarea en segundo plano ha terminado.]\n\
                              Tarea: {task}\n\
@@ -914,9 +913,8 @@ async fn async_main() -> Result<()> {
                         current_agent_announcement = Some((task, result));
                         events.vad_finish.notify_one();
                     }
-                }
-                // Clear announcement tracker once LLM becomes idle again.
-                if current_agent_announcement.is_some() && !shared.llm_busy.load(Ordering::SeqCst) {
+                    // Clear announcement tracker once LLM becomes idle again.
+                    if current_agent_announcement.is_some() && !shared.llm_busy.load(Ordering::SeqCst) {
                     current_agent_announcement = None;
                 }
 
@@ -1046,11 +1044,10 @@ async fn async_main() -> Result<()> {
                             let mut segment_text = final_stream_text;
                             
                             // Fallback to transcribe_complete if streaming didn't produce text
-                            if segment_text.trim().is_empty() {
-                                if let Ok(text) = sttvad.transcribe_complete(&audio) {
+                            if segment_text.trim().is_empty()
+                                && let Ok(text) = sttvad.transcribe_complete(&audio) {
                                     segment_text = text;
                                 }
-                            }
 
                             #[cfg(feature = "tui")]
                             tui_tx.send(tui::events::TuiEvent::StateChange(
@@ -1151,14 +1148,12 @@ async fn async_main() -> Result<()> {
                                         language: lang,
                                         silence_ms: sms,
                                     };
-                                    if let Ok(vad) = WhisperSTTVAD::new(config) {
-                                        if let Ok(text) = vad.transcribe_complete(&audio_for_task) {
-                                            if !text.is_empty() {
+                                    if let Ok(vad) = WhisperSTTVAD::new(config)
+                                        && let Ok(text) = vad.transcribe_complete(&audio_for_task)
+                                            && !text.is_empty() {
                                                 amb_c.lock().unwrap().push(label.clone(), text.clone());
                                                 debug!(target: "pipeline", "Ambient buffer ← {label}: {text} ({}ms)", t0.elapsed().as_millis());
-                                            }
                                         }
-                                    }
                                 });
                                 continue;
                             }
@@ -1576,11 +1571,10 @@ async fn llm_task(
                 tokio::spawn(async move {
                     // Persist tool-call exchanges BEFORE the assistant text so the DB
                     // reflects the same ordering the LLM saw: tool_calls → tool_result → response.
-                    if !tool_exchanges_c.is_empty() {
-                        if let Err(e) = db_c.save_tool_exchanges(session_id, &tool_exchanges_c).await {
+                    if !tool_exchanges_c.is_empty()
+                        && let Err(e) = db_c.save_tool_exchanges(session_id, &tool_exchanges_c).await {
                             warn!(target: "db", "Failed to save tool exchanges: {}", e);
                         }
-                    }
                     if let Err(e) = db_c.save_message(session_id, "Assistant", &resp_c).await {
                         warn!(target: "db", "Failed to save assistant message: {}", e);
                     }
@@ -1640,18 +1634,16 @@ async fn sen_task(shared: Arc<SharedSession>, events: Arc<PipelineEvents>) {
         let new_text = std::mem::take(&mut *shared.assistant_text.lock().unwrap());
 
         let mut ready_sentences: Vec<String> = Vec::new();
-        if !new_text.is_empty() {
-            if let Some(s) = splitter.push(&new_text) {
+        if !new_text.is_empty()
+            && let Some(s) = splitter.push(&new_text) {
                 ready_sentences.push(s);
             }
-        }
 
         // If LLM is done streaming, flush any remaining fragment.
-        if shared.llm_post_finished.load(Ordering::SeqCst) {
-            if let Some(s) = splitter.flush() {
+        if shared.llm_post_finished.load(Ordering::SeqCst)
+            && let Some(s) = splitter.flush() {
                 ready_sentences.push(s);
             }
-        }
 
         for sentence in ready_sentences {
             if !first_sentence_logged {
@@ -1839,16 +1831,14 @@ async fn run_consolidation_cycle(
         let count = s.summarizable_turn_count(keep_turns);
         let prompt = s.build_summary_prompt(keep_turns);
         let mut conv = String::new();
-        for msg in &s.messages[..count.min(s.messages.len())] {
+          for msg in &s.messages[..count.min(s.messages.len())] {
             if let (Some(role), Some(content)) =
                 (msg["role"].as_str(), msg["content"].as_str())
-            {
-                if role == "user" || role == "assistant" {
+                && (role == "user" || role == "assistant") {
                     conv.push_str(role);
                     conv.push_str(": ");
                     conv.push_str(content);
                     conv.push_str("\n\n");
-                }
             }
         }
         (conv, prompt, count)
