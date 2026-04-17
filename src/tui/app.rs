@@ -144,6 +144,7 @@ impl App {
             (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc) => Some(Action::Quit),
             (KeyModifiers::CONTROL, KeyCode::Char('t')) => Some(Action::ToggleTts),
             (_, KeyCode::Enter) => {
+                self.scroll_lock = false;
                 let text = self.input.trim().to_string();
                 if text.is_empty() {
                     return None;
@@ -216,16 +217,6 @@ impl App {
                     self.scroll_lock = false;
                 }
                 None
-            }
-            (_, KeyCode::Enter) => {
-                self.scroll_lock = false;
-                let text = self.input.trim().to_string();
-                if text.is_empty() {
-                    return None;
-                }
-                self.input.clear();
-                self.cursor = 0;
-                Some(Action::Submit(text))
             }
             (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
                 self.input.insert(self.cursor, c);
