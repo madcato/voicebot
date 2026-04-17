@@ -18,7 +18,9 @@ fi
 # WHISPER_SILENCE=1 WHISPER_USE_COREML=1 RUST_LOG=performance=debug exec cargo run --release --bin voicebot --features avspeech,tui -- "$@" 2>/dev/null
 
 ## Performance
-WHISPER_SILENCE=1 RUST_LOG=performance=debug exec cargo run --release --bin voicebot --features avspeech,tui -- "$@" 2> >(grep -vE "^(whisper_|ggml_)" >&2)
+# WHISPER_SILENCE=1 RUST_LOG=performance=debug exec cargo run --release --bin voicebot --features avspeech,tui -- "$@" 2> >(grep -vE "^(whisper_|ggml_)" >&2)
+
+WHISPER_SILENCE=1  WHISPER_USE_COREML=1 RUST_LOG=debug exec cargo run --bin voicebot --features avspeech,tui -- "$@" 2> >(grep -vE "^(whisper_|ggml_)" >&2)
 
 ## Tools and agent debugging
 # WHISPER_SILENCE=1 WHISPER_USE_COREML=1 RUST_LOG=pipeline=debug,llm=debug,tools=debug,agent=debug exec cargo run --release --bin voicebot --features avspeech,tui -- "$@" 2>/dev/null
