@@ -86,6 +86,7 @@ impl LlmSession {
             match role.as_str() {
                 "User" => session.add_user_turn(content),
                 "Assistant" => session.add_assistant_turn(content),
+                "System" => session.add_system_turn(content),
                 "ToolExchanges" => {
                     // Deserialise and replay the tool-call + tool-result messages so the
                     // LLM sees the same context it had during the original turn.
@@ -126,6 +127,14 @@ impl LlmSession {
     /// Append a user turn.
     pub fn add_user_turn(&mut self, text: &str) {
         self.messages.push(serde_json::json!({"role": "user", "content": text}));
+    }
+
+    /// Append an in-conversation system turn.
+    ///
+    /// Used to deliver background task results and out-of-band notifications
+    /// to the model without impersonating the user.
+    pub fn add_system_turn(&mut self, text: &str) {
+        self.messages.push(serde_json::json!({"role": "system", "content": text}));
     }
 
     /// Append the assistant's final response for this turn.

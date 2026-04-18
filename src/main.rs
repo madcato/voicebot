@@ -68,6 +68,10 @@ pub(crate) struct SharedSession {
     /// message — the model will generate its natural continuation from the
     /// injected tool result.
     pub(crate) pending_tool_response: AtomicBool,
+    /// True when the drained `transliterated_text` is a background-task
+    /// notification that should be added to the session as a `system` turn
+    /// (not a `user` turn). Consumed by the LLM task on each iteration.
+    pub(crate) pending_system_injection: AtomicBool,
 }
 
 impl SharedSession {
@@ -85,6 +89,7 @@ impl SharedSession {
             consolidation_active: AtomicBool::new(false),
             stt_result_pending: AtomicBool::new(false),
             pending_tool_response: AtomicBool::new(false),
+            pending_system_injection: AtomicBool::new(false),
         }
     }
 }
@@ -917,6 +922,7 @@ async fn async_main() -> Result<()> {
                              Informa al usuario de forma natural y concisa."
                         );
                         *shared.transliterated_text.lock().unwrap() = notification;
+                        shared.pending_system_injection.store(true, Ordering::SeqCst);
                         current_agent_announcement = Some((task, result));
                         events.vad_finish.notify_one();
                     }
@@ -938,27 +944,28 @@ async fn async_main() -> Result<()> {
                     Some(event) = proactive_rx.recv() => {
                         match event {
                             ProactiveEvent::AgentResult { task, result, tool_call_id } => {
-                                if let Some(id) = tool_call_id {
-                                    // Background tool call: inject a proper OpenAI tool
-                                    // result message so the LLM continues naturally from
-                                    // its own tool_call instead of being re-prompted via a
-                                    // synthetic user message (which led the model to
-                                    // re-call the same tool in a loop).
-                                    let tool_result_msg = serde_json::json!({
-                                        "role": "tool",
-                                        "tool_call_id": id,
-                                        "content": result,
+                                if let Some(_id) = tool_call_id {
+                                    // Background tool call: Gemma (and other non-tool-role
+                                    // models) do not handle `role: "tool"` messages reliably,
+                                    // so we deliver the result as an in-conversation `system`
+                                    // message that names the task for the model's reference.
+                                    let payload = format!(
+                                        "[Resultado de la tarea en segundo plano '{task}']\n{result}"
+                                    );
+                                    let sys_msg = serde_json::json!({
+                                        "role": "system",
+                                        "content": payload,
                                     });
                                     {
                                         let mut s = llm_session.lock().unwrap();
-                                        s.add_tool_exchange(vec![tool_result_msg.clone()]);
+                                        s.add_tool_exchange(vec![sys_msg.clone()]);
                                     }
                                     {
                                         let db_c = db.clone();
-                                        let exchange = vec![tool_result_msg];
+                                        let exchange = vec![sys_msg];
                                         tokio::spawn(async move {
                                             if let Err(e) = db_c.save_tool_exchanges(session_id, &exchange).await {
-                                                warn!(target: "db", "Failed to save tool_result exchange: {}", e);
+                                                warn!(target: "db", "Failed to save system tool_result exchange: {}", e);
                                             }
                                         });
                                     }
@@ -1381,6 +1388,11 @@ async fn llm_task(
         // the LLM again without adding a synthetic user turn.
         let tool_continuation = shared.pending_tool_response.swap(false, Ordering::SeqCst);
 
+        // If the drained text is a background-task notification, add it as a
+        // `system` turn instead of a `user` turn so the model doesn't treat it
+        // as the user's own words.
+        let inject_as_system = shared.pending_system_injection.swap(false, Ordering::SeqCst);
+
         if text.trim().is_empty() && !tool_continuation {
             shared.llm_busy.store(false, Ordering::SeqCst);
             while cancel_rx.try_recv().is_ok() {}
@@ -1418,23 +1430,29 @@ async fn llm_task(
         let messages_snapshot = llm_session.lock().unwrap().messages.clone();
 
         if !tool_continuation {
-            // Add user turn and signal the audio loop to clear the speech buffer.
+            // Add the turn (user or system) and signal the audio loop to clear the speech buffer.
+            let db_role = if inject_as_system { "System" } else { "User" };
             {
                 let mut s = llm_session.lock().unwrap();
-                s.add_user_turn(&text);
+                if inject_as_system {
+                    s.add_system_turn(&text);
+                } else {
+                    s.add_user_turn(&text);
+                }
                 turn_commit_counter.fetch_add(1, Ordering::SeqCst);
                 if let Ok(mut h) = shared_history.write() {
                     *h = format_history(&s.messages);
                 }
             }
 
-            // Save user message to DB (non-blocking).
+            // Persist the turn to DB (non-blocking).
             {
                 let db_c = db.clone();
                 let text_c = text.clone();
+                let role_c = db_role.to_string();
                 tokio::spawn(async move {
-                    if let Err(e) = db_c.save_message(session_id, "User", &text_c).await {
-                        warn!(target: "db", "Failed to save user message: {}", e);
+                    if let Err(e) = db_c.save_message(session_id, &role_c, &text_c).await {
+                        warn!(target: "db", "Failed to save {} message: {}", role_c, e);
                     }
                 });
             }
