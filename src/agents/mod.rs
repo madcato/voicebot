@@ -1,7 +1,16 @@
 /// Events that trigger proactive speech from Jarvis without a user utterance.
 pub enum ProactiveEvent {
     /// A background agent task completed. Jarvis will vocalize the result.
-    AgentResult { task: String, result: String },
+    ///
+    /// When `tool_call_id` is `Some`, the completion came from a background tool
+    /// that was invoked by the LLM itself (e.g. `web_search`). The pipeline will
+    /// inject the proper OpenAI tool result message into the session and let the
+    /// LLM continue naturally instead of re-prompting via a user-role notification.
+    AgentResult {
+        task: String,
+        result: String,
+        tool_call_id: Option<String>,
+    },
     /// The inference daemon decided there is something worth saying proactively.
     /// `message` is the raw observation text; `run_proactive_pipeline` will
     /// reformulate it in Jarvis's voice before speaking.

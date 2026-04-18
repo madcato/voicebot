@@ -321,7 +321,7 @@ impl RunAgentTool {
             info!("RunAgentTool(cli): task complete ({} chars)", raw.len());
             let result = synthesize_agent_result(&task, raw, synthesis_client.as_deref()).await;
             if proactive_tx
-                .send(ProactiveEvent::AgentResult { task, result })
+                .send(ProactiveEvent::AgentResult { task, result, tool_call_id: None })
                 .await
                 .is_err()
             {
@@ -377,6 +377,7 @@ impl RunAgentTool {
                                         .send(ProactiveEvent::AgentResult {
                                             task: task_c,
                                             result: format!("ACP init error: {e}"),
+                                            tool_call_id: None,
                                         })
                                         .await;
                                     return;
@@ -388,6 +389,7 @@ impl RunAgentTool {
                                 .send(ProactiveEvent::AgentResult {
                                     task: task_c,
                                     result: format!("ACP spawn error: {e}"),
+                                    tool_call_id: None,
                                 })
                                 .await;
                             return;
@@ -409,6 +411,7 @@ impl RunAgentTool {
                                 .send(ProactiveEvent::AgentResult {
                                     task: task_c,
                                     result: format!("ACP send error: {e}"),
+                                    tool_call_id: None,
                                 })
                                 .await;
                             return;
@@ -419,6 +422,7 @@ impl RunAgentTool {
                         .send(ProactiveEvent::AgentResult {
                             task: task_c,
                             result: "ACP: writer not initialized.".to_string(),
+                            tool_call_id: None,
                         })
                         .await;
                     return;
@@ -465,7 +469,7 @@ impl RunAgentTool {
             info!(target: "acp", "Agent task complete — sending result ({} chars)", result.len());
             let final_result = synthesize_agent_result(&task_c, result, synthesis_client.as_deref()).await;
             if proactive_tx
-                .send(ProactiveEvent::AgentResult { task: task_c, result: final_result })
+                .send(ProactiveEvent::AgentResult { task: task_c, result: final_result, tool_call_id: None })
                 .await
                 .is_err()
             {
@@ -1153,7 +1157,7 @@ mod tests {
             .expect("channel closed");
 
         match event {
-            ProactiveEvent::AgentResult { task, result } => {
+            ProactiveEvent::AgentResult { task, result, .. } => {
                 assert!(task.contains("some task"), "task: {task:?}");
                 assert!(!result.is_empty(), "result should not be empty");
             }

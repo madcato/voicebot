@@ -92,6 +92,7 @@ impl EyesDaemon {
                     let event = ProactiveEvent::AgentResult {
                         task: "EYES — observación visual".to_string(),
                         result: message,
+                        tool_call_id: None,
                     };
                     if let Err(e) = self.proactive_tx.try_send(event) {
                         warn!(target: "eyes", "Failed to send proactive event: {}", e);

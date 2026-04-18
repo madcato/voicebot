@@ -62,6 +62,12 @@ pub(crate) struct SharedSession {
    /// True when an STT result has been obtained but not yet fully processed
     /// by the LLM (add_user_turn called).
     pub(crate) stt_result_pending: AtomicBool,
+    /// True when a background tool has delivered its result and the session
+    /// already contains the tool_call + tool_result exchange. The LLM task
+    /// must continue the turn (call the LLM again) without adding a new user
+    /// message — the model will generate its natural continuation from the
+    /// injected tool result.
+    pub(crate) pending_tool_response: AtomicBool,
 }
 
 impl SharedSession {
@@ -78,6 +84,7 @@ impl SharedSession {
             first_speech_played: AtomicBool::new(false),
             consolidation_active: AtomicBool::new(false),
             stt_result_pending: AtomicBool::new(false),
+            pending_tool_response: AtomicBool::new(false),
         }
     }
 }
@@ -930,8 +937,40 @@ async fn async_main() -> Result<()> {
                     },
                     Some(event) = proactive_rx.recv() => {
                         match event {
-                            ProactiveEvent::AgentResult { task, result } => {
-                                if !shared.llm_busy.load(Ordering::SeqCst) {
+                            ProactiveEvent::AgentResult { task, result, tool_call_id } => {
+                                if let Some(id) = tool_call_id {
+                                    // Background tool call: inject a proper OpenAI tool
+                                    // result message so the LLM continues naturally from
+                                    // its own tool_call instead of being re-prompted via a
+                                    // synthetic user message (which led the model to
+                                    // re-call the same tool in a loop).
+                                    let tool_result_msg = serde_json::json!({
+                                        "role": "tool",
+                                        "tool_call_id": id,
+                                        "content": result,
+                                    });
+                                    {
+                                        let mut s = llm_session.lock().unwrap();
+                                        s.add_tool_exchange(vec![tool_result_msg.clone()]);
+                                    }
+                                    {
+                                        let db_c = db.clone();
+                                        let exchange = vec![tool_result_msg];
+                                        tokio::spawn(async move {
+                                            if let Err(e) = db_c.save_tool_exchanges(session_id, &exchange).await {
+                                                warn!(target: "db", "Failed to save tool_result exchange: {}", e);
+                                            }
+                                        });
+                                    }
+                                    shared.pending_tool_response.store(true, Ordering::SeqCst);
+                                    if !shared.llm_busy.load(Ordering::SeqCst) {
+                                        events.vad_finish.notify_one();
+                                    }
+                                    // If the LLM is busy, don't interrupt — when the
+                                    // active turn ends, llm_busy drops and the next
+                                    // SpeechEnd or idle cycle will see
+                                    // pending_tool_response and trigger a fresh turn.
+                                } else if !shared.llm_busy.load(Ordering::SeqCst) {
                                     pending_agent_results.push_front((task, result));
                                 } else {
                                     pending_agent_results.push_back((task, result));
@@ -1337,7 +1376,12 @@ async fn llm_task(
          // Drain accumulated transcription.
         let text = std::mem::take(&mut *shared.transliterated_text.lock().unwrap());
 
-        if text.trim().is_empty() {
+        // Continuation from a background tool result: the audio loop injected
+        // an OpenAI-format `tool` message into the session already, so we call
+        // the LLM again without adding a synthetic user turn.
+        let tool_continuation = shared.pending_tool_response.swap(false, Ordering::SeqCst);
+
+        if text.trim().is_empty() && !tool_continuation {
             shared.llm_busy.store(false, Ordering::SeqCst);
             while cancel_rx.try_recv().is_ok() {}
             continue;
@@ -1349,10 +1393,14 @@ async fn llm_task(
         // Ambient mode: text pipeline injections bypass the wake-word check
         // because the audio loop already validated them before firing vad_finish.
         // (Voice utterances are filtered inside the SpeechEnd spawned task.)
-        info!(target: "pipeline", "[pipe={}] User: {}", pipeline_id, text);
+        if tool_continuation {
+            info!(target: "pipeline", "[pipe={}] Tool result delivered — continuing turn", pipeline_id);
+        } else {
+            info!(target: "pipeline", "[pipe={}] User: {}", pipeline_id, text);
+        }
 
         #[cfg(feature = "tui")]
-        {
+        if !tool_continuation {
             let source = if shared.text_input_pending.swap(false, Ordering::SeqCst) {
                 tui::events::InputSource::Text
             } else {
@@ -1369,25 +1417,35 @@ async fn llm_task(
 
         let messages_snapshot = llm_session.lock().unwrap().messages.clone();
 
-        // Add user turn and signal the audio loop to clear the speech buffer.
-        {
-            let mut s = llm_session.lock().unwrap();
-            s.add_user_turn(&text);
-            turn_commit_counter.fetch_add(1, Ordering::SeqCst);
+        if !tool_continuation {
+            // Add user turn and signal the audio loop to clear the speech buffer.
+            {
+                let mut s = llm_session.lock().unwrap();
+                s.add_user_turn(&text);
+                turn_commit_counter.fetch_add(1, Ordering::SeqCst);
+                if let Ok(mut h) = shared_history.write() {
+                    *h = format_history(&s.messages);
+                }
+            }
+
+            // Save user message to DB (non-blocking).
+            {
+                let db_c = db.clone();
+                let text_c = text.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = db_c.save_message(session_id, "User", &text_c).await {
+                        warn!(target: "db", "Failed to save user message: {}", e);
+                    }
+                });
+            }
+        } else {
+            // Tool continuation: session history already has the tool result
+            // appended by the audio loop. Keep shared_history in sync.
             if let Ok(mut h) = shared_history.write() {
+                let s = llm_session.lock().unwrap();
                 *h = format_history(&s.messages);
             }
-        }
-
-        // Save user message to DB (non-blocking).
-        {
-            let db_c = db.clone();
-            let text_c = text.clone();
-            tokio::spawn(async move {
-                if let Err(e) = db_c.save_message(session_id, "User", &text_c).await {
-                    warn!(target: "db", "Failed to save user message: {}", e);
-                }
-            });
+            turn_commit_counter.fetch_add(1, Ordering::SeqCst);
         }
 
         // Reset post-finished flag and clear assistant text buffer for new turn.
@@ -1486,8 +1544,11 @@ async fn llm_task(
                 match tool_call {
                     Some((name, args)) => {
                         if tools.is_background(&name) {
-                            // Background tool: acknowledge immediately via TTS, run in a
-                            // separate task, deliver the result via ProactiveEvent.
+                            // Background tool: speak ACK via TTS (not persisted), commit the
+                            // tool_call to session + DB so the later tool_result lines up by id,
+                            // then spawn the task and exit without an assistant turn. When the
+                            // result arrives, the audio loop appends the matching tool_result
+                            // message and triggers llm_task to produce the real response.
                             let ack = match name.as_str() {
                                 "web_search" => "Buscando.",
                                 "run_shell"  => "Ejecutando.",
@@ -1502,10 +1563,42 @@ async fn llm_task(
                             events.llm_post_received.notify_one(); // flush SEN
                             events.llm_post_finished.notify_one(); // wake consolidation
 
-                            let tools_c      = Arc::clone(&tools);
-                            let name_c       = name.clone();
-                            let args_c       = args.clone();
-                            let proactive_c  = proactive_tx.clone();
+                            let tc_id = format!("bg_{}_{}_{}", pipeline_id, iter, name);
+                            let tool_call_msg = serde_json::json!({
+                                "role": "assistant",
+                                "content": serde_json::Value::Null,
+                                "tool_calls": [{
+                                    "id": tc_id,
+                                    "type": "function",
+                                    "function": {"name": &name, "arguments": &args}
+                                }]
+                            });
+                            messages.push(tool_call_msg);
+
+                            // Persist tool_call to session + DB so `all_messages_api()` on the
+                            // continuation turn has the matching assistant tool_call entry.
+                            {
+                                let tool_exchanges = messages[base_msg_len..].to_vec();
+                                {
+                                    let mut s = llm_session.lock().unwrap();
+                                    s.add_tool_exchange(tool_exchanges.clone());
+                                    if let Ok(mut h) = shared_history.write() {
+                                        *h = format_history(&s.messages);
+                                    }
+                                }
+                                let db_c = db.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = db_c.save_tool_exchanges(session_id, &tool_exchanges).await {
+                                        warn!(target: "db", "Failed to save tool_call exchange: {}", e);
+                                    }
+                                });
+                            }
+
+                            let tools_c     = Arc::clone(&tools);
+                            let name_c      = name.clone();
+                            let args_c      = args.clone();
+                            let proactive_c = proactive_tx.clone();
+                            let tc_id_c     = tc_id.clone();
                             tokio::spawn(async move {
                                 info!(target: "pipeline", "Background tool `{}` started", name_c);
                                 let result = tools_c.execute(&name_c, &args_c).await;
@@ -1513,13 +1606,14 @@ async fn llm_task(
                                 proactive_c.send(ProactiveEvent::AgentResult {
                                     task: name_c,
                                     result,
+                                    tool_call_id: Some(tc_id_c),
                                 }).await.ok();
                             });
 
-                            // Fall through to the commit block so the ACK is saved to
-                            // session and DB as the assistant turn for this pipeline run.
-                            final_response = ack.to_string();
-                            break 'tool_loop;
+                            // Mark committed so the cancel-rollback path is skipped; exit
+                            // without the final_response commit block (no assistant turn).
+                            committed = true;
+                            break 'pipeline;
                         }
 
                         // Synchronous tool: execute inline and loop back to LLM.
