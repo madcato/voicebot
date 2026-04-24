@@ -953,7 +953,7 @@ async fn async_main() -> Result<()> {
                                         "[Resultado de la tarea en segundo plano '{task}']\n{result}"
                                     );
                                     let sys_msg = serde_json::json!({
-                                        "role": "system",
+                                        "role": "user",
                                         "content": payload,
                                     });
                                     {
@@ -1392,7 +1392,8 @@ async fn llm_task(
         // `system` turn instead of a `user` turn so the model doesn't treat it
         // as the user's own words.
         let inject_as_system = shared.pending_system_injection.swap(false, Ordering::SeqCst);
-
+        let inject_as_system= false;
+        
         if text.trim().is_empty() && !tool_continuation {
             shared.llm_busy.store(false, Ordering::SeqCst);
             while cancel_rx.try_recv().is_ok() {}

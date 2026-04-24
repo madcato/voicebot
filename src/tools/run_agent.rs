@@ -400,6 +400,14 @@ impl RunAgentTool {
                 }
             };
 
+            // ── Open session in Terminal ──────────────────────────────────────
+            {
+                let w_guard = acp_writer.lock().await;
+                if let Some(ref w) = *w_guard {
+                    w.open_session_in_terminal().await;
+                }
+            }
+
             // ── Send prompt ───────────────────────────────────────────────────
             let prompt_request_id = {
                 let mut guard = acp_writer.lock().await;
@@ -750,6 +758,27 @@ impl HermesAcpWriter {
         self.send_notification("session/cancel", serde_json::json!({
             "requestId": request_id
         })).await
+    }
+
+    /// Open current session in a Terminal window via osascript.
+    pub async fn open_session_in_terminal(&self) {
+        let Some(ref sid) = self.session_id else {
+            warn!(target: "agent", "Cannot open session in Terminal: session_id not yet set");
+            return;
+        };
+        let command = format!("hermes --resume {sid}");
+        let script = format!("tell application \"Terminal\" to do script {:?}", command);
+        match std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(_) => info!(target: "agent", "Opened hermes session {sid} in Terminal"),
+            Err(e) => {
+                warn!(target: "agent", "Failed to open Terminal for hermes session: {e}");
+            }
+        }
     }
 
     /// Create a new session (without re-initializing the process).
