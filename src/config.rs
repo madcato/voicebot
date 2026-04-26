@@ -196,13 +196,22 @@ pub struct Config {
     /// WebSocket server port. None = disabled (WS_PORT).
     pub ws_port: Option<u16>,
 
+    // ── Self-managed LLM process ──────────────────────────────────────────────
+    /// When true, voicebot launches and supervises the LLM server process.
+    /// Requires LLM_COMMAND to be set. (LLM_SELF_MANAGED, default false)
+    pub llm_self_managed: bool,
+    /// Full shell command to launch the LLM server (LLM_COMMAND).
+    /// Required when LLM_SELF_MANAGED=1.
+    /// Example: `mlx_lm.server --model mlx-community/Qwen3-8B-4bit --host 0.0.0.0 --port 8080 --max-tokens 32768`
+    pub llm_command: Option<String>,
+
     // ── Persistence ───────────────────────────────────────────────────────────
     pub db_path: String,
 }
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        Ok(Self {
+        let config = Self {
             // Audio
             sample_rate: env::var("AUDIO_SAMPLE_RATE")
                 .unwrap_or_else(|_| "16000".to_string())
@@ -438,9 +447,21 @@ impl Config {
                 .transpose()
                 .context("Invalid WS_PORT")?,
 
+            // Self-managed LLM process
+            llm_self_managed: env::var("LLM_SELF_MANAGED")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(false),
+            llm_command: env::var("LLM_COMMAND").ok(),
+
             // DB
             db_path: env::var("DB_PATH").unwrap_or_else(|_| "data/voicebot.db".to_string()),
-        })
+        };
+
+        if config.llm_self_managed && config.llm_command.is_none() {
+            anyhow::bail!("LLM_COMMAND must be set when LLM_SELF_MANAGED=1");
+        }
+
+        Ok(config)
     }
 
     pub fn samples_per_chunk(&self) -> usize {
