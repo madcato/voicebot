@@ -21,7 +21,7 @@ mod tts;
 #[cfg(feature = "remote")]
 mod remote;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_channel::bounded;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -546,6 +546,23 @@ async fn async_main() -> Result<()> {
         summary.as_deref(),
         &history,
     )));
+
+    // ── Self-managed LLM process ──────────────────────────────────────────────
+    if config.llm_self_managed {
+        let command = config.llm_command.as_deref().unwrap(); // validated in Config::from_env
+        let child = llm::manager::start_and_wait_ready(command, &config.llm_url)
+            .await
+            .context("Failed to start self-managed LLM server")?;
+        let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel::<String>(1);
+        let cmd = command.to_string();
+        let url = config.llm_url.clone();
+        tokio::spawn(llm::manager::supervise(child, cmd, url, notify_tx));
+        tokio::spawn(async move {
+            if let Some(msg) = notify_rx.recv().await {
+                error!(target: "llm_manager", "{}", msg);
+            }
+        });
+    }
 
     // ── LLM client ────────────────────────────────────────────────────────────
     let llm_client = OpenAIClient::new(

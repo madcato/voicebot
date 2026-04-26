@@ -316,6 +316,8 @@ Most configuration is done via environment variables (or `.env` file):
 | `STT_SUBMIT_INTERVAL_MS` | `500` | Interval (ms of new speech) between speculative Whisper submits during speech. Whisper runs in the background so the transcript is ready by SpeechEnd. Set to `0` to disable. |
 | **LLM** || |
 | `LLM_URL` | `http://127.0.0.1:8000` | LLM server URL (mlx-lm default; use IP not `localhost` to avoid DNS latency) |
+| `LLM_SELF_MANAGED` | `0` | If `1`, voicebot launches and supervises the LLM server process automatically. Requires `LLM_COMMAND`. On crash, restarts up to 3 times before logging a fatal error. |
+| `LLM_COMMAND` | — | Full shell command to launch the LLM server. Required when `LLM_SELF_MANAGED=1`. Example: `mlx_lm.server --model mlx-community/Qwen3-8B-4bit --host 0.0.0.0 --port 8080 --max-tokens 32768` |
 | `LLM_MODEL` | `local-model` | Model name or path |
 | `LLM_SYSTEM_PROMPT` | — | System prompt for the LLM |
 | `LLM_MAX_TOKENS` | `200` | Max response tokens |

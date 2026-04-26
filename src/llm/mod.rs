@@ -1,4 +1,5 @@
 pub mod client;
+pub mod manager;
 pub mod session;
 
 pub use client::{OpenAIClient, StreamToken};
