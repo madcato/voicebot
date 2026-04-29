@@ -760,25 +760,168 @@ impl HermesAcpWriter {
         })).await
     }
 
-    /// Open current session in a Terminal window via osascript.
+    /// Open a live Terminal window that polls Hermes' SQLite database for the
+    /// current ACP session, displaying messages and tool calls as they arrive.
+    ///
+    /// `hermes --resume {sid}` does not work for active ACP sessions because
+    /// they are process-local. Instead, this method queries the shared SQLite
+    /// session store (`~/.hermes/state.db`) every 2 seconds, colorizing output
+    /// by role (user / assistant / tool).
     pub async fn open_session_in_terminal(&self) {
-        let Some(ref sid) = self.session_id else {
-            warn!(target: "agent", "Cannot open session in Terminal: session_id not yet set");
-            return;
+        let sid = match &self.session_id {
+            Some(s) => s,
+            None => {
+                warn!(target: "agent", "Cannot open session viewer: session_id not yet set");
+                return;
+            }
         };
-        let command = format!("hermes --resume {sid}");
-        let script = format!("tell application \"Terminal\" to do script {:?}", command);
+
+        // Locate Hermes state.db via HERMES_HOME
+        let hermes_home = std::env::var("HERMES_HOME")
+            .ok()
+            .unwrap_or_else(|| {
+                std::env::var("HOME")
+                    .ok()
+                    .map(|h| format!("{h}/.hermes"))
+                    .unwrap_or_default()
+            });
+        let db_path = format!("{}/state.db", hermes_home);
+        if !std::path::Path::new(&db_path).exists() {
+            warn!(target: "agent", "Hermes state.db not found at {db_path}; cannot open session viewer");
+            return;
+        }
+
+        // Write a self-contained bash polling script to a temp file.
+        // Using a file avoids the nightmare of escaping complex bash for osascript.
+        // Use placeholders __DB__ and __SID__ to avoid Rust format! interpreting ${} as args.
+        let script = r#"#!/usr/bin/env bash
+# Live Hermes session viewer — polls SQLite for messages
+set -euo pipefail
+DB="__DB__"
+SID="__SID__"
+
+while true; do
+    clear
+
+    printf '\033[1;36m'
+    echo "=================================================="
+    echo "  Hermes Session: ${SID}"
+    echo "  $(date '+%H:%M:%S')"
+    echo "=================================================="
+    printf '\033[0m'
+
+    # Format: role|tool_name|content (content last so IFS='|' remainder goes to it safely).
+    # Newlines in content are collapsed to spaces so each message is one line.
+    last_tool=""  # carry forward from preceding assistant turn
+    sqlite3 "$DB" \
+      "SELECT role
+             || '|' ||
+             COALESCE(json_extract(tool_calls, '\$[0].function.name'),
+                     json_extract(tool_calls, '\$.function.name'),
+                     '')
+             || '|' ||
+             replace(replace(COALESCE(content, ''), char(10), ' '), char(13), '')
+       FROM messages
+       WHERE session_id = '\${SID}'
+       ORDER BY timestamp, rowid;" | \
+    while IFS='|' read -r role tool_name content; do
+
+        case "$role" in
+            user)
+                last_tool=""
+                printf '\033[1;31m[USER]\033[0m\n'
+                [ -n "$content" ] && printf '  %s\n' "$content"
+                ;;
+            assistant)
+                if [ -n "$tool_name" ]; then
+                    last_tool="$tool_name"
+                    printf '\033[1;32m[ASSISTANT] → %s\033[0m\n' "$tool_name"
+                else
+                    last_tool=""
+                    printf '\033[1;32m[ASSISTANT]\033[0m\n'
+                fi
+                [ -n "$content" ] && printf '  %s\n' "$content"
+                ;;
+            tool)
+                printf '\033[1;33m[TOOL: %s]\033[0m\n' "${last_tool:-(unknown)}"
+                # Truncate long tool output (often large JSON blobs)
+                if [ ${#content} -gt 200 ]; then
+                    printf '  %s...\n' "${content:0:200}"
+                elif [ -n "$content" ]; then
+                    printf '  %s\n' "$content"
+                fi
+                ;;
+            *)
+                printf '\033[1;36m[%s]\033[0m\n' "$role"
+                [ -n "$content" ] && printf '  %s\n' "$content"
+                ;;
+        esac
+        echo "───────────────────────────────────"
+    done
+
+    echo ""
+
+    # Check if session has ended (ended_at is set)
+    ended_at=$(sqlite3 "$DB" "SELECT ended_at FROM sessions WHERE id='${SID}' LIMIT 1;" 2>/dev/null || true)
+    if [ -n "$ended_at" ]; then
+        printf '\033[1;32mSession completed.\033[0m  (press Ctrl+C to close this window)\n'
+        break
+    fi
+
+    printf '\033[0;2m(polling… press Ctrl+C to close)\033[0m\n'
+
+    if ! sleep 2; then
+        break  # handle Ctrl+C gracefully
+    fi
+done
+
+echo ""
+echo "Session viewer closed."
+"#
+        .replace("__DB__", &db_path)
+        .replace("__SID__", sid);
+
+        // Write script to a unique temp file
+        let tmp_dir: std::path::PathBuf = std::env::temp_dir();
+        let script_path = tmp_dir.join(format!(".voicebot_session_{}.sh", sid));
+        if let Err(e) = std::fs::write(&script_path, &script) {
+            warn!(target: "agent", "Failed to write session viewer script: {e}");
+            return;
+        }
+        // Make executable (not strictly required for `bash ...`, but good practice)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(mut perms) = std::fs::metadata(&script_path).map(|m| m.permissions()) {
+                perms.set_mode(0o755);
+                let _ = std::fs::set_permissions(&script_path, perms);
+            }
+        }
+
+        // Launch Terminal with the script
+        let bash_cmd = format!("bash {}", script_path.display());
+        let osacmd = format!(r#"tell application "Terminal" to do script "{bash_cmd}""#);
+
         match std::process::Command::new("osascript")
             .arg("-e")
-            .arg(script)
+            .arg(osacmd)
             .stderr(std::process::Stdio::piped())
             .spawn()
         {
-            Ok(_) => info!(target: "agent", "Opened hermes session {sid} in Terminal"),
+            Ok(_) => {
+                info!(target: "agent", "Opened live session viewer for {} in Terminal", sid);
+            }
             Err(e) => {
-                warn!(target: "agent", "Failed to open Terminal for hermes session: {e}");
+                warn!(target: "agent", "Failed to open Terminal session viewer for {}: {e}", sid);
             }
         }
+
+        // Clean up the temp script after a brief delay ( Terminal has already read it)
+        let sp = script_path.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let _ = std::fs::remove_file(&sp);
+        });
     }
 
     /// Create a new session (without re-initializing the process).
