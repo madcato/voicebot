@@ -1,0 +1,403 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
+use tracing::{error, info, warn};
+
+use crate::agents::ProactiveEvent;
+use crate::analysis::ContextLens;
+use crate::db::Database;
+use crate::llm::{LlmSession, OpenAIClient, StreamToken};
+use crate::tools::{format_history, ToolRegistry};
+use super::state::{PipelineEvents, SharedSession, PIPELINE_RUN_ID};
+
+/// Maximum number of sequential tool calls allowed per user turn.
+pub const MAX_TOOL_ITERATIONS: usize = 5;
+
+/// LLM task: blocks on VAD_FINISH, runs the LLM+tools pipeline, fires events.
+#[allow(clippy::too_many_arguments)]
+pub async fn llm_task(
+    shared: Arc<SharedSession>,
+    events: Arc<PipelineEvents>,
+    llm_session: Arc<Mutex<LlmSession>>,
+    llm_client: OpenAIClient,
+    db: Database,
+    session_id: uuid::Uuid,
+    tools: Arc<ToolRegistry>,
+    shared_history: Arc<RwLock<String>>,
+    turn_commit_counter: Arc<AtomicU64>,
+    proactive_tx: mpsc::Sender<ProactiveEvent>,
+    context_lens: Arc<Mutex<ContextLens>>,
+    #[cfg(feature = "tui")] tui_tx: crate::tui::events::TuiEventTx,
+) {
+    let pipeline_id = PIPELINE_RUN_ID.fetch_add(1, Ordering::SeqCst);
+    let mut cancel_rx = events.cancel_tx.subscribe();
+
+    loop {
+        // Block until VAD_FINISH; ignore cancels while idle.
+        loop {
+            tokio::select! {
+                _ = events.vad_finish.notified() => { break; }
+                _ = cancel_rx.recv() => {}
+            }
+        }
+
+        while shared.consolidation_active.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        shared.llm_busy.store(true, Ordering::SeqCst);
+
+        let text = std::mem::take(&mut *shared.transliterated_text.lock().unwrap());
+
+        let tool_continuation = shared.pending_tool_response.swap(false, Ordering::SeqCst);
+
+        let inject_as_system = shared.pending_system_injection.swap(false, Ordering::SeqCst);
+        let inject_as_system = false;
+
+        if text.trim().is_empty() && !tool_continuation {
+            shared.llm_busy.store(false, Ordering::SeqCst);
+            while cancel_rx.try_recv().is_ok() {}
+            continue;
+        }
+
+        shared.stt_result_pending.store(false, Ordering::SeqCst);
+
+        if tool_continuation {
+            info!(target: "pipeline", "[pipe={}] Tool result delivered — continuing turn", pipeline_id);
+        } else {
+            info!(target: "pipeline", "[pipe={}] User: {}", pipeline_id, text);
+        }
+
+        #[cfg(feature = "tui")]
+        if !tool_continuation {
+            let source = if shared.text_input_pending.swap(false, Ordering::SeqCst) {
+                crate::tui::events::InputSource::Text
+            } else {
+                crate::tui::events::InputSource::Voice
+            };
+            tui_tx
+                .send(crate::tui::events::TuiEvent::UserMessage { text: text.clone(), source })
+                .ok();
+            tui_tx
+                .send(crate::tui::events::TuiEvent::StateChange(
+                    crate::tui::events::PipelineState::Thinking,
+                ))
+                .ok();
+        }
+
+        let messages_snapshot = llm_session.lock().unwrap().messages.clone();
+
+        if !tool_continuation {
+            let db_role = if inject_as_system { "System" } else { "User" };
+            {
+                let mut s = llm_session.lock().unwrap();
+                if inject_as_system {
+                    s.add_system_turn(&text);
+                } else {
+                    s.add_user_turn(&text);
+                }
+                turn_commit_counter.fetch_add(1, Ordering::SeqCst);
+                if let Ok(mut h) = shared_history.write() {
+                    *h = format_history(&s.messages);
+                }
+            }
+            {
+                let db_c = db.clone();
+                let text_c = text.clone();
+                let role_c = db_role.to_string();
+                tokio::spawn(async move {
+                    if let Err(e) = db_c.save_message(session_id, &role_c, &text_c).await {
+                        warn!(target: "db", "Failed to save {} message: {}", role_c, e);
+                    }
+                });
+            }
+        } else {
+            if let Ok(mut h) = shared_history.write() {
+                let s = llm_session.lock().unwrap();
+                *h = format_history(&s.messages);
+            }
+            turn_commit_counter.fetch_add(1, Ordering::SeqCst);
+        }
+
+        shared.llm_post_finished.store(false, Ordering::SeqCst);
+        shared.assistant_text.lock().unwrap().clear();
+
+        let tool_defs = tools.tool_definitions();
+        info!(
+            target: "pipeline",
+            "LLM request: {} tool(s) available: {:?}",
+            tool_defs.len(),
+            tool_defs
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str())
+                .collect::<Vec<_>>()
+        );
+        let mut messages = llm_session.lock().unwrap().all_messages_api();
+        // Inject fresh analysis context (speaker identity, emotion, video scene) into the
+        // system message for this call only — never persisted to the session or DB.
+        if let Some(ctx) = context_lens.lock().unwrap().format_for_llm() {
+            if let Some(sys_msg) = messages.first_mut() {
+                if let Some(content) = sys_msg["content"].as_str() {
+                    let enriched = format!("{}{}", content, ctx);
+                    sys_msg["content"] = serde_json::Value::String(enriched);
+                }
+            }
+        }
+        let base_msg_len = messages.len();
+        let mut final_response = String::new();
+        let mut committed = false;
+        let mut cancelled = false;
+        let mut first_token_logged = false;
+
+        'pipeline: {
+            'tool_loop: for iter in 0..MAX_TOOL_ITERATIONS {
+                info!(target: "performance", "LLM request [pipe={}]", pipeline_id);
+                let (token_rx, stream_handle) =
+                    match llm_client.stream(&messages, &tool_defs).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            error!(target: "llm", "LLM error: {}", e);
+                            #[cfg(feature = "tui")]
+                            tui_tx
+                                .send(crate::tui::events::TuiEvent::Error(format!(
+                                    "LLM error: {e}"
+                                )))
+                                .ok();
+                            shared.sentences.lock().unwrap().push_back(
+                                "Lo siento, no pude conectar con el modelo de lenguaje."
+                                    .to_string(),
+                            );
+                            events.sentence_ready.notify_one();
+                            break 'pipeline;
+                        }
+                    };
+
+                *shared.t_llm_post_send.lock().unwrap() = Some(Instant::now());
+
+                let mut token_rx = token_rx;
+                let mut llm_text = String::new();
+                let mut tool_call: Option<(String, String)> = None;
+
+                loop {
+                    tokio::select! {
+                        token = token_rx.recv() => {
+                            match token {
+                                Some(StreamToken::Content(t)) => {
+                                    let t = if llm_text.is_empty() {
+                                        t.trim_start_matches('\n').to_string()
+                                    } else {
+                                        t
+                                    };
+                                    if t.is_empty() { continue; }
+                                    if !first_token_logged {
+                                        first_token_logged = true;
+                                        if let Some(t0) = shared.t_llm_post_send.lock().unwrap().as_ref() {
+                                            info!(target: "performance", "[+{}ms] LLM first token (TTFT)", t0.elapsed().as_millis());
+                                        }
+                                    }
+                                    llm_text.push_str(&t);
+                                    shared.assistant_text.lock().unwrap().push_str(&t);
+                                    events.llm_post_received.notify_one();
+                                    #[cfg(feature = "tui")]
+                                    tui_tx.send(crate::tui::events::TuiEvent::AssistantToken(t)).ok();
+                                }
+                                Some(StreamToken::ToolCall { name, args }) => {
+                                    info!(target: "pipeline", "ToolCall received: name={} args={}", name, args);
+                                    tool_call = Some((name, args));
+                                    break;
+                                }
+                                None => {
+                                    shared.llm_post_finished.store(true, Ordering::SeqCst);
+                                    events.llm_post_received.notify_one();
+                                    events.llm_post_finished.notify_one();
+                                    #[cfg(feature = "tui")]
+                                    tui_tx.send(crate::tui::events::TuiEvent::AssistantDone).ok();
+                                    break;
+                                }
+                            }
+                        }
+                        _ = cancel_rx.recv() => {
+                            cancelled = true;
+                            drop(token_rx);
+                            stream_handle.abort();
+                            break;
+                        }
+                    }
+                }
+
+                if cancelled {
+                    break 'pipeline;
+                }
+
+                match tool_call {
+                    Some((name, args)) => {
+                        if tools.is_background(&name) {
+                            let ack = match name.as_str() {
+                                "web_search" => "Buscando.",
+                                "run_shell" => "Ejecutando.",
+                                _ => "Procesando en segundo plano, le aviso al terminar.",
+                            };
+                            {
+                                let mut text = shared.assistant_text.lock().unwrap();
+                                text.push_str(ack);
+                            }
+                            events.llm_post_received.notify_one();
+                            shared.llm_post_finished.store(true, Ordering::SeqCst);
+                            events.llm_post_received.notify_one();
+                            events.llm_post_finished.notify_one();
+
+                            let tc_id = format!("bg_{}_{}_{}", pipeline_id, iter, name);
+                            let tool_call_msg = serde_json::json!({
+                                "role": "assistant",
+                                "content": serde_json::Value::Null,
+                                "tool_calls": [{
+                                    "id": tc_id,
+                                    "type": "function",
+                                    "function": {"name": &name, "arguments": &args}
+                                }]
+                            });
+                            messages.push(tool_call_msg);
+
+                            {
+                                let tool_exchanges = messages[base_msg_len..].to_vec();
+                                {
+                                    let mut s = llm_session.lock().unwrap();
+                                    s.add_tool_exchange(tool_exchanges.clone());
+                                    if let Ok(mut h) = shared_history.write() {
+                                        *h = format_history(&s.messages);
+                                    }
+                                }
+                                let db_c = db.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) =
+                                        db_c.save_tool_exchanges(session_id, &tool_exchanges).await
+                                    {
+                                        warn!(target: "db", "Failed to save tool_call exchange: {}", e);
+                                    }
+                                });
+                            }
+
+                            let tools_c = Arc::clone(&tools);
+                            let name_c = name.clone();
+                            let args_c = args.clone();
+                            let proactive_c = proactive_tx.clone();
+                            let tc_id_c = tc_id.clone();
+                            tokio::spawn(async move {
+                                info!(target: "pipeline", "Background tool `{}` started", name_c);
+                                let result = tools_c.execute(&name_c, &args_c).await;
+                                info!(
+                                    target: "pipeline",
+                                    "Background tool `{}` finished ({} chars): {:?}",
+                                    name_c, result.len(), result
+                                );
+                                proactive_c
+                                    .send(ProactiveEvent::AgentResult {
+                                        task: name_c,
+                                        result,
+                                        tool_call_id: Some(tc_id_c),
+                                    })
+                                    .await
+                                    .ok();
+                            });
+
+                            committed = true;
+                            break 'pipeline;
+                        }
+
+                        let result = tools.execute(&name, &args).await;
+                        info!(target: "pipeline", "Tool[{}] `{}` → {}", iter, name, result);
+                        #[cfg(feature = "tui")]
+                        tui_tx
+                            .send(crate::tui::events::TuiEvent::ToolCall {
+                                name: name.clone(),
+                                result: result.clone(),
+                            })
+                            .ok();
+
+                        let tool_call_id = format!("call_{}_{}", name, iter);
+                        messages.push(serde_json::json!({
+                            "role": "assistant",
+                            "content": serde_json::Value::Null,
+                            "tool_calls": [{
+                                "id": tool_call_id,
+                                "type": "function",
+                                "function": {"name": name, "arguments": args}
+                            }]
+                        }));
+                        messages.push(serde_json::json!({
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": result
+                        }));
+
+                        if cancel_rx.try_recv().is_ok() {
+                            cancelled = true;
+                            break 'pipeline;
+                        }
+                    }
+                    None => {
+                        final_response = llm_text;
+                        break 'tool_loop;
+                    }
+                }
+            }
+
+            if final_response.is_empty() || cancelled {
+                break 'pipeline;
+            }
+
+            info!(
+                target: "pipeline",
+                "[pipe={}] Assistant: {}",
+                pipeline_id, final_response
+            );
+
+            {
+                let db_c = db.clone();
+                let resp_c = final_response.clone();
+                let tool_exchanges_c = messages[base_msg_len..].to_vec();
+                tokio::spawn(async move {
+                    if !tool_exchanges_c.is_empty() {
+                        if let Err(e) =
+                            db_c.save_tool_exchanges(session_id, &tool_exchanges_c).await
+                        {
+                            warn!(target: "db", "Failed to save tool exchanges: {}", e);
+                        }
+                    }
+                    if let Err(e) = db_c.save_message(session_id, "Assistant", &resp_c).await {
+                        warn!(target: "db", "Failed to save assistant message: {}", e);
+                    }
+                });
+            }
+            {
+                let mut s = llm_session.lock().unwrap();
+                let tool_exchanges = messages[base_msg_len..].to_vec();
+                if !tool_exchanges.is_empty() {
+                    s.add_tool_exchange(tool_exchanges);
+                }
+                s.add_assistant_turn(&final_response);
+            }
+            committed = true;
+        }
+
+        if !committed && cancelled {
+            llm_session.lock().unwrap().messages = messages_snapshot;
+            info!(
+                target: "pipeline",
+                "[pipe={}] Cancelled — session rolled back",
+                pipeline_id
+            );
+        }
+
+        shared.llm_busy.store(false, Ordering::SeqCst);
+        #[cfg(feature = "tui")]
+        tui_tx
+            .send(crate::tui::events::TuiEvent::StateChange(
+                crate::tui::events::PipelineState::Idle,
+            ))
+            .ok();
+
+        while cancel_rx.try_recv().is_ok() {}
+    }
+}
