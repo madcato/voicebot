@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use std::time::Instant;
+use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
 use crate::agents::ProactiveEvent;
@@ -9,16 +9,26 @@ use crate::analysis::ContextLens;
 use crate::db::Database;
 use crate::llm::{LlmSession, OpenAIClient, StreamToken};
 use crate::tools::{format_history, ToolRegistry};
-use super::state::{PipelineEvents, SharedSession, PIPELINE_RUN_ID};
+use super::frames::PipelineFrame;
+use super::fsm::PipelineState;
+use super::state::PipelineEvents;
+
+/// Monotonically increasing counter for tagging each pipeline run with a unique ID.
+static PIPELINE_RUN_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Maximum number of sequential tool calls allowed per user turn.
 pub const MAX_TOOL_ITERATIONS: usize = 5;
 
-/// LLM task: blocks on VAD_FINISH, runs the LLM+tools pipeline, fires events.
+/// LLM task: receives transcript frames, runs the LLM+tools pipeline, fires events.
 #[allow(clippy::too_many_arguments)]
 pub async fn llm_task(
-    shared: Arc<SharedSession>,
     events: Arc<PipelineEvents>,
+    pipeline_state_tx: Arc<watch::Sender<PipelineState>>,
+    mut pipeline_state_rx: watch::Receiver<PipelineState>,
+    sentences_tx: mpsc::Sender<PipelineFrame>,
+    llm_tx: mpsc::Sender<PipelineFrame>,
+    mut transcript_rx: mpsc::Receiver<PipelineFrame>,
+    t_llm_post_send: Arc<Mutex<Option<Instant>>>,
     llm_session: Arc<Mutex<LlmSession>>,
     llm_client: OpenAIClient,
     db: Database,
@@ -31,37 +41,38 @@ pub async fn llm_task(
     #[cfg(feature = "tui")] tui_tx: crate::tui::events::TuiEventTx,
 ) {
     let pipeline_id = PIPELINE_RUN_ID.fetch_add(1, Ordering::SeqCst);
-    let mut cancel_rx = events.cancel_tx.subscribe();
+    let mut cancel_rx = events.barge_in_tx.subscribe();
 
     loop {
-        // Block until VAD_FINISH; ignore cancels while idle.
-        loop {
+        // Block until a transcript frame arrives; ignore cancels while idle.
+        let frame = loop {
             tokio::select! {
-                _ = events.vad_finish.notified() => { break; }
+                frame = transcript_rx.recv() => {
+                    match frame {
+                        Some(f) => break f,
+                        None => return, // channel closed — exit
+                    }
+                }
                 _ = cancel_rx.recv() => {}
             }
+        };
+
+        // Decode the incoming frame into (text, tool_continuation, is_text_input).
+        let (text, tool_continuation, is_text_input) = match frame {
+            PipelineFrame::TranscriptReady { text, .. } => (text, false, false),
+            PipelineFrame::TextInput { text }           => (text, false, true),
+            PipelineFrame::SystemNotification { text }  => (text, false, false),
+            PipelineFrame::AgentResult { tool_call_id: Some(_), .. } => (String::new(), true, false),
+            _ => continue, // unexpected frame type — wait for next
+        };
+
+        // Wait for consolidation to finish before starting a new turn.
+        loop {
+            if !matches!(*pipeline_state_rx.borrow(), PipelineState::Paused { .. }) { break; }
+            pipeline_state_rx.changed().await.ok();
         }
 
-        while shared.consolidation_active.load(Ordering::SeqCst) {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-
-        shared.llm_busy.store(true, Ordering::SeqCst);
-
-        let text = std::mem::take(&mut *shared.transliterated_text.lock().unwrap());
-
-        let tool_continuation = shared.pending_tool_response.swap(false, Ordering::SeqCst);
-
-        let inject_as_system = shared.pending_system_injection.swap(false, Ordering::SeqCst);
-        let inject_as_system = false;
-
-        if text.trim().is_empty() && !tool_continuation {
-            shared.llm_busy.store(false, Ordering::SeqCst);
-            while cancel_rx.try_recv().is_ok() {}
-            continue;
-        }
-
-        shared.stt_result_pending.store(false, Ordering::SeqCst);
+        let _ = pipeline_state_tx.send(PipelineState::Thinking { utterance_id: pipeline_id });
 
         if tool_continuation {
             info!(target: "pipeline", "[pipe={}] Tool result delivered — continuing turn", pipeline_id);
@@ -71,7 +82,7 @@ pub async fn llm_task(
 
         #[cfg(feature = "tui")]
         if !tool_continuation {
-            let source = if shared.text_input_pending.swap(false, Ordering::SeqCst) {
+            let source = if is_text_input {
                 crate::tui::events::InputSource::Text
             } else {
                 crate::tui::events::InputSource::Voice
@@ -89,14 +100,9 @@ pub async fn llm_task(
         let messages_snapshot = llm_session.lock().unwrap().messages.clone();
 
         if !tool_continuation {
-            let db_role = if inject_as_system { "System" } else { "User" };
             {
                 let mut s = llm_session.lock().unwrap();
-                if inject_as_system {
-                    s.add_system_turn(&text);
-                } else {
-                    s.add_user_turn(&text);
-                }
+                s.add_user_turn(&text);
                 turn_commit_counter.fetch_add(1, Ordering::SeqCst);
                 if let Ok(mut h) = shared_history.write() {
                     *h = format_history(&s.messages);
@@ -105,10 +111,9 @@ pub async fn llm_task(
             {
                 let db_c = db.clone();
                 let text_c = text.clone();
-                let role_c = db_role.to_string();
                 tokio::spawn(async move {
-                    if let Err(e) = db_c.save_message(session_id, &role_c, &text_c).await {
-                        warn!(target: "db", "Failed to save {} message: {}", role_c, e);
+                    if let Err(e) = db_c.save_message(session_id, "User", &text_c).await {
+                        warn!(target: "db", "Failed to save User message: {}", e);
                     }
                 });
             }
@@ -120,8 +125,7 @@ pub async fn llm_task(
             turn_commit_counter.fetch_add(1, Ordering::SeqCst);
         }
 
-        shared.llm_post_finished.store(false, Ordering::SeqCst);
-        shared.assistant_text.lock().unwrap().clear();
+        // (assistant_text / llm_post_finished flags removed; channel carries this now)
 
         let tool_defs = tools.tool_definitions();
         info!(
@@ -164,16 +168,15 @@ pub async fn llm_task(
                                     "LLM error: {e}"
                                 )))
                                 .ok();
-                            shared.sentences.lock().unwrap().push_back(
-                                "Lo siento, no pude conectar con el modelo de lenguaje."
-                                    .to_string(),
-                            );
-                            events.sentence_ready.notify_one();
+                            let _ = sentences_tx.send(super::frames::PipelineFrame::SentenceReady {
+                                utterance_id: pipeline_id,
+                                sentence: "Lo siento, no pude conectar con el modelo de lenguaje.".to_string(),
+                            }).await;
                             break 'pipeline;
                         }
                     };
 
-                *shared.t_llm_post_send.lock().unwrap() = Some(Instant::now());
+                *t_llm_post_send.lock().unwrap() = Some(Instant::now());
 
                 let mut token_rx = token_rx;
                 let mut llm_text = String::new();
@@ -192,13 +195,15 @@ pub async fn llm_task(
                                     if t.is_empty() { continue; }
                                     if !first_token_logged {
                                         first_token_logged = true;
-                                        if let Some(t0) = shared.t_llm_post_send.lock().unwrap().as_ref() {
+                                        if let Some(t0) = t_llm_post_send.lock().unwrap().as_ref() {
                                             info!(target: "performance", "[+{}ms] LLM first token (TTFT)", t0.elapsed().as_millis());
                                         }
                                     }
                                     llm_text.push_str(&t);
-                                    shared.assistant_text.lock().unwrap().push_str(&t);
-                                    events.llm_post_received.notify_one();
+                                    let _ = llm_tx.send(super::frames::PipelineFrame::LLMToken {
+                                        utterance_id: pipeline_id,
+                                        token: t.clone(),
+                                    }).await;
                                     #[cfg(feature = "tui")]
                                     tui_tx.send(crate::tui::events::TuiEvent::AssistantToken(t)).ok();
                                 }
@@ -208,8 +213,10 @@ pub async fn llm_task(
                                     break;
                                 }
                                 None => {
-                                    shared.llm_post_finished.store(true, Ordering::SeqCst);
-                                    events.llm_post_received.notify_one();
+                                    let _ = llm_tx.send(super::frames::PipelineFrame::LLMResponseDone {
+                                        utterance_id: pipeline_id,
+                                        full_text: llm_text.clone(),
+                                    }).await;
                                     events.llm_post_finished.notify_one();
                                     #[cfg(feature = "tui")]
                                     tui_tx.send(crate::tui::events::TuiEvent::AssistantDone).ok();
@@ -238,13 +245,14 @@ pub async fn llm_task(
                                 "run_shell" => "Ejecutando.",
                                 _ => "Procesando en segundo plano, le aviso al terminar.",
                             };
-                            {
-                                let mut text = shared.assistant_text.lock().unwrap();
-                                text.push_str(ack);
-                            }
-                            events.llm_post_received.notify_one();
-                            shared.llm_post_finished.store(true, Ordering::SeqCst);
-                            events.llm_post_received.notify_one();
+                            let _ = llm_tx.send(super::frames::PipelineFrame::LLMToken {
+                                utterance_id: pipeline_id,
+                                token: ack.to_string(),
+                            }).await;
+                            let _ = llm_tx.send(super::frames::PipelineFrame::LLMResponseDone {
+                                utterance_id: pipeline_id,
+                                full_text: ack.to_string(),
+                            }).await;
                             events.llm_post_finished.notify_one();
 
                             let tc_id = format!("bg_{}_{}_{}", pipeline_id, iter, name);
@@ -390,7 +398,7 @@ pub async fn llm_task(
             );
         }
 
-        shared.llm_busy.store(false, Ordering::SeqCst);
+        let _ = pipeline_state_tx.send(PipelineState::Idle);
         #[cfg(feature = "tui")]
         tui_tx
             .send(crate::tui::events::TuiEvent::StateChange(

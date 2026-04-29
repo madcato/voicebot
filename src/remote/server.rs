@@ -22,8 +22,8 @@ pub struct RemoteState {
     pub audio_tx: async_channel::Sender<AudioChunk>,
     /// Samples per audio chunk (matches pipeline expectation).
     pub samples_per_chunk: usize,
-    /// Barge-in: broadcast cancel signal.
-    pub cancel_tx: broadcast::Sender<()>,
+    /// Barge-in: broadcast cancel signal (payload = utterance_id).
+    pub barge_in_tx: broadcast::Sender<u64>,
     /// Barge-in: atomic flag for play_blocking.
     pub play_cancel: Arc<AtomicBool>,
     /// TTS audio routing: when Some, TTS sends audio here instead of CPAL.
@@ -108,7 +108,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<RemoteState>) {
     let samples_per_chunk = state.samples_per_chunk;
 
     // Task: read WS messages, fan out binary vs text.
-    let cancel_tx = state.cancel_tx.clone();
+    let barge_in_tx = state.barge_in_tx.clone();
     let play_cancel = Arc::clone(&state.play_cancel);
     let ws_write = Arc::new(tokio::sync::Mutex::new(ws_write));
     let ws_write_ctrl = Arc::clone(&ws_write);
@@ -142,7 +142,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<RemoteState>) {
                         Ok(ClientMessage::BargeIn) => {
                             info!(target: "remote", "Barge-in from remote client");
                             play_cancel.store(true, Ordering::SeqCst);
-                            let _ = cancel_tx.send(());
+                            let _ = barge_in_tx.send(0);
                         }
                         Err(e) => {
                             warn!(target: "remote", "Unknown control message: {e}");

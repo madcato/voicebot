@@ -14,9 +14,10 @@ use crossterm::{
 };
 use crossterm::event::{self, Event};
 use ratatui::{Terminal, backend::CrosstermBackend};
+use tokio::sync::mpsc;
 
+use crate::pipeline::PipelineFrame;
 use crate::tools::ConversationMode;
-use crate::{PipelineEvents, SharedSession};
 use app::{Action, App};
 use events::{TuiEvent, TuiEventRx};
 use input::KeyReader;
@@ -26,8 +27,7 @@ const TICK_MS: u64 = 33; // ~30fps
 /// Run the TUI event loop. Blocks until the user quits.
 pub async fn run(
     mut event_rx: TuiEventRx,
-    shared: Arc<SharedSession>,
-    events: Arc<PipelineEvents>,
+    transcript_tx: mpsc::Sender<PipelineFrame>,
     tts_muted: Arc<AtomicBool>,
     conv_mode: Arc<Mutex<ConversationMode>>,
 ) -> Result<()> {
@@ -74,9 +74,7 @@ pub async fn run(
                                     app.should_quit = true;
                                 }
                                 Action::Submit(text) => {
-                                    shared.text_input_pending.store(true, Ordering::SeqCst);
-                                    *shared.transliterated_text.lock().unwrap() = text;
-                                    events.vad_finish.notify_one();
+                                    transcript_tx.send(PipelineFrame::TextInput { text }).await.ok();
                                 }
                                 Action::ToggleTts => {
                                     let was_muted = tts_muted.load(Ordering::SeqCst);

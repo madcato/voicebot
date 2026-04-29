@@ -1,13 +1,15 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::sync::atomic::Ordering;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 use crate::db::{Database, Memory};
 use crate::llm::{OpenAIClient, LlmSession};
 use crate::memory::{build_memory_context, extract_memories};
 use crate::profile::{build_profile_context, extract_facts, ProfileFact};
-use super::state::{SharedSession, PipelineEvents};
+use super::frames::PipelineFrame;
+use super::fsm::{PauseReason, PipelineState};
+use super::state::PipelineEvents;
 
 /// Assemble the full system prompt from its components.
 ///
@@ -156,8 +158,10 @@ pub async fn run_consolidation_cycle(
 /// memory consolidation cycle when the context window approaches its limit.
 #[allow(clippy::too_many_arguments)]
 pub async fn consolidation_task(
-    shared: Arc<SharedSession>,
     events: Arc<PipelineEvents>,
+    pipeline_state_tx: Arc<watch::Sender<PipelineState>>,
+    mut pipeline_state_rx: watch::Receiver<PipelineState>,
+    transcript_tx: mpsc::Sender<PipelineFrame>,
     llm_session: Arc<Mutex<LlmSession>>,
     background_client: OpenAIClient,
     db: Database,
@@ -170,7 +174,7 @@ pub async fn consolidation_task(
     base_prompt: String,
     tool_section: String,
 ) {
-    let mut cancel_rx = events.cancel_tx.subscribe();
+    let mut cancel_rx = events.barge_in_tx.subscribe();
     let mut last_turn_at = Instant::now();
 
     loop {
@@ -192,7 +196,7 @@ pub async fn consolidation_task(
                     let elapsed = last_turn_at.elapsed().as_secs();
                     if idle_consolidation_secs > 0
                         && elapsed >= idle_consolidation_secs
-                        && !shared.llm_busy.load(Ordering::SeqCst)
+                        && !pipeline_state_rx.borrow().is_busy()
                     {
                         break true;
                     }
@@ -228,15 +232,16 @@ pub async fn consolidation_task(
         if !triggered_by_idle {
             info!(target: "memory", "Context limit approaching — starting announced consolidation");
 
-            while shared.llm_busy.load(Ordering::SeqCst) {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+            // Wait for LLM to finish its current turn before interrupting.
+            loop {
+                if !pipeline_state_rx.borrow().is_busy() { break; }
+                pipeline_state_rx.changed().await.ok();
             }
-            shared.consolidation_active.store(false, Ordering::SeqCst);
-            *shared.transliterated_text.lock().unwrap() =
-                "[Sistema: necesitas reorganizar tu memoria para seguir conversando. \
-                 Avisa al usuario de que vuelves en unos minutos.]"
-                    .to_string();
-            events.vad_finish.notify_one();
+            transcript_tx.send(PipelineFrame::SystemNotification {
+                text: "[Sistema: necesitas reorganizar tu memoria para seguir conversando. \
+                        Avisa al usuario de que vuelves en unos minutos.]"
+                    .to_string(),
+            }).await.ok();
 
             loop {
                 tokio::select! {
@@ -245,7 +250,7 @@ pub async fn consolidation_task(
                 }
             }
             tokio::time::sleep(Duration::from_secs(3)).await;
-            shared.consolidation_active.store(true, Ordering::SeqCst);
+            let _ = pipeline_state_tx.send(PipelineState::Paused { reason: PauseReason::Consolidation });
             info!(target: "memory", "Pipeline paused — running consolidation...");
         } else {
             info!(target: "memory", "Idle timer — running silent consolidation...");
@@ -258,13 +263,14 @@ pub async fn consolidation_task(
         .await;
 
         if !triggered_by_idle {
-            shared.consolidation_active.store(false, Ordering::SeqCst);
+            let _ = pipeline_state_tx.send(PipelineState::Idle);
             let now = chrono::Local::now().format("%H:%M").to_string();
-            *shared.transliterated_text.lock().unwrap() = format!(
-                "[Sistema: has terminado de reorganizar tu memoria. Son las {now}. \
-                 Avisa al usuario de que ya estás disponible de nuevo.]"
-            );
-            events.vad_finish.notify_one();
+            transcript_tx.send(PipelineFrame::SystemNotification {
+                text: format!(
+                    "[Sistema: has terminado de reorganizar tu memoria. Son las {now}. \
+                     Avisa al usuario de que ya estás disponible de nuevo.]"
+                ),
+            }).await.ok();
             info!(target: "memory", "Consolidation cycle finished — pipeline resumed");
         }
 

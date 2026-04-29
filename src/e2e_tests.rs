@@ -33,7 +33,7 @@ use crate::analysis::ContextLens;
 use crate::audio::output::AudioOutput;
 use crate::db::Database;
 use crate::llm::{LlmSession, OpenAIClient};
-use crate::pipeline::{llm_task, sen_task, tts_task, PipelineEvents, SharedSession};
+use crate::pipeline::{llm_task, sen_task, tts_task, PipelineEvents, PipelineState};
 use crate::tools::ToolRegistry;
 use crate::tts::{mock_tts::MockTts, TtsEngine};
 
@@ -147,62 +147,79 @@ impl E2eHarness {
             return;
         }
 
-        let shared = Arc::new(SharedSession::new());
         let events = Arc::new(PipelineEvents::new());
         let play_cancel = Arc::new(AtomicBool::new(false));
         let tts_muted = Arc::new(AtomicBool::new(false));
         let turn_commit = Arc::new(AtomicU64::new(0));
         let context_lens = Arc::new(Mutex::new(ContextLens::new()));
+        let t_vad_end: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
+        let t_llm_post_send: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
 
         // Inject transcript directly — bypasses STT/VAD for deterministic tests.
         if transcript.trim().is_empty() {
             return;
         }
-        *shared.transliterated_text.lock().unwrap() = transcript.to_string();
 
         let sample_rate = self.tts.sample_rate();
 
         let (proactive_tx, _proactive_rx) = mpsc::channel::<ProactiveEvent>(8);
+        let (state_tx, state_rx) = tokio::sync::watch::channel(PipelineState::Idle);
+        let state_tx = Arc::new(state_tx);
+        let (sentences_tx, sentences_rx) = tokio::sync::mpsc::channel::<crate::pipeline::PipelineFrame>(64);
+        let (llm_tx, llm_rx) = tokio::sync::mpsc::channel::<crate::pipeline::PipelineFrame>(256);
+        let (transcript_tx, transcript_rx) = tokio::sync::mpsc::channel::<crate::pipeline::PipelineFrame>(16);
 
         // Spawn the three pipeline tasks.
         let h_llm = {
-            let shared_c  = Arc::clone(&shared);
-            let events_c  = Arc::clone(&events);
-            let session_c = Arc::clone(&self.llm_session);
-            let client_c  = self.llm_client.clone();
-            let db_c      = self.db.clone();
-            let tools_c   = Arc::clone(&self.tools);
-            let history_c = Arc::clone(&self.shared_history);
-            let turn_c    = Arc::clone(&turn_commit);
-            let lens_c    = Arc::clone(&context_lens);
-            let sid       = self.session_id;
+            let events_c          = Arc::clone(&events);
+            let state_tx_c        = Arc::clone(&state_tx);
+            let state_rx_c        = state_rx.clone();
+            let sent_tx_c         = sentences_tx.clone();
+            let llm_tx_c          = llm_tx.clone();
+            let t_llm_post_send_c = Arc::clone(&t_llm_post_send);
+            let session_c         = Arc::clone(&self.llm_session);
+            let client_c          = self.llm_client.clone();
+            let db_c              = self.db.clone();
+            let tools_c           = Arc::clone(&self.tools);
+            let history_c         = Arc::clone(&self.shared_history);
+            let turn_c            = Arc::clone(&turn_commit);
+            let lens_c            = Arc::clone(&context_lens);
+            let sid               = self.session_id;
             tokio::spawn(async move {
                 llm_task(
-                    shared_c, events_c, session_c, client_c, db_c, sid,
+                    events_c, state_tx_c, state_rx_c, sent_tx_c, llm_tx_c, transcript_rx,
+                    t_llm_post_send_c, session_c, client_c, db_c, sid,
                     tools_c, history_c, turn_c, proactive_tx, lens_c,
                 )
                 .await;
             })
         };
         let h_sen = {
-            let shared_c = Arc::clone(&shared);
-            let events_c = Arc::clone(&events);
-            tokio::spawn(async move { sen_task(shared_c, events_c).await })
+            let events_c          = Arc::clone(&events);
+            let sent_tx_c         = sentences_tx.clone();
+            let t_vad_end_c       = Arc::clone(&t_vad_end);
+            let t_llm_post_send_c = Arc::clone(&t_llm_post_send);
+            tokio::spawn(async move {
+                sen_task(events_c, llm_rx, sent_tx_c, t_vad_end_c, t_llm_post_send_c).await
+            })
         };
         let h_tts = {
-            let shared_c      = Arc::clone(&shared);
-            let events_c      = Arc::clone(&events);
-            let tts_c         = Arc::clone(&self.tts);
-            let out_c         = Arc::clone(&self.audio_output);
-            let cancel_c      = Arc::clone(&play_cancel);
-            let muted_c       = Arc::clone(&tts_muted);
+            let events_c    = Arc::clone(&events);
+            let t_vad_end_c = Arc::clone(&t_vad_end);
+            let tts_c       = Arc::clone(&self.tts);
+            let out_c       = Arc::clone(&self.audio_output);
+            let cancel_c    = Arc::clone(&play_cancel);
+            let muted_c     = Arc::clone(&tts_muted);
             tokio::spawn(async move {
-                tts_task(shared_c, events_c, tts_c, out_c, sample_rate, cancel_c, muted_c).await
+                tts_task(events_c, t_vad_end_c, sentences_rx, tts_c, out_c, sample_rate, cancel_c, muted_c).await
             })
         };
 
-        // Fire VAD_FINISH to start the LLM task.
-        events.vad_finish.notify_one();
+        // Send transcript to wake up the LLM task.
+        transcript_tx.send(crate::pipeline::PipelineFrame::TranscriptReady {
+            utterance_id: 0,
+            text: transcript.to_string(),
+        }).await.ok();
 
         // Wait for the LLM to finish streaming.
         events.llm_post_finished.notified().await;
@@ -211,7 +228,7 @@ impl E2eHarness {
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         // Cancel all tasks.
-        events.cancel_tx.send(()).ok();
+        events.barge_in_tx.send(0).ok();
         play_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
 
         let _ = tokio::time::timeout(Duration::from_secs(2), async {
