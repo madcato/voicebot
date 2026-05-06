@@ -39,6 +39,7 @@ pub async fn llm_task(
     proactive_tx: mpsc::Sender<ProactiveEvent>,
     context_lens: Arc<Mutex<ContextLens>>,
     #[cfg(feature = "tui")] tui_tx: crate::tui::events::TuiEventTx,
+    #[cfg(feature = "control")] control_broadcast: crate::control::broadcast::ControlBroadcast,
 ) {
     let pipeline_id = PIPELINE_RUN_ID.fetch_add(1, Ordering::SeqCst);
     let mut cancel_rx = events.barge_in_tx.subscribe();
@@ -95,6 +96,13 @@ pub async fn llm_task(
                     crate::tui::events::PipelineState::Thinking,
                 ))
                 .ok();
+        }
+        #[cfg(feature = "control")]
+        if !tool_continuation {
+            control_broadcast.send(crate::control::broadcast::ControlEvent::Transcript {
+                utterance_id: pipeline_id,
+                text: text.clone(),
+            });
         }
 
         let messages_snapshot = llm_session.lock().unwrap().messages.clone();
@@ -205,7 +213,12 @@ pub async fn llm_task(
                                         token: t.clone(),
                                     }).await;
                                     #[cfg(feature = "tui")]
-                                    tui_tx.send(crate::tui::events::TuiEvent::AssistantToken(t)).ok();
+                                    tui_tx.send(crate::tui::events::TuiEvent::AssistantToken(t.clone())).ok();
+                                    #[cfg(feature = "control")]
+                                    control_broadcast.send(crate::control::broadcast::ControlEvent::LlmToken {
+                                        utterance_id: pipeline_id,
+                                        token: t,
+                                    });
                                 }
                                 Some(StreamToken::ToolCall { name, args }) => {
                                     info!(target: "pipeline", "ToolCall received: name={} args={}", name, args);
@@ -220,6 +233,11 @@ pub async fn llm_task(
                                     events.llm_post_finished.notify_one();
                                     #[cfg(feature = "tui")]
                                     tui_tx.send(crate::tui::events::TuiEvent::AssistantDone).ok();
+                                    #[cfg(feature = "control")]
+                                    control_broadcast.send(crate::control::broadcast::ControlEvent::LlmDone {
+                                        utterance_id: pipeline_id,
+                                        full_text: llm_text.clone(),
+                                    });
                                     break;
                                 }
                             }
@@ -322,6 +340,11 @@ pub async fn llm_task(
                                 result: result.clone(),
                             })
                             .ok();
+                        #[cfg(feature = "control")]
+                        control_broadcast.send(crate::control::broadcast::ControlEvent::ToolCall {
+                            name: name.clone(),
+                            result: result.clone(),
+                        });
 
                         let tool_call_id = format!("call_{}_{}", name, iter);
                         messages.push(serde_json::json!({

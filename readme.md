@@ -84,6 +84,45 @@ Enable with: `cargo run --features tui`
 
 Enable with: `WS_PORT=9090 cargo run --features remote --release`
 
+### Control API (HTTP + SSE) ✅
+
+Exposes pipeline state, streaming LLM tokens, and control commands to any external process — a custom TUI, a web dashboard, or a shell script.
+
+- **`GET /control/events`** — Server-Sent Events stream of pipeline events (JSON):
+  - `state_changed` — FSM state transitions (Idle/Listening/Thinking/Speaking/Paused)
+  - `transcript` — finalized user utterance text
+  - `llm_token` — each streaming LLM token as it arrives
+  - `llm_done` — full assistant response for the turn
+  - `tts_start` — sentence sent to TTS
+  - `tool_call` — tool name and result
+  - `mute_changed` — TTS mute state change
+- **`GET /control/state`** — JSON snapshot: current FSM state, utterance ID, mute flag
+- **`GET /control/history`** — JSON: full conversation message history
+- **`POST /control/mute`** — body `{"muted": true|false}` — mute/unmute TTS
+- **`POST /control/barge_in`** — interrupt current TTS playback
+- **`POST /control/input`** — body `{"text": "..."}` — inject text as user input
+
+Enable with: `CONTROL_PORT=9001 cargo run --features control`
+
+```bash
+# Stream all pipeline events
+curl -N http://127.0.0.1:9001/control/events
+
+# Current state snapshot
+curl http://127.0.0.1:9001/control/state
+
+# Mute TTS
+curl -X POST http://127.0.0.1:9001/control/mute \
+  -H 'Content-Type: application/json' -d '{"muted":true}'
+
+# Barge in
+curl -X POST http://127.0.0.1:9001/control/barge_in
+
+# Send text input
+curl -X POST http://127.0.0.1:9001/control/input \
+  -H 'Content-Type: application/json' -d '{"text":"hola"}'
+```
+
 ### Roadmap 🚧
 
 - Calendar, email, file system access
@@ -365,6 +404,8 @@ Most configuration is done via environment variables (or `.env` file):
 | `AMBIENT_BUFFER_MAX_ENTRIES` | `30` | Maximum buffered utterances. Oldest are evicted when full. |
 | **Remote Device (WebSocket)** || |
 | `WS_PORT` | — (disabled) | WebSocket server port. Set to e.g. `9090` to enable remote device connectivity. Requires `--features remote`. |
+| **Control API (HTTP + SSE)** || |
+| `CONTROL_PORT` | — (disabled) | HTTP control/SSE API port. Set to e.g. `9001` to enable. Requires `--features control`. Binds to `127.0.0.1` only. |
 
 See [.env.example](.env.example) for complete environment variable reference.
 
@@ -383,6 +424,9 @@ cargo build --release --features tui
 
 # Build with remote device support (WebSocket server)
 cargo build --release --features remote
+
+# Build with HTTP control API + SSE
+cargo build --release --features control
 
 # Run with debug
 cargo run

@@ -196,6 +196,11 @@ pub struct Config {
     /// WebSocket server port. None = disabled (WS_PORT).
     pub ws_port: Option<u16>,
 
+    // ── Control API (HTTP + SSE) ──────────────────────────────────────────────
+    /// HTTP control/SSE API port. None = disabled (CONTROL_PORT).
+    #[cfg(feature = "control")]
+    pub control_port: Option<u16>,
+
     // ── Self-managed LLM process ──────────────────────────────────────────────
     /// When true, voicebot launches and supervises the LLM server process.
     /// Requires LLM_COMMAND to be set. (LLM_SELF_MANAGED, default false)
@@ -446,6 +451,13 @@ impl Config {
                 .map(|v| v.parse::<u16>())
                 .transpose()
                 .context("Invalid WS_PORT")?,
+
+            #[cfg(feature = "control")]
+            control_port: env::var("CONTROL_PORT")
+                .ok()
+                .map(|v| v.parse::<u16>())
+                .transpose()
+                .context("Invalid CONTROL_PORT")?,
 
             // Self-managed LLM process
             llm_self_managed: env::var("LLM_SELF_MANAGED")

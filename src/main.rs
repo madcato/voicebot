@@ -22,6 +22,8 @@ mod tui;
 mod tts;
 #[cfg(feature = "remote")]
 mod remote;
+#[cfg(feature = "control")]
+mod control;
 
 use anyhow::{Context, Result};
 use async_channel::bounded;
@@ -616,14 +618,24 @@ async fn async_main() -> Result<()> {
         tokio::sync::watch::channel(PipelineState::Idle);
     let pipeline_state_tx = Arc::new(pipeline_state_tx);
 
+    #[cfg(feature = "control")]
+    let control_broadcast = control::broadcast::ControlBroadcast::new(256);
+
     // Supervisor observer: logs every state transition (off the hot path).
     {
         let mut rx = pipeline_state_rx.clone();
+        #[cfg(feature = "control")]
+        let ctrl = control_broadcast.clone();
         tokio::spawn(async move {
             loop {
                 if rx.changed().await.is_err() { break; }
                 let state = rx.borrow().clone();
                 tracing::debug!(target: "fsm", "Pipeline state → {:?}", state);
+                #[cfg(feature = "control")]
+                ctrl.send(control::broadcast::ControlEvent::StateChanged {
+                    state: format!("{state:?}"),
+                    utterance_id: state.utterance_id(),
+                });
             }
         });
     }
@@ -668,6 +680,8 @@ async fn async_main() -> Result<()> {
         let context_lens_c        = Arc::clone(&context_lens);
         #[cfg(feature = "tui")]
         let tui_tx_c = tui_tx.clone();
+        #[cfg(feature = "control")]
+        let control_broadcast_c = control_broadcast.clone();
         tokio::spawn(async move {
             llm_task(
                 events_c, pipeline_state_tx_c, pipeline_state_rx_c,
@@ -677,6 +691,8 @@ async fn async_main() -> Result<()> {
                 proactive_tx_c, context_lens_c,
                 #[cfg(feature = "tui")]
                 tui_tx_c,
+                #[cfg(feature = "control")]
+                control_broadcast_c,
             ).await;
         });
     }
@@ -700,6 +716,8 @@ async fn async_main() -> Result<()> {
         let tui_tx_c = tui_tx.clone();
         #[cfg(feature = "remote")]
         let remote_tts_tx_c = Arc::clone(&remote_tts_tx);
+        #[cfg(feature = "control")]
+        let control_broadcast_c = control_broadcast.clone();
         tokio::spawn(async move {
             tts_task(
                 events_c, t_vad_end_c, sentences_rx, tts_c, audio_out_c, tts_sample_rate,
@@ -708,6 +726,8 @@ async fn async_main() -> Result<()> {
                 tui_tx_c,
                 #[cfg(feature = "remote")]
                 remote_tts_tx_c,
+                #[cfg(feature = "control")]
+                control_broadcast_c,
             ).await;
         });
     }
@@ -766,6 +786,25 @@ async fn async_main() -> Result<()> {
         tokio::spawn(async move {
             if let Err(e) = remote::server::start_server(ws_port, remote_state).await {
                 error!(target: "remote", "WebSocket server error: {e}");
+            }
+        });
+    }
+
+    // ── Control API (HTTP + SSE) ──────────────────────────────────────────────
+    #[cfg(feature = "control")]
+    if let Some(ctrl_port) = config.control_port {
+        let ctrl_state = Arc::new(control::state::ControlState {
+            broadcast: control_broadcast.clone(),
+            pipeline_state_rx: pipeline_state_rx.clone(),
+            tts_muted: Arc::clone(&tts_muted),
+            play_cancel: Arc::clone(&play_cancel),
+            barge_in_tx: events.barge_in_tx.clone(),
+            transcript_tx: transcript_tx.clone(),
+            llm_session: Arc::clone(&llm_session),
+        });
+        tokio::spawn(async move {
+            if let Err(e) = control::api::start_control_server(ctrl_port, ctrl_state).await {
+                error!(target: "control", "Control API error: {e}");
             }
         });
     }

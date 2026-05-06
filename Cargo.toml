@@ -113,6 +113,7 @@ speaker = ["dep:sherpa-rs"]
 avspeech = ["dep:objc2", "dep:block2", "dep:objc2-foundation", "dep:objc2-avf-audio"]
 tui = ["dep:ratatui", "dep:crossterm"]
 remote = ["dep:axum", "dep:tower"]
+control = ["dep:axum", "dep:tower"]
 
 [[bin]]
 name = "voicebot"

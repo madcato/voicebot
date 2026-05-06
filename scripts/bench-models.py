@@ -18,9 +18,10 @@ Usage:
   Default fixtures:    scripts/fixtures.json (next to config)
 
 Env vars:
-  BENCH_TRIALS   hot measurement trials    (default 3)
-  BENCH_GEN      tokens to generate        (default 80)
-  BENCH_QUALITY  run quality benchmark     (default 1; set 0 to skip)
+  BENCH_TRIALS    hot measurement trials    (default 3)
+  BENCH_GEN       tokens to generate        (default 80)
+  BENCH_QUALITY   run quality benchmark     (default 1; set 0 to skip)
+  BENCH_THINKING  enable model thinking     (default 0; set 1 to enable)
 """
 
 import http.client
@@ -270,6 +271,7 @@ TOOL_DEFINITIONS = [
 TRIALS = int(os.environ.get("BENCH_TRIALS", "3"))
 GEN_TOKENS = int(os.environ.get("BENCH_GEN", "80"))
 RUN_QUALITY = os.environ.get("BENCH_QUALITY", "1") != "0"
+ENABLE_THINKING = os.environ.get("BENCH_THINKING", "0") != "0"
 
 _PROMPT_TEXT = (
     SYSTEM_PROMPT
@@ -301,6 +303,14 @@ def _thinking_off_fields() -> dict:
         "chat_template_kwargs": {"enable_thinking": False},
         "thinking": {"type": "disabled"},
         "think": False,
+    }
+
+def _thinking_on_fields() -> dict:
+    return {
+        "enable_thinking": True,
+        "chat_template_kwargs": {"enable_thinking": True},
+        "thinking": {"type": "enabled", "budget_tokens": 1024},
+        "think": True,
     }
 
 
@@ -455,6 +465,10 @@ def _build_speed_messages(runtime_name: str) -> list[dict]:
     return msgs
 
 
+def _thinking_fields() -> dict:
+    return _thinking_on_fields() if ENABLE_THINKING else _thinking_off_fields()
+
+
 def _base_speed_payload(model_id, max_tokens, stream, runtime_name) -> dict:
     return {
         "model": model_id,
@@ -462,7 +476,7 @@ def _base_speed_payload(model_id, max_tokens, stream, runtime_name) -> dict:
         "max_tokens": max_tokens,
         "temperature": 0.0,
         "stream": stream,
-        **_thinking_off_fields(),
+        **_thinking_fields(),
     }
 
 
@@ -505,7 +519,8 @@ def measure_pp(host, port, token, model_id, runtime_name):
         if "usage" in chunk and chunk["usage"]:
             prompt_tokens_api = chunk["usage"].get("prompt_tokens")
         delta = (chunk.get("choices") or [{}])[0].get("delta", {})
-        if (delta.get("content") or "") and t_first is None:
+        first_token = delta.get("content") or delta.get("reasoning") or ""
+        if first_token and t_first is None:
             t_first = time.perf_counter()
 
     if t_first is None:
@@ -538,15 +553,16 @@ def measure_hot(host, port, token, model_id, runtime_name):
             chunk = json.loads(data)
         except json.JSONDecodeError:
             continue
-        content = (chunk.get("choices") or [{}])[0].get("delta", {}).get(
-            "content"
-        ) or ""
-        if content:
+        delta = (chunk.get("choices") or [{}])[0].get("delta", {})
+        content = delta.get("content") or ""
+        thinking = delta.get("reasoning") or ""
+        generated = content or thinking
+        if generated:
             now = time.perf_counter()
             if t_first is None:
                 t_first = now
             t_last = now
-            n_tokens += len(content.split())
+            n_tokens += len(generated.split())
 
     if t_first is None or n_tokens == 0:
         raise RuntimeError("Hot trial: no content tokens received")
@@ -596,7 +612,7 @@ def run_fixture(host, port, token, model_id, runtime_name, fixture) -> tuple[str
         "messages": messages,
         "max_tokens": 350,
         "temperature": 0.0,
-        **_thinking_off_fields(),
+        **_thinking_off_fields(),  # thinking off for quality: we evaluate the reply, not the scratchpad
     }
     if fixture.get("requires_tools"):
         payload["tools"] = TOOL_DEFINITIONS
@@ -831,7 +847,7 @@ def call_evaluator(
             ],
             "max_tokens": ev_cfg["max_tokens"],
             "temperature": ev_cfg["temperature"],
-            **_thinking_off_fields(),
+            **_thinking_off_fields(),  # evaluator never needs thinking
         },
     )
     raw = (resp["choices"][0]["message"].get("content") or "").strip()
@@ -841,7 +857,7 @@ def call_evaluator(
     if clean.startswith("json"):
         clean = clean[4:]
     clean = clean.rstrip("`").strip()
-    m = re.search(r"\{.*\}", clean, re.DOTALL | re.GREEDY)
+    m = re.search(r"\{.*\}", clean, re.DOTALL)
     if m:
         clean = m.group()
     try:
@@ -907,21 +923,27 @@ def run_quality_benchmark(
     print(f"  Quality Phase 1/2 — collecting {total} fixture responses from model")
 
     collected: list[tuple] = []
+    phase1_start = time.perf_counter()
     for i, fx in enumerate(fixtures, 1):
         label = f"[{i:{pad}}/{total}] {fx['id']}"
         print(f"    {label:<52}", end="", flush=True)
+        t0 = time.perf_counter()
         try:
             text, tcs = run_fixture(host, port, token, model_id, runtime_name, fx)
+            lat_ms = (time.perf_counter() - t0) * 1000
             tag = (
                 ("tools:" + "+".join(tc["function"]["name"] for tc in tcs))
                 if tcs
                 else f"{len(text)} chars"
             )
-            print(f"ok  ({tag})")
-            collected.append((fx, text, tcs, None))
+            print(f"ok  ({tag})  {lat_ms:.0f}ms")
+            collected.append((fx, text, tcs, None, lat_ms))
         except Exception as e:
+            lat_ms = (time.perf_counter() - t0) * 1000
             print(f"ERROR  ({e})")
-            collected.append((fx, "", [], str(e)))
+            collected.append((fx, "", [], str(e), lat_ms))
+    phase1_elapsed = time.perf_counter() - phase1_start
+    print(f"\n  Phase 1 total: {phase1_elapsed:.1f}s   avg per fixture: {phase1_elapsed * 1000 / total:.0f}ms")
 
     # ── Phase 2 ───────────────────────────────────────────────────────────────
     ev_label = ev_cfg["model"] if ev_cfg else "mechanical checks only"
@@ -933,7 +955,7 @@ def run_quality_benchmark(
     )
 
     results: list[dict] = []
-    for i, (fx, text, tcs, error) in enumerate(collected, 1):
+    for i, (fx, text, tcs, error, lat_ms) in enumerate(collected, 1):
         fid = fx["id"]
         group = fx.get("group", "?")
         label = f"[{i:{pad}}/{total}] {fid}"
@@ -949,6 +971,7 @@ def run_quality_benchmark(
                     "reason": error[:120],
                     "mech_pass": False,
                     "preview": "",
+                    "latency_ms": lat_ms,
                 }
             )
             continue
@@ -984,12 +1007,16 @@ def run_quality_benchmark(
                 "reason": reason,
                 "mech_pass": not bool(failed),
                 "preview": text[:100],
+                "latency_ms": lat_ms,
             }
         )
 
     passing = sum(1 for r in results if r["verdict"] == "PASS")
+    lats = [r["latency_ms"] for r in results]
+    avg_lat = mean(lats) if lats else 0.0
     print(
         f"\n  Quality score: {passing}/{total}  ({passing * 100 // total if total else 0}%)"
+        f"   avg latency: {avg_lat:.0f}ms"
     )
     return results
 
@@ -1161,9 +1188,10 @@ def print_quality_results(all_results: list, W: int):
 
     col_model = 50
     col_total = 10
+    col_lat = 10
 
     # Header
-    hdr = f"  {'Server/Runtime/Model':<{col_model}}  {'Score':>{col_total}}"
+    hdr = f"  {'Server/Runtime/Model':<{col_model}}  {'Score':>{col_total}}  {'Avg lat':>{col_lat}}"
     for g in groups:
         hdr += f"  {g[:9]:>9}"
     print(hdr)
@@ -1176,8 +1204,10 @@ def print_quality_results(all_results: list, W: int):
         total = len(quality)
         passing = sum(1 for qr in quality if qr["verdict"] == "PASS")
         pct = passing * 100 // total if total else 0
+        lats = [qr["latency_ms"] for qr in quality if "latency_ms" in qr]
+        avg_lat_ms = mean(lats) if lats else float("nan")
         display = f"{r['server']}/{r['runtime']}  {r['model_id']}"
-        row = f"  {display:<{col_model}}  {passing}/{total} ({pct:3}%)"
+        row = f"  {display:<{col_model}}  {passing}/{total} ({pct:3}%)  {avg_lat_ms:>{col_lat}.0f}ms"
         for g in groups:
             g_items = [qr for qr in quality if qr["group"] == g]
             g_pass = sum(1 for qr in g_items if qr["verdict"] == "PASS")

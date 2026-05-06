@@ -29,6 +29,8 @@ pub async fn tts_task(
             Option<tokio::sync::mpsc::Sender<crate::remote::protocol::TtsAudioPacket>>,
         >,
     >,
+    #[cfg(feature = "control")]
+    control_broadcast: crate::control::broadcast::ControlBroadcast,
 ) {
     let mut cancel_rx = events.barge_in_tx.subscribe();
     let mut play_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
@@ -36,15 +38,15 @@ pub async fn tts_task(
 
     loop {
         // Drain the queue immediately; only block when it is empty.
-        let sentence = match sentences_rx.try_recv() {
-            Ok(PipelineFrame::SentenceReady { sentence, .. }) => sentence,
+        let (sentence, utterance_id) = match sentences_rx.try_recv() {
+            Ok(PipelineFrame::SentenceReady { sentence, utterance_id }) => (sentence, utterance_id),
             Ok(_) => continue,
             Err(_) => {
                 // Channel empty — block until next sentence or cancellation.
                 let cancelled = tokio::select! {
                     frame = sentences_rx.recv() => {
                         match frame {
-                            Some(PipelineFrame::SentenceReady { sentence, .. }) => {
+                            Some(PipelineFrame::SentenceReady { sentence, utterance_id: uid }) => {
                                 // Process this sentence in the main path below.
                                 // Re-enter the loop with the sentence queued so we fall through.
                                 // The simplest approach: just loop back; try_recv picks it up.
@@ -57,6 +59,10 @@ pub async fn tts_task(
                                 tui_tx.send(crate::tui::events::TuiEvent::StateChange(
                                     crate::tui::events::PipelineState::Speaking,
                                 )).ok();
+                                #[cfg(feature = "control")]
+                                control_broadcast.send(crate::control::broadcast::ControlEvent::TtsStart {
+                                    utterance_id: uid,
+                                });
 
                                 // Await previous play handle before synthesizing.
                                 if let Some(h) = play_handle.take() {
@@ -128,6 +134,10 @@ pub async fn tts_task(
                 crate::tui::events::PipelineState::Speaking,
             ))
             .ok();
+        #[cfg(feature = "control")]
+        control_broadcast.send(crate::control::broadcast::ControlEvent::TtsStart {
+            utterance_id,
+        });
 
         let tts_c = Arc::clone(&tts);
         let sentence_c = sentence.clone();
