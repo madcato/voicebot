@@ -635,5 +635,357 @@
       "no_tool_called": true,
       "notes": "The day was already retrieved; model should answer from context without calling current_time again"
     }
+  },
+
+  {
+    "_comment": "══════════════════════════════════════════════════════",
+    "_comment2": "GROUP: voicebot — voice-specific behaviors",
+    "_comment3": "══════════════════════════════════════════════════════"
+  },
+  {
+    "id": "vb_interrupt_stop",
+    "group": "voicebot",
+    "description": "When user says 'para' or 'stop', model must stop generating/playing immediately",
+    "messages": [
+      {"role": "user", "content": "Cuéntame la historia de España desde el principio... no, para"}
+    ],
+    "requires_tools": false,
+    "eval": {
+      "forbidden_patterns": ["(?i)(continuando|seguiré|pero|la historia|origen|es)",
+        " Spain desde|nación|mcomenzar|origen"],
+      "notes": "Model must NOT continue the story after 'para'. Should acknowledge stop."
+    }
+  },
+  {
+    "id": "vb_wake_word_respond",
+    "group": "voicebot",
+    "description": "Model must respond when user addresses it as 'Jarvis'",
+    "messages": [
+      {"role": "user", "content": "Jarvis, ¿qué hora es?"}
+    ],
+    "requires_tools": true,
+    "eval": {
+      "must_call_tools": ["current_time"],
+      "notes": "Must respond to wake word 'Jarvis'"
+    }
+  },
+  {
+    "id": "vb_wake_word_ignore",
+    "group": "voicebot",
+    "description": "Model should not respond to casual conversation without wake word",
+    "messages": [
+      {"role": "user", "content": "Oye, ¿sabes qué hora es?"}
+    ],
+    "requires_tools": false,
+    "eval": {
+      "forbidden_patterns": [
+        "(?i)^(son las|la hora|es la)"
+      ],
+      "notes": "Without 'Jarvis' wake word, model may respond but ideally should not give direct answer, or use 'Señor' to confirm"
+    }
+  },
+  {
+    "id": "vb_quick_ack",
+    "group": "voicebot",
+    "description": "Model gives quick acknowledgment before starting long task",
+    "messages": [
+      {"role": "user", "content": "Busca información sobre todos los países de América del Sur"}
+    ],
+    "requires_tools": true,
+    "eval": {
+      "required_patterns": ["(?i)(buscando|investigando|busco|en un momento|ahora)"],
+      "notes": "Quick acknowledgment before starting long task"
+    }
+  },
+  {
+    "id": "vb_background_done",
+    "group": "voicebot",
+    "description": "Model informs when background task completes",
+    "messages": [
+      {"role": "user", "content": "Borra las fotos duplicadas de la carpeta Fotos"},
+      {"role": "assistant", "content": null, "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "run_shell", "arguments": "{\"command\": \"fd -d 1 -e jpg -e png ...\"}"}}]},
+      {"role": "tool", "tool_call_id": "call_1", "content": "Found 47 duplicate files. Deleted."},
+      {"role": "assistant", "content": "He borrado las 47 fotos duplicadas, señor."}
+    ],
+    "requires_tools": false,
+    "eval": {
+      "required_strings": ["47", "borrado"],
+      "notes": "Should report completion with count"
+    }
+  },
+  {
+    "id": "vb_no_emojis",
+    "group": "voicebot",
+    "description": "Model must not use emojis in response",
+    "messages": [
+      {"role": "user", "content": "¿Qué tal estás hoy?"}
+    ],
+    "requires_tools": false,
+    "eval": {
+      "forbidden_strings": ["😀", "😂", "😊", "😍", "🤔", "😎", "🙄", "😴", "🤯", "🥳", "😷", "🤒"],
+      "notes": "No emojis - they don't speak well"
+    }
+  },
+  {
+    "id": "vb_no_special_chars",
+    "group": "voicebot",
+    "description": "Model must not use unpronounceable special characters",
+    "messages": [
+      {"role": "user", "content": "Dime algo sobre Apple"}
+    ],
+    "requires_tools": false,
+    "eval": {
+      "forbidden_patterns": ["[§©™®§•°]", "©", "™", "®"],
+      "notes": "No special chars like § © ™"
+    }
+  },
+  {
+    "id": "vb_repeat_request",
+    "group": "voicebot",
+    "description": "Model repeats when asked 'repite' or 'repeat'",
+    "messages": [
+      {"role": "user", "content": "¿Cuál es la capital de Francia?"},
+      {"role": "assistant", "content": "La capital de Francia es París, señor."},
+      {"role": "user", "content": "Repite"}
+    ],
+    "requires_tools": false,
+    "eval": {
+      "required_strings": ["París"],
+      "notes": "Should repeat the last answer"
+    }
+  },
+
+  {
+    "_comment": "══════════════════════════════════════════════════════",
+    "_comment2": "GROUP: delegation — ACP delegation triggers",
+    "_comment3": "══════════════════════════════════════════════════════"
+  },
+  {
+    "id": "del_obsidian_notes",
+    "group": "delegation",
+    "description": "Must delegate to HERMES when user asks about notes in Obsidian",
+    "messages": [
+      {"role": "user", "content": "Qué anoté sobre la reunión de ayer?"}
+    ],
+    "requires_tools": true,
+    "eval": {
+      "must_call_tools": ["run_agent"],
+      "notes": "Trigger: 'anoté' + 'sobre' → delegate to HERMES/Obsidian"
+    }
+  },
+  {
+    "id": "del_obsidian_project",
+    "group": "delegation",
+    "description": "Must delegate when searching notes for specific project",
+    "messages": [
+      {"role": "user", "content": "Busca en mis notas de cocina qué recetas tengo de pasta"}
+    ],
+    "requires_tools": true,
+    "eval": {
+      "must_call_tools": ["run_agent"],
+      "notes": "Search in notes → delegate to HERMES"
+    }
+  },
+  {
+    "id": "del_search_investigate",
+    "group": "delegation",
+    "description": "Must delegate when user asks to investigate something",
+    "messages": [
+      {"role": "user", "content": "Investiga qué opciones hay para aprender español online"}
+    ],
+    "requires_tools": true,
+    "eval": {
+      "must_call_tools": ["run_agent"],
+      "notes": "Trigger 'Investiga' → delegate to HERMES"
+    }
+  },
+  {
+    "id": "del_search_summary",
+    "group": "delegation",
+    "description": "Must delegate when user asks for summary of current events",
+    "messages": [
+      {"role": "user", "content": "Hazme un resumen de la actualidad tecnológica esta semana"}
+    ],
+    "requires_tools": true,
+    "eval": {
+      "must_call_tools": ["run_agent"],
+      "notes": "Trigger 'resumen' + 'actualidad' → delegate"
+    }
+  },
+  {
+    "id": "del_remember_longterm",
+    "group": "delegation",
+    "description": "Must delegate long-term memory requests",
+    "messages": [
+      {"role": "user", "content": "Recuerda que soy alérgico a los frutos secos"}
+    ],
+    "requires_tools": true,
+    "eval": {
+      "must_call_tools": ["run_agent"],
+      "notes": "Trigger 'Recuerda que' → delegate to memory"
+    }
+  },
+  {
+    "id": "del_profile_change",
+    "group": "delegation",
+    "description": "Must delegate profile changes to HERMES",
+    "messages": [
+      {"role": "user", "content": "A partir de ahora llámame por mi nombre, me llamo Marcos"}
+    ],
+    "requires_tools": true,
+    "eval": {
+      "must_call_tools": ["run_agent"],
+      "notes": "Profile change → delegate"
+    }
+  },
+  {
+    "id": "del_no_local_attempt",
+    "group": "delegation",
+    "description": "Must NOT attempt complex task locally when delegation is required",
+    "messages": [
+      {"role": "user", "content": "Investiga las últimas noticias de tecnología"}
+    ],
+    "requires_tools": true,
+    "eval": {
+      "must_not_call_tools": ["web_search"],
+      "must_call_tools": ["run_agent"],
+      "notes": "Should delegate, not try web_search directly"
+    }
+  },
+  {
+    "id": "del_correct_tool",
+    "group": "delegation",
+    "description": "Must call correct delegate tool, not fabricate",
+    "messages": [
+      {"role": "user", "content": "Busca en mis notas del proyecto Atlas"}
+    ],
+    "requires_tools": true,
+    "eval": {
+      "must_call_tools": ["run_agent"],
+      "forbidden_patterns": [
+        "(?i)(buscando en mis notas|buscando en obsidian|busqueda en notas)"
+      ],
+      "notes": "Must delegate to run_agent, not claim to do it directly"
+    }
+  },
+
+  {
+    "_comment": "══════════════════════════════════════════════════════",
+    "_comment2": "GROUP: memory — persistent memory recall",
+    "_comment3": "══════════════════════════════════════════════════════"
+  },
+  {
+    "id": "mem_name_recall",
+    "group": "memory",
+    "description": "Model remembers user's name from earlier in conversation",
+    "messages": [
+      {"role": "user", "content": "Por cierto, me llamo Lucía"},
+      {"role": "assistant", "content": "Entendido, señora Lucía. ¿En qué puedo ayudarla?"},
+      {"role": "user", "content": "¿Cómo me llamo?"}
+    ],
+    "requires_tools": false,
+    "eval": {
+      "required_strings": ["Lucía"],
+      "notes": "Should remember 'Lucía' from earlier turn"
+    }
+  },
+  {
+    "id": "mem_preference_recall",
+    "group": "memory",
+    "description": "Model remembers user's preference from earlier",
+    "messages": [
+      {"role": "user", "content": "Prefiero que me hables en español, por favor"},
+      {"role": "assistant", "content": "Entendido, así lo haré."},
+      {"role": "user", "content": "Cambia el idioma al inglés"},
+      {"role": "assistant", "content": "De acuerdo, ahora le hablo en inglés."},
+      {"role": "user", "content": "¿Qué idioma prefiero?"}
+    ],
+    "requires_tools": false,
+    "eval": {
+      "required_patterns": ["(?i)(inglés|english)"],
+      "notes": "Should recall current preference (last set was English)"
+    }
+  },
+  {
+    "id": "mem_topic_reference",
+    "group": "memory",
+    "description": "Model references topic discussed several turns ago",
+    "messages": [
+      {"role": "user", "content": "¿Qué tiempo hace en Madrid?"},
+      {"role": "assistant", "content": "No tengo acceso a datos meteorológicos en tiempo real, señor."},
+      {"role": "user", "content": "¿Y en Barcelona?"},
+      {"role": "assistant", "content": "Lo mismo aplica para Barcelona, señor."},
+      {"role": "user", "content": "¿De qué ciudad me hablas primero?"}
+    ],
+    "requires_tools": false,
+    "eval": {
+      "required_strings": ["Madrid"],
+      "notes": "Should recall first city was Madrid"
+    }
+  },
+  {
+    "id": "mem_tool_result_use",
+    "group": "memory",
+    "description": "Model uses tool result from earlier turn without re-calling",
+    "messages": [
+      {"role": "user", "content": "¿Cuántos GB libres tiene mi Mac?"},
+      {"role": "assistant", "content": null, "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "run_shell", "arguments": "{\"command\": \"df -h /\"}"}}]},
+      {"role": "tool", "tool_call_id": "call_1", "content": "256GB total, 180GB used, 76GB free"},
+      {"role": "assistant", "content": "Tiene 76 gigabytes libres, señor."},
+      {"role": "user", "content": "¿Cuántos tiene ocupados?"}
+    ],
+    "requires_tools": false,
+    "eval": {
+      "required_strings": ["180"],
+      "no_tool_called": true,
+      "notes": "Should use cached result (180GB) without calling tool again"
+    }
+  },
+
+  {
+    "_comment": "══════════════════════════════════════════════════════",
+    "_comment2": "GROUP: multiturn — multi-turn conversation",
+    "_comment3": "══════════════════════════════════════════════════════"
+  },
+  {
+    "id": "mt_clarify_ambiguity",
+    "group": "multiturn",
+    "description": "Model asks for clarification when request is ambiguous",
+    "messages": [
+      {"role": "user", "content": "Abre el archivo"}
+    ],
+    "requires_tools": false,
+    "eval": {
+      "required_patterns": ["(?i)(cuál|qué archivo|necesito saber|có모|cuál)"],
+      "notes": "Should ask which file, not guess"
+    }
+  },
+  {
+    "id": "mt_partial_undo",
+    "group": "multiturn",
+    "description": "Model accepts 'no, quiero decir' as correction gracefully",
+    "messages": [
+      {"role": "user", "content": "¿Cuántos años tiene马云?"},
+      {"role": "assistant", "content": "Jack Ma tiene aproximadamente 60 años, señor."},
+      {"role": "user", "content": "No, quiero decir 马化腾, no马云"}
+    ],
+    "requires_tools": false,
+    "eval": {
+      "forbidden_patterns": ["(?i)(correcto|tiene razón|perdone|disculpe|ya lo sabía)"],
+      "required_patterns": ["(?i)(Pony Ma|Ma Huatang|马化腾)"],
+      "notes": "Should correct to Pony Ma (Pleit), not apologize excessively"
+    }
+  },
+  {
+    "id": "mt_empty_input",
+    "group": "multiturn",
+    "description": "Model handles empty/inaudible input gracefully",
+    "messages": [
+      {"role": "user", "content": ""}
+    ],
+    "requires_tools": false,
+    "eval": {
+      "notes": "Should ask user to repeat or confirm, not produce error"
+    }
   }
 ]

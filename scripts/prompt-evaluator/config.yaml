@@ -52,13 +52,13 @@ servers:
 # a benchmark target — it must be a capable, instruction-following model
 # (ideally larger or higher-quality than the models under test).
 # The quality benchmark script reads this section separately from `servers`.
-# Using OpenCode Zen with Big Pickle (free, 200k context window)
+# Using local model (Tesla llama-server-nvidia)
 evaluator:
-  host: "https://opencode.ai"
-  runtime: "zen"
-  port: 443
+  host: "http://192.168.1.47"
+  runtime: "llama-server-nvidia"
+  port: 8005
   token: ""
-  model: big-pickle
+  model: gemma-4-31B-it
   # temperature: 0.0 — evaluator always runs at zero temperature for determinism
   temperature: 0.0
   # max_tokens: budget for the evaluator's JSON verdict per fixture

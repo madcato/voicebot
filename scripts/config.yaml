@@ -44,7 +44,7 @@ servers:
         token: ""
         models: 
           - "mlx-community/gemma-4-26b-a4b-it-4bit"
-          # - "mlx-community/Qwen3.6-35B-A3B-4bit" 
+          - "mlx-community/Qwen3.6-35B-A3B-4bit" 
           # - "lmstudio-community/GLM-4.7-Flash-MLX-4bit"
 
 # Evaluator model used to judge quality benchmark responses.
