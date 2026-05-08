@@ -1,51 +1,51 @@
 servers:
-  # tesla:
-  #   host: "http://tesla.local"
-  #   location: "tesla"
-  #   runtimes:
-  #     vllm:
-  #       port: 8005
-  #       token: ""
-  #       models:
-  #         # - Qwen3.6-27B-FP8
-  #         # - gemma-4-31B-it-NVFP4
-  #         - gemma-4-31B-it
-  #         # - Qwen3.6-35B-A3B-FP8
-  #         # - Qwen3.6-27B-NVFP4
-  #     # llama-server-nvidia:
-  #     #   port: 8000
-  #     #   token: ""
-  #     #   models:
-  #     #     # - "Qwen3.5-27B-UD-Q4_K_XL"
-  #     #     # - "Qwen3.6-35B-A3B-UD-Q4_K_S"
-  #     #     # - "Qwen3.6-35B-A3B-UD-Q8_K_XL"
-  #     #     # - gemma-4-31B-it-Q4_0
-  #     #     # - MiniMax-M2.7-UD-IQ3_S
-  #     #     # - Qwen3.6-27B-UD-Q6_K_XL
-  #     #     # - Qwen3.6-27B-BF16-GGUF
-  #     #     - Mistral-Medium-3.5-128B-UD-Q4_K_XL
-  #     # llama-server-amd:
-  #     #   port: 8001
-  #     #   token: ""
-  #     #   models:
-  #     #     - Qwen3.6-35B-A3B-UD-IQ4_XS
-  macmini:
-    host: "http://mac-mini.local"
-    location: "mac-mini"
+  tesla:
+    host: "http://tesla.local"
+    location: "tesla"
     runtimes:
-      # omlx:
-      #   port: 8001
-      #   token: "asdf"
-      #   models:
-      #     - "Qwen3.6-35B-A3B-4bit"
-      #     - "Qwen3.6-35B-A3B-UD-MLX-4bit"
-      mlx-lm:
-        port: 8080
+      vllm:
+        port: 8005
         token: ""
-        models: 
-          - "mlx-community/gemma-4-26b-a4b-it-4bit"
-          - "mlx-community/Qwen3.6-35B-A3B-4bit" 
-          # - "lmstudio-community/GLM-4.7-Flash-MLX-4bit"
+        models:
+          - Qwen3.6-27B-FP8
+          # - gemma-4-31B-it-NVFP4
+          # - gemma-4-31B-it
+          # - Qwen3.6-35B-A3B-FP8
+          # - Qwen3.6-27B-NVFP4
+      # llama-server-nvidia:
+      #   port: 8000
+      #   token: ""
+      #   models:
+      #     # - "Qwen3.5-27B-UD-Q4_K_XL"
+      #     # - "Qwen3.6-35B-A3B-UD-Q4_K_S"
+      #     # - "Qwen3.6-35B-A3B-UD-Q8_K_XL"
+      #     # - gemma-4-31B-it-Q4_0
+      #     # - MiniMax-M2.7-UD-IQ3_S
+      #     # - Qwen3.6-27B-UD-Q6_K_XL
+      #     # - Qwen3.6-27B-BF16-GGUF
+      #     - Mistral-Medium-3.5-128B-UD-Q4_K_XL
+      # llama-server-amd:
+      #   port: 8001
+      #   token: ""
+      #   models:
+      #     - Qwen3.6-35B-A3B-UD-IQ4_XS
+  # macmini:
+  #   host: "http://mac-mini.local"
+  #   location: "mac-mini"
+  #   runtimes:
+  #     # omlx:
+  #     #   port: 8001
+  #     #   token: "asdf"
+  #     #   models:
+  #     #     - "Qwen3.6-35B-A3B-4bit"
+  #     #     - "Qwen3.6-35B-A3B-UD-MLX-4bit"
+  #     mlx-lm:
+  #       port: 8080
+  #       token: ""
+  #       models: 
+  #         - "mlx-community/gemma-4-26b-a4b-it-4bit"
+  #         - "mlx-community/Qwen3.6-35B-A3B-4bit" 
+  #         # - "lmstudio-community/GLM-4.7-Flash-MLX-4bit"
 
 # Evaluator model used to judge quality benchmark responses.
 # This model scores each fixture response against a rubric and is NOT itself
@@ -57,7 +57,7 @@ evaluator:
   runtime: "llama-server-nvidia"
   port: 8005
   token: ""
-  model: gemma-4-31B-it
+  model: Qwen3.6-27B-FP8
   # temperature: 0.0 — evaluator always runs at zero temperature for determinism
   temperature: 0.0
   # max_tokens: budget for the evaluator's JSON verdict per fixture
