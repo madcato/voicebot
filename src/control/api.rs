@@ -18,11 +18,14 @@ use crate::pipeline::frames::PipelineFrame;
 use super::broadcast::ControlEvent;
 use super::state::ControlState;
 
+const MAX_SSE_BUFFER_SIZE: usize = 1024 * 1024;
+
 pub fn router(state: Arc<ControlState>) -> Router {
     Router::new()
         .route("/control/events", get(sse_events))
         .route("/control/state", get(get_state))
         .route("/control/history", get(get_history))
+        .route("/control/health", get(get_health))
         .route("/control/mute", post(post_mute))
         .route("/control/barge_in", post(post_barge_in))
         .route("/control/input", post(post_input))
@@ -42,18 +45,24 @@ async fn sse_events(
     State(state): State<Arc<ControlState>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = state.broadcast.subscribe();
-    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+    let mut total_bytes_sent = 0usize;
+    let stream = futures_util::stream::unfold((rx, total_bytes_sent), |(mut rx, mut total_bytes)| async move {
+        if total_bytes >= MAX_SSE_BUFFER_SIZE {
+            return None;
+        }
         match rx.recv().await {
             Ok(event) => {
                 let json = serde_json::to_string(&event).unwrap_or_default();
-                Some((Ok(Event::default().data(json)), rx))
+                total_bytes += json.len();
+                Some((Ok(Event::default().data(json)), (rx, total_bytes)))
             }
             Err(RecvError::Lagged(n)) => {
                 let err = ControlEvent::Error {
                     message: format!("Missed {n} events (subscriber lagged)"),
                 };
                 let json = serde_json::to_string(&err).unwrap_or_default();
-                Some((Ok(Event::default().data(json)), rx))
+                total_bytes += json.len();
+                Some((Ok(Event::default().data(json)), (rx, total_bytes)))
             }
             Err(RecvError::Closed) => None,
         }
@@ -74,6 +83,13 @@ async fn get_state(State(state): State<Arc<ControlState>>) -> impl IntoResponse 
 async fn get_history(State(state): State<Arc<ControlState>>) -> impl IntoResponse {
     let messages = state.llm_session.lock().unwrap().messages.clone();
     Json(messages)
+}
+
+async fn get_health() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "status": "healthy",
+        "service": "jarvis-control",
+    }))
 }
 
 #[derive(Deserialize)]
