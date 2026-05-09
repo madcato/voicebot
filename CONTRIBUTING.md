@@ -1,6 +1,6 @@
-# Contributing to Hive Voicebot
+# Contributing to Jarvis Voicebot
 
-Thank you for your interest in contributing to **Hive Voicebot**! This document provides guidelines and information for contributors.
+Thank you for your interest in contributing to **Jarvis Voicebot**! This document provides guidelines and information for contributors.
 
 ---
 
@@ -20,7 +20,7 @@ Thank you for your interest in contributing to **Hive Voicebot**! This document 
 
 ## Code of Conduct
 
-Hive Voicebot follows a simple code of conduct:
+Jarvis Voicebot follows a simple code of conduct:
 
 - Be respectful and inclusive in all interactions
 - Provide constructive feedback, not criticism
@@ -45,7 +45,7 @@ Hive Voicebot follows a simple code of conduct:
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Clone the repository
-git clone https://github.com/Hive-Vote/voicebot.git
+git clone <repository-url>
 cd voicebot
 
 # Set up your environment variables
@@ -183,17 +183,15 @@ voicebot/
 │   │
 │   ├── tts/                 # Text-to-Speech
 │   │   ├── mod.rs
-│   │   ├── say.rs           # macOS `say` command
+│   │   ├── avspeech.rs      # macOS AVSpeechSynthesizer (--features avspeech)
 │   │   ├── kokoro.rs        # Kokoro ONNX TTS
 │   │   └── sentence.rs      # Sentence splitter for streaming TTS
 │   │
 │   ├── tools/               # Tool calling system
 │   │   ├── mod.rs
-│   │   ├── registry.rs      # Tool registry and execution
 │   │   ├── current_time.rs  # Get current date/time
-│   │   ├── screenshot.rs    # Take screenshots
+│   │   ├── take_screenshot.rs  # Take screenshots
 │   │   ├── clipboard.rs     # Read/write clipboard
-│   │   └── notification.rs  # Send desktop notifications
 │   │
 │   ├── agents/              # External agent delegation
 │   │   └── mod.rs           # run_agent / run_agent_async
@@ -217,11 +215,11 @@ voicebot/
 
 | Module | Purpose | If You're Adding... |
 |--------|---------|---------------------|
-| `audio/vad.rs` | Detects speech start/end | New VAD models, better barge-in |
-| `stt/whisper.rs` | Transcribes audio to text | Alternative STT backends |
+| `stt/mod.rs` (WhisperSTTVAD) | Detects speech start/end | New VAD models, better barge-in |
+| `stt/mod.rs` (WhisperSTTVAD, whisper-cpp-plus) | Transcribes audio to text | Alternative STT backends |
 | `llm/client.rs` | Talks to LLM server | New LLM providers, auth |
-| `tts/say.rs`, `kokoro.rs` | Synthesizes speech | New TTS backend |
-| `tools/registry.rs` | Executes tool calls | New voice-local tools |
+| `tts/avspeech.rs`, `tts/kokoro.rs` | Synthesizes speech | New TTS backend |
+| `tools/mod.rs` | Executes tool calls | New voice-local tools |
 | `profile/extractor.rs` | Learns user facts | Better profile extraction |
 | `config.rs` | Reads environment vars | New configuration options |
 
@@ -500,6 +498,6 @@ If you have questions that aren't covered here:
 ## Acknowledgments
 
 - Inspired by [mlx-lm](https://github.com/ml-explore/mlx-lm), [whisper-rs](https://github.com/robertodober/whisper-rs), and the Rust community
-- Built with ❤️ by Daniel and the Hive Team
+- Built with ❤️ by Daniel
 
 Happy coding! 🚀

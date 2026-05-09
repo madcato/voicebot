@@ -40,14 +40,14 @@ cargo test -p voicebot <test_name>
 Mono-user voice AI chatbot in Rust. Streaming STT→LLM→TTS pipeline, single process, tokio channels.
 
 ```
-Microphone → VAD (Silero) → STT (whisper-rs) → LLM (mlx-lm/oMLX SSE) → SentenceSplitter → TTS (say/AVSpeech/Kokoro) → AudioOutput
+Microphone → VAD (Silero) → STT (whisper-cpp-plus) → LLM (mlx-lm/oMLX SSE) → SentenceSplitter → TTS (AVSpeech/Kokoro) → AudioOutput
 ```
 
 ### Key Design Decisions
 
 - **STT→LLM latency trick**: Accumulate partial Whisper transcripts; send full text when VAD signals end-of-speech. LLM server maintains KV-cache implicitly across requests.
 - **LLM→TTS streaming**: Buffer tokens until punctuation (`. ! ? ; :`), synthesize immediately. While sentence N plays, sentence N+1 is being generated.
-- **Language**: Spanish default (`VOICEBOT_LANGUAGE=es`), English supported. Affects Whisper hint and `SAY_VOICE`.
+- **Language**: Spanish default (`VOICEBOT_LANGUAGE=es`), English supported. Affects Whisper hint and TTS voice.
 - **Barge-in**: User speech cancels active pipeline via `CancellationToken` (tokio-util).
 
 ---
@@ -59,7 +59,7 @@ Microphone → VAD (Silero) → STT (whisper-rs) → LLM (mlx-lm/oMLX SSE) → S
 | `src/audio/` | CPAL capture, Silero VAD, resampling (rubato), playback | `AudioBuffer`, `AudioOutput`, `VoiceActivityDetector` |
 | `src/stt/` | whisper-cpp-plus wrapper, 16kHz f32 mono, language detection | `WhisperStt` (alias for `WhisperSttPlus`) |
 | `src/llm/` | HTTP client to `/v1/chat/completions`, session management | `OpenAIClient`, `LlmSession` |
-| `src/tts/` | `avspeech.rs` (macOS AVSpeechSynthesizer), `say.rs` (subprocess), `sentence.rs` (boundary splitting), `kokoro.rs` (ONNX) | `SentenceSplitter` |
+| `src/tts/` | `avspeech.rs` (macOS AVSpeechSynthesizer), `sentence.rs` (boundary splitting), `kokoro.rs` (ONNX) | `SentenceSplitter` |
 | `src/db/` | SQLite persistence: sessions, messages, user_profile, memories | `Database` |
 | `src/config.rs` | Environment-based config (`Config::from_env()`) | `Config` |
 | `src/memory/` | Extract persistent notes from conversation, archive outdated | Injects `[MEMORIES]` block into system prompt |
@@ -73,7 +73,6 @@ Microphone → VAD (Silero) → STT (whisper-rs) → LLM (mlx-lm/oMLX SSE) → S
 
 ### Legacy Modules (do not extend)
 
-- `src/s2s/` — Replaced by `stt/` + `llm/`
 - `src/websocket_client.rs` — No longer needed
 - `provider/` — Python LFM2.5-Audio server (not used)
 - `src/stt/whisper.rs` — Deprecated; replaced by `whisper_plus.rs`
@@ -100,9 +99,6 @@ LLM_MAX_TOKENS=200
 LLM_CONTEXT_TOKENS=8192
 LLM_CONSOLIDATION_THRESHOLD_PCT=80
 LLM_SUMMARY_KEEP_TURNS=6
-
-# TTS (macOS)
-SAY_VOICE="Marisol (Enhanced)"  # say -v ? to list
 
 # Web search
 SEARXNG_URL=https://searxng.example.com

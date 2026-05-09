@@ -47,13 +47,12 @@ All components run in a single process connected by tokio channels (no inter-ser
 ```
 Microphone
   → AudioCapture (CPAL)
-  → VAD (Silero, voice_activity_detector crate)
-  → STT (whisper-rs, embedded whisper.cpp)
+  → WhisperSTTVAD (whisper-cpp-plus + Silero VAD integrated)
       partial transcripts accumulated in-memory
   → LLM client (mlx-lm / oMLX HTTP, streaming SSE)
       tokens streamed as they arrive
   → SentenceSplitter (buffer until punctuation boundary)
-  → TTS (macOS sfspeech or `say`, subprocess, or kokoro)
+  → TTS (macOS AVSpeechSynthesizer via avspeech.rs, or kokoro ONNX)
       synthesizes sentence by sentence
   → AudioOutput (CPAL speaker)
 ```
@@ -63,7 +62,7 @@ Microphone
 - **Single binary**: no inter-service communication; all stages connected by `tokio::sync` channels
 - **STT→LLM latency trick**: partial Whisper transcripts are accumulated in a `String`; when VAD signals end-of-speech the full transcript is sent to the LLM server. The server (mlx-lm or oMLX) maintains its own KV-cache implicitly across requests within a session.
 - **LLM→TTS streaming**: LLM tokens arrive via SSE and are buffered until a sentence boundary (`.`, `!`, `?`, `;`, `:`) — then that sentence is synthesized immediately. While sentence N plays, sentence N+1 is being generated and synthesized.
-- **Language**: Spanish by default, English supported. Configurable via `VOICEBOT_LANGUAGE` env var (`es` or `en`). Affects the Whisper transcription hint and the `SAY_VOICE` selected.
+- **Language**: Spanish by default, English supported. Configurable via `VOICEBOT_LANGUAGE` env var (`es` or `en`). Affects the Whisper transcription hint and the `AVSPEECH_VOICE` selected.
 - **LLM backend**: external mlx-lm or oMLX server (OpenAI-compatible `/v1/chat/completions`). Both are substantially faster than llama.cpp on Apple Silicon due to the MLX framework and Apple unified memory.
 
 ### Key Modules
@@ -75,22 +74,22 @@ Microphone
 - `audio_transform.rs`: Rubato-based resampling (FftFixedIn, 1024-chunk)
 - `output.rs`: CPAL speaker playback with condvar drain (400ms silence tail to avoid CoreAudio cutoff)
 
-**`src/stt/`** — Speech-to-Text (to be implemented)
-- `whisper.rs`: whisper-rs FFI wrapper; transcribes f32 mono 16kHz audio; returns text + detected language
-- Language hint passed to whisper for faster decoding when language is known
+**`src/stt/`** — Speech-to-Text
+- `mod.rs`: `WhisperSTTVAD` — integrated STT+VAD on top of `whisper-cpp-plus`; Silero VAD for voice activity detection; streaming transcription with language hint
+- `whisper.rs`: **DEPRECATED** — legacy whisper-rs wrapper; replaced by `whisper-cpp-plus` in `mod.rs`
 
 **`src/llm/`** — LLM client
 - `client.rs`: async HTTP client to `/v1/chat/completions` (OpenAI-compatible; works with mlx-lm and oMLX); `stream()` for conversation, `complete()` / `complete_short()` for background tasks (summarization, profile/memory extraction)
 - `session.rs`: `LlmSession` holding `messages: Vec<Value>` + `original_system_prompt` + `summary`; `set_system_prompt()` for runtime prompt rebuild; `needs_consolidation(tokens, pct)` for threshold check
 
 **`src/tts/`** — Text-to-Speech
-- `say.rs`: macOS `say` subprocess wrapper; outputs raw i16 PCM at 22050 Hz via `--data-format=LEI16@22050 -o /dev/stdout`; voice configured via `SAY_VOICE` env var (default `"Marisol (Enhanced)"`)
+- `avspeech.rs`: macOS AVSpeechSynthesizer (objc2 bindings); voice configured via `AVSPEECH_VOICE` env var (default `"Jorge (Enhanced)"`), rate via `AVSPEECH_RATE` (0.0–1.0, default 0.55)
+- `kokoro.rs`: Kokoro TTS via ONNX runtime (higher quality, offline; enables with `--features kokoro`)
+- `sentence.rs`: buffers incoming token stream; emits complete sentences on punctuation boundaries (`. ! ? ; :` followed by space or end). First sentence of each response uses aggressive early splitting
 - `piper.rs`: Piper subprocess wrapper (kept for reference; not active)
-- `sentence.rs`: buffers incoming token stream; emits complete sentences on punctuation boundaries (`. ! ? ; :` followed by space or end). First sentence of each response uses aggressive early splitting (commas, dashes, or word-count threshold) to minimize time-to-first-audio.
-- **Planned**: `kokoro.rs` — Kokoro TTS via onnxruntime (higher quality, offline ONNX model)
 
-**`src/session/`** — Conversation state (simplified)
-- `context.rs`: `ConversationContext` with message history (User/Assistant/System roles)
+**`src/session/`** — Conversation state
+- Conversation context with message history (User/Assistant/System roles); managed via `LlmSession` in `src/llm/session.rs`
 
 **`src/config.rs`** — Environment-based config
 - `AUDIO_SAMPLE_RATE` (default 16000), `AUDIO_CHANNELS` (default 1), `AUDIO_DEVICE`, `LIST_AUDIO_DEVICES`
@@ -103,7 +102,9 @@ Microphone
 - `WHISPER_THREADS` — CPU threads for Whisper decoding (default 0 = auto)
 - `LLM_SYSTEM_PROMPT` — system prompt text
 - `WHISPER_MODEL` — path to whisper GGML model file (default `models/ggml-large-v3-turbo.bin`)
-- `SAY_VOICE` — macOS voice name (default `"Marisol (Enhanced)"`); list voices with `say -v ?`
+- `AVSPEECH_VOICE` — macOS AVSpeech voice name (default `"Jorge (Enhanced)"`)
+- `AVSPEECH_RATE` — normalized speech rate 0.0–1.0 (default 0.55)
+- `SAY_VOICE` (deprecated, ignored) — legacy name for `AVSPEECH_VOICE`
 - `AUDIO_OUTPUT_DEVICE` — substring match of output device name; leave unset to use system default
 - `SEARXNG_URL` — base URL of SearXNG instance; enables `web_search` tool when set
 - `SEARXNG_SECRET` — Bearer token for SearXNG API authentication
@@ -119,11 +120,38 @@ Microphone
 - On each turn: persist user transcript and assistant response to DB
 - Tables: `sessions`, `messages`, `user_profile`, `memories`
 
-### Legacy modules (to be removed or gutted)
+**`src/pipeline/`** — Pipeline orchestration with FSM (Finite State Machine)
+- `fsm.rs`: `PipelineState` enum and `PauseReason` — tracks idle/busy/paused states for barge-in and state machine logic
+- `mod.rs`: Orchestrates the STT→LLM→TTS pipeline loop
+- `llm_task.rs` / `tts_task.rs` / `sen_task.rs`: Per-stage async tasks
+- `frames.rs`: Audio frame handling for streaming pipeline
+- `state.rs`: Shared pipeline state management
+- `consolidation.rs`: Context window consolidation when threshold exceeded
 
-The following were part of the S2S approach and will be replaced:
-- `src/s2s/` — S2S adapter + LFM model (replaced by `src/stt/` + `src/llm/`)
-- `src/tools/`, `src/mcp/`, `src/agents/` — not needed for MVP
+**`src/daemon.rs`** — InferenceDaemon
+- Long-running background daemon that loops: listen VAD → STT → LLM → TTS. Manages the main inference lifecycle.
+
+**`src/eyes.rs`** — EyesDaemon
+- Background daemon for visual/status monitoring. Periodically observes system state and reacts to changes.
+
+**`src/control/`** — Control API
+- `api.rs`: HTTP/WebSocket API for external control (start/stop pipeline, status queries)
+- `state.rs`: Shared control state (running, paused, error)
+- `broadcast.rs`: Event broadcast channel for state change notifications
+
+**`src/mcp/`** — MCP (Model Context Protocol) Integration
+- `mod.rs`: `McpClient` for talking to external MCP servers; `McpToolDef` for tool definitions; `call_tool()` for remote tool invocation
+
+**`src/audio/speaker.rs`** — Speaker Verification (feature flag `speaker`)
+- `SpeakerVerifier`: Identifies known speakers using ONNX speaker embeddings
+- `SpeakerProfile`: Stores enrolled voice profiles
+- `SpeakerVerdict`: Match/no-match/unknown verdict enum
+
+### Legacy modules
+
+The following modules are deprecated or removed:
+- `src/s2s/` — **REMOVED** (directory no longer exists). Was the S2S adapter + LFM model, replaced by `src/stt/` + `src/llm/`
+- `src/stt/whisper.rs` — **DEPRECATED** — legacy whisper-rs wrapper; replaced by `whisper-cpp-plus` in `src/stt/mod.rs`
 - `src/websocket_client.rs` — no longer needed
 - `provider/` — Python LFM2.5-Audio HTTP server (no longer used)
 
@@ -137,4 +165,4 @@ The following were part of the S2S approach and will be replaced:
 - Generate synthetic audio (sine waves / silence) for VAD and buffer tests
 - Mock LLM/TTS via trait objects for pipeline integration tests
 - Whisper tests require model file; skip in CI if not present (`#[ignore]`)
-- `say` TTS tests require macOS with voices installed, kokoro for Linux CI
+- AVSpeech TTS tests require macOS with voices installed, kokoro for Linux CI

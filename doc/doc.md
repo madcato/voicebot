@@ -32,7 +32,7 @@ The current implementation covers the conversational core. The roadmap below cha
 The core pipeline is fully operational:
 
 ```
-Microphone → VAD → AudioBuffer → Whisper STT → mlx-lm/oMLX LLM → SentenceSplitter → TTS (say/Kokoro) → Speaker
+Microphone → VAD → AudioBuffer → Whisper STT → mlx-lm/oMLX LLM → SentenceSplitter → TTS (AVSpeech/Kokoro) → Speaker
 ```
 
 **Implemented features:**
@@ -40,16 +40,23 @@ Microphone → VAD → AudioBuffer → Whisper STT → mlx-lm/oMLX LLM → Sente
 - Whisper.cpp STT (CoreML Neural Engine or Metal GPU, state cached across utterances)
 - Streaming LLM via mlx-lm or oMLX (Apple MLX, implicit KV-cache reuse, sub-second latency)
 - Sentence-by-sentence TTS playback — first sentence plays while next is being generated
-- **Barge-in**: user speech cancels active LLM/TTS pipeline instantly via `Arc<AtomicBool>`
+- **Barge-in**: user speech cancels active LLM/TTS pipeline instantly via `CancellationToken`
 - Persistent SQLite conversation history — restored on startup
 - LLM session rollback on barge-in interruption
-- **Tool use**: OpenAI-native function calling (`tools: [...]`, `tool_choice: "auto"`); multi-tool loop (up to 5 iterations); voicebot-only tools: `current_time`, `take_screenshot`, `send_notification`, `read_clipboard`, `set_clipboard`, `open_app`
+- **Tool use**: XML-based tool calls (`<tool_name>...</tool_name>`) plus multi-tool loop; built-in tools: `current_time`, `take_screenshot`, `read_clipboard`, `set_clipboard`, `open_app`, `run_shell`, `read_file`, `web_search`, `set_conversation_mode`, `mcp_tool` (dynamic MCP server proxy), `run_agent` (subprocess + ACP delegation)
 - **Agent delegation**: `run_agent` (sync) and `run_agent_async` (background + proactive announce) via stdin/stdout subprocess; any CLI agent; proactive channel in VAD loop
-- **Context summarization**: auto-triggers at 75% of context window; keeps last N turns verbatim; summary persisted in DB and restored on restart
+- **Context summarization**: auto-triggers when context exceeds configurable threshold (default 90%, `LLM_CONSOLIDATION_THRESHOLD_PCT`); keeps last N turns verbatim; idle consolidation after inactivity (`LLM_IDLE_CONSOLIDATION_SECS`, default 30 min); summary persisted in DB and restored on restart
 - **User profile**: background LLM extraction of user facts after every turn; stored in `user_profile` SQLite table; injected into system prompt on startup
 - **Startup greeting**: bot speaks first on process launch — greets by name if known, asks for it otherwise
-- **Kokoro TTS**: high-quality ONNX-based TTS via `kokorox` crate (24 kHz); selectable at runtime via `TTS_PROVIDER`; macOS `say` remains the default
-- **Background GPU overlap**: `maybe_summarize` and `extract_facts` launch while the last TTS sentence is still playing, freeing the GPU sooner
+- **Kokoro TTS**: high-quality ONNX-based TTS via `kokorox` crate (24 kHz); selectable via `TTS_PROVIDER`; AVSpeechSynthesizer is the macOS default
+- **Background inference overlap**: `maybe_summarize` and `extract_facts` launch while the last TTS sentence is still playing
+- **EYES visual awareness**: periodic screen capture + secondary vision LLM decides if anything on screen warrants notifying the user
+- **Inference daemon**: background "is there anything worth saying?" loop that pushes proactive speech when relevant
+- **MCP integration**: JSON-RPC 2.0 stdio client; dynamically discovers and proxies tools from MCP servers
+- **Control API**: HTTP + SSE endpoints for remote monitoring and control (`/control/state`, `/control/events`, `/control/mute`, `/control/barge_in`, `/control/input`, `/control/history`)
+- **Conversation modes**: ambient state machine with wake-word activation, auto-return to active mode
+- **Speaker verification**: sherpa-onnx speaker embedding with auto-enrollment, multi-profile support
+- **Secondary LLM**: routes summarization, profile extraction, and vision to a separate model/provider
 
 ---
 
@@ -69,7 +76,7 @@ This separation exists for one reason: **response latency**. The more tools and 
 │  • Barge-in, conversation awareness, speaker ID            │
 │  • Proactive speech (inference daemon)                      │
 │  • Voice-local tools: time, screenshot, clipboard,          │
-│    notification, open_app                                   │
+│    open_app, shell, file reader, web search, MCP proxy      │
 │                                                             │
 │  When task is complex or requires computer agency:          │
 │    run_agent(task) ──stdin/stdout──► AGENT                  │
@@ -94,12 +101,15 @@ This separation exists for one reason: **response latency**. The more tools and 
 |------|---------|----------|
 | `current_time` | <1ms | Trivial; no subprocess |
 | `take_screenshot` + vision | ~500ms | Needs screen access before speaking |
-| `send_notification` | <100ms | Instant `osascript` |
 | `read_clipboard` / `set_clipboard` | <50ms | Instant `pbpaste`/`pbcopy` |
 | `open_app` | <100ms | Instant `open -a` |
+| `run_shell` | varies | Gated by `SHELL_ENABLED=1`; bounded by `SHELL_TIMEOUT_SECS` |
+| `read_file` | varies | Local file read; bounded by size limit |
+| `web_search` | ~1-3s | SearXNG proxy |
+| `mcp_tool` | varies | Dynamic proxy to connected MCP servers |
 | `run_agent` / `run_agent_async` | varies | The delegation bridge |
 
-Everything else — shell, calendar, files, web, email, vision analysis — goes to the agent.
+Everything else — calendar, email, long-running file operations — goes to the agent.
 
 **Agent integration via stdin/stdout:**
 
@@ -107,7 +117,6 @@ The agent is invoked as a subprocess. This is intentionally simple: any CLI agen
 
 ```
 AGENT_COMMAND=hermes        # CLI command to invoke
-AGENT_ARGS=                 # Optional extra arguments
 AGENT_TIMEOUT_SECS=120      # Timeout for synchronous calls
 ```
 
@@ -152,7 +161,7 @@ This is a fire-and-read pattern — no JSON protocol, no shared state, no persis
                            │   re-call LLM with result
                            │          │
                     ┌──────▼──────────▼──────────┐
-                    │  TTS (say or Kokoro)        │
+                    │  TTS (AVSpeech or Kokoro)   │
                     │  sentence-by-sentence       │
                     └─────────────┬──────────────┘
                                   │  f32 PCM
@@ -174,16 +183,20 @@ This is a fire-and-read pattern — no JSON protocol, no shared state, no persis
 | Module | File | Description |
 |--------|------|-------------|
 | Audio capture | `src/audio/audio_capture.rs` | CPAL mic input, normalizes to f32 |
-| VAD | `src/audio/vad.rs` | Silero energy VAD, pre-roll buffer |
 | Audio buffer | `src/audio/buffer.rs` | Accumulates speech chunks |
 | Audio output | `src/audio/output.rs` | CPAL playback, resample, cancel support |
-| STT | `src/stt/whisper.rs` | whisper-rs, cached WhisperState (no Metal re-init) |
+| STT + VAD | `src/stt/mod.rs` | `WhisperSTTVAD` integrates whisper-cpp-plus STT with Silero VAD, pre-roll buffer, state machine |
 | LLM client | `src/llm/client.rs` | Streaming SSE + one-shot completion (OpenAI-compatible; mlx-lm and oMLX) |
 | LLM session | `src/llm/session.rs` | Accumulated prompt, turn tracking, summarization |
-| TTS | `src/tts/say.rs`, `src/tts/kokoro.rs` | macOS `say` or Kokoro ONNX; unified `TtsEngine` enum |
+| TTS AVSpeech | `src/tts/avspeech.rs` | macOS AVSpeechSynthesizer (default on macOS, `--features avspeech`) |
+| TTS Kokoro | `src/tts/kokoro.rs` | Kokoro ONNX TTS (`--features kokoro`) |
 | Sentence splitter | `src/tts/sentence.rs` | Buffers tokens, emits complete sentences |
-| Tools | `src/tools/` | `Tool` trait + `ToolRegistry`; `current_time`, `run_agent`, `run_agent_async` |
+| Tools | `src/tools/` | `Tool` trait + `ToolRegistry`; 10+ built-in tools plus dynamic MCP proxy |
+| MCP Client | `src/mcp/mod.rs` | JSON-RPC 2.0 stdio client; discovers + proxies tools from MCP servers |
 | Agents | `src/agents/mod.rs` | `ProactiveEvent` enum; proactive speech channel |
+| Inference daemon | `src/daemon.rs` | Background "is there anything worth saying?" loop |
+| EYES | `src/eyes.rs` | Periodic screen capture + secondary vision LLM for proactive notifications |
+| Control API | `src/control/` | HTTP + SSE: `/control/state`, `/control/events`, `/control/mute`, `/control/barge_in`, `/control/input`, `/control/history` |
 | Profile | `src/profile/mod.rs` | User fact extraction, JSON parsing, context builder |
 | Database | `src/db/database.rs` | SQLite: sessions, messages, summary, user_profile |
 | Config | `src/config.rs` | Environment-based configuration |
@@ -205,14 +218,16 @@ This is a fire-and-read pattern — no JSON protocol, no shared state, no persis
 | `LLM_SYSTEM_PROMPT` | — | System prompt for the LLM |
 | `LLM_MAX_TOKENS` | `400` | Max generation tokens per response |
 | `LLM_TEMPERATURE` | `0.7` | LLM sampling temperature |
-| `LLM_CONTEXT_TOKENS` | `4096` | Model context window size; triggers summarization at 75% |
+| `LLM_CONTEXT_TOKENS` | `4096` | Approximate context window size in tokens |
+| `LLM_CONSOLIDATION_THRESHOLD_PCT` | `90` | Percentage of context window that triggers consolidation (default 90%) |
+| `LLM_IDLE_CONSOLIDATION_SECS` | `1800` | Seconds of inactivity before silent consolidation runs (0 = disabled) |
+| `LLM_IDLE_MIN_CONTEXT_PCT` | `50` | Minimum context fill % required for idle consolidation to run |
 | `LLM_SUMMARY_KEEP_TURNS` | `6` | Recent (role, content) turns kept verbatim after summarization |
-| `AGENT_URL` | — | Remote agent base URL (OpenAI-compatible). Unset = agent tools disabled |
-| `AGENT_MODEL` | `local-model` | Model name sent to agent server |
-| `AGENT_MAX_TOKENS` | `2048` | Max tokens for agent responses |
-| `TTS_PROVIDER` | `avspeech` | TTS backend: `avspeech` (native AVSpeechSynthesizer, requires `--features avspeech`, default), `say` (macOS subprocess), or `kokoro` (requires `--features kokoro`) |
-| `SAY_VOICE` | `Jorge (Enhanced)` | macOS voice name (used when `TTS_PROVIDER=say`). List voices: `say -v ?` |
-| `SAY_RATE` | `215` | Speaking rate in words per minute (used when `TTS_PROVIDER=say`) |
+| `AGENT_COMMAND` | — | CLI command to invoke the agent (e.g. `hermes chat`). Unset = agent tools disabled. |
+| `AGENT_MODE` | `cli` | Agent communication mode: `cli` (subprocess) or `acp` (persistent ACP JSON-RPC stdio) |
+| `AGENT_ACP_COMMAND` | `hermes acp` | Command to start the ACP process (used when `AGENT_MODE=acp`) |
+| `AGENT_TIMEOUT_SECS` | `120` | Hard timeout in seconds for synchronous agent calls |
+| `TTS_PROVIDER` | `avspeech` | TTS backend: `avspeech` (native AVSpeechSynthesizer, requires `--features avspeech`, default) or `kokoro` (requires `--features kokoro`) |
 | `AVSPEECH_VOICE` | `Jorge (Enhanced)` | Voice display name for AVSpeechSynthesizer (used when `TTS_PROVIDER=avspeech`). List voices: `say -v ?` |
 | `AVSPEECH_RATE` | `0.55` | Normalized speech rate 0.0–1.0 for AVSpeechSynthesizer (`0.5` = default ≈ 180 wpm, `0.55` ≈ 215 wpm) |
 | `KOKORO_MODEL` | `models/kokoro-v1.0.onnx` | Path to Kokoro ONNX model file |
@@ -228,6 +243,20 @@ This is a fire-and-read pattern — no JSON protocol, no shared state, no persis
 | `SPEAKER_MODEL` | auto-detect | Path to speaker embedding ONNX model. Auto-detected from `models/speaker_embedding.onnx` if it exists. |
 | `SPEAKER_ENROLLMENT_PATH` | `data/speaker.emb` | Path where the enrolled speaker embedding is persisted. Delete to re-enroll. |
 | `SPEAKER_SIMILARITY_MIN` | `0.45` | Cosine similarity threshold [0–1]. Higher = stricter. 0.45 permissive, 0.55 strict. |
+| `LLM_HISTORY_LOAD_LIMIT` | `0` | Max messages loaded from DB on startup (0 = unlimited). Recommended: 40–60 to prevent restart compaction. |
+| `WAKE_WORD` | `jarvis` | Case-insensitive substring match to trigger response in Ambient mode |
+| `AMBIENT_CLEAR_SECS` | `300` | Seconds in Ambient mode with no speech before auto-returning to Active |
+| `DAEMON_ENABLED` | `0` | Set to `1` to enable the inference daemon (background "is there anything worth saying?" loop) |
+| `DAEMON_INTERVAL_SECS` | `300` | Seconds between inference daemon checks |
+| `EYES_INTERVAL_SECS` | `0` | Seconds between screen-capture checks for EYES (0 = disabled). Requires SECONDARY_LLM_URL. |
+| `SECONDARY_LLM_URL` | — | Base URL for secondary LLM (vision, summarization, profile extraction). Unset = disabled. |
+| `SECONDARY_LLM_MODEL` | — | Model name for secondary LLM requests |
+| `SECONDARY_LLM_MAX_TOKENS` | `512` | Max tokens for secondary LLM responses |
+| `SECONDARY_LLM_API_KEY` | _(empty)_ | Bearer token for secondary LLM API |
+| `SECONDARY_LLM_THINKING` | `0` | Enable Qwen3 thinking mode on secondary LLM (auto-strips thinking tags) |
+| `MCP_COMMAND` | — | Command to spawn MCP server subprocess (e.g. `bunx apple-mcp@latest`). Unset = MCP disabled. |
+| `MCP_TOOL_TIMEOUT_SECS` | `30` | Hard timeout in seconds per MCP tool call |
+| `CONTROL_PORT` | — | HTTP/SSE control API port (requires `--features control`). Unset = disabled. |
 
 ---
 
@@ -485,48 +514,57 @@ STT → LLM streams tokens
 
 **Adding a new tool:** implement `trait Tool { fn name(); fn description(); fn run() -> String; }` and call `registry.register(MyTool)` in `main()`.
 
-**Built-in tools:** `current_time` — returns local date and time.
+**Built-in tools:**
+
+| Tool | Description |
+|------|-------------|
+| `current_time` | Returns local date and time |
+| `take_screenshot` | Captures screen, returns base64 PNG |
+| `read_clipboard` | Reads current clipboard contents |
+| `set_clipboard` | Writes text to the clipboard |
+| `open_app` | Launches a macOS application by name |
+| `run_shell` | Executes a shell command (disabled by default, requires `SHELL_ENABLED=1`) |
+| `read_file` | Reads contents of a file path |
+| `web_search` | Searches the web via SearXNG |
+| `set_conversation_mode` | Switches between Active and Ambient modes |
+| `run_agent` / `run_agent_async` | Delegates to an external CLI agent (sync or background) |
+| `mcp_tool` | Dynamic proxy: discovers and calls tools from connected MCP servers |
 
 ---
 
-### 2. MCP (Model Context Protocol) Integration
+### 2. MCP (Model Context Protocol) Integration ✅ Implemented
 
 **Goal:** Connect to MCP servers to expose a broad ecosystem of tools (filesystem, browser, GitHub, Slack, databases, etc.) without implementing each tool manually.
 
-**Approach:**
+**Implementation:**
 
-MCP uses a JSON-RPC protocol over stdio (subprocess) or SSE (HTTP). The voicebot acts as an MCP client:
+MCP uses JSON-RPC 2.0 over stdio (subprocess). The voicebot acts as an MCP client:
 
 ```
 LLM tool_call
      │
      ▼
-ToolRouter
+ToolRegistry
      │
-     ├── built-in tools (Rust functions)
-     ├── MCP servers (subprocess/HTTP JSON-RPC)
-     └── agents (see feature 3)
+     ├── built-in tools (Rust)
+     ├── mcp_tool proxy → MCP subprocess (JSON-RPC 2.0 stdio)
+     └── agents (run_agent / run_agent_async)
 ```
 
-**Implementation steps:**
-1. Restore `src/tools/` and `src/mcp/` modules (currently gutted from the codebase)
-2. `McpClient`: spawns/connects to MCP servers, implements `initialize` + `tools/list` + `tools/call` JSON-RPC methods
-3. `ToolRouter`: on each tool call from the LLM, tries built-ins first, then queries registered MCP servers
-4. Tool schemas from MCP (`tools/list`) are translated to OpenAI-compatible JSON Schema and injected into the LLM payload
+**`src/mcp/mod.rs`** — Full MCP client implementation:
+- Spawns the MCP server subprocess (configurable via `MCP_COMMAND`)
+- Performs the `initialize` handshake, discovers tools via `tools/list`
+- Routes `tools/call` JSON-RPC requests with concurrent support (onshot channels keyed by request ID)
+- Tool schemas from MCP are translated to OpenAI-compatible JSON Schema and injected into the LLM payload
 
-**Config:** MCP servers configured via a JSON/TOML file, e.g.:
-```toml
-[[mcp_servers]]
-name = "filesystem"
-command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/home/user"]
+**`src/tools/mcp_tool.rs`** — `McpToolProxy` bridges the `Tool` trait to the MCP client. At startup the proxy fetches `tools/list` and registers each discovered tool as a first-class tool in `ToolRegistry`. Dynamic tool calls are routed through `mcp_tool` with the server's tool name and arguments forwarded transparently.
 
-[[mcp_servers]]
-name = "brave-search"
-command = ["npx", "-y", "@modelcontextprotocol/server-brave-search"]
-env = { BRAVE_API_KEY = "..." }
-```
+**Config:**
 
-**Key challenge:** MCP servers are typically Node.js/Python subprocesses. Need async stdin/stdout communication without blocking the tokio event loop — use `tokio::process::Command` with async I/O.
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `MCP_COMMAND` | — | Command to spawn MCP server subprocess (e.g. `bunx apple-mcp@latest`). Unset = MCP disabled. |
+| `MCP_TOOL_TIMEOUT_SECS` | `30` | Hard timeout per MCP tool call |
 
 ---
 
@@ -534,7 +572,9 @@ env = { BRAVE_API_KEY = "..." }
 
 **Goal:** The LLM can delegate complex tasks (research, shell automation, file operations, calendar management, web browsing) to an external agent. The voicebot keeps its voice pipeline unblocked. Results return via the proactive channel and are spoken naturally.
 
-**Two delegation modes:**
+**Two communication modes: `cli` and `acp`
+
+**CLI mode (`AGENT_MODE=cli`, subprocess fire-and-read):**
 
 **Synchronous (`run_agent` — tasks expected < 30s):**
 ```
@@ -572,15 +612,26 @@ LLM calls run_agent_async(task)
 - **VAD loop** extended with `tokio::select!` watching both audio and `proactive_rx`
 - **`run_proactive_pipeline`** — builds temporary message list from session + agent result, calls LLM, sends to TTS
 
+**ACP mode (`AGENT_MODE=acp`, persistent JSON-RPC stdio):**
+
+Instead of spawning a new subprocess for each delegation, the voicebot maintains a persistent connection to an ACP-compatible agent via JSON-RPC 2.0 over stdio. This enables:
+- Bi-directional communication (agent can push updates back)
+- No per-task startup overhead (agent stays warm)
+- Shared session context across delegations
+
 **Config vars:**
 
 | Env var | Default | Description |
 |---------|---------|-------------|
-| `AGENT_COMMAND` | — | CLI command to invoke (e.g. `hermes`, `claude`, `python agent.py`). Unset = agent tools disabled. |
-| `AGENT_ARGS` | — | Optional arguments appended to the command |
+| `AGENT_COMMAND` | — | CLI command to invoke (e.g. `hermes chat`). Unset = agent tools disabled. |
+| `AGENT_MODE` | `cli` | Communication mode: `cli` (subprocess per call) or `acp` (persistent JSON-RPC) |
+| `AGENT_ACP_COMMAND` | `hermes acp` | Command to start ACP process (used when `AGENT_MODE=acp`) |
 | `AGENT_TIMEOUT_SECS` | `120` | Hard timeout for synchronous agent calls |
+| `AGENT_ACP_WARMUP` | `0` | Send warmup prompt at startup to preload the model (ACP mode only) |
 
-**Agent protocol:** stdin/stdout. The voicebot writes the task as plain text to the subprocess stdin, closes it, and reads the complete response from stdout. Any CLI agent that follows this contract works — Hermes, Claude CLI, a custom Python script, or anything else. Switching agents requires changing only `AGENT_COMMAND`.
+**Agent protocol (CLI mode):** stdin/stdout. The voicebot writes the task as plain text to the subprocess stdin, closes it, and reads the complete response from stdout. Any CLI agent that follows this contract works — Hermes, Claude CLI, a custom Python script, or anything else. Switching agents requires changing only `AGENT_COMMAND`.
+
+**Agent protocol (ACP mode):** JSON-RPC 2.0 over stdio with method-based calls (e.g. `chat/send_message`, `chat/terminate`). The voicebot manages the persistent process lifecycle and routes delegations through the shared connection.
 
 **Why stdin/stdout and not HTTP:**
 - No persistent service to manage — the agent starts only when needed
@@ -592,40 +643,37 @@ LLM calls run_agent_async(task)
 
 ---
 
-### 4. Proactive Conversations (Bot-Initiated Speech) ✅ Partially Implemented
+### 4. Proactive Conversations (Bot-Initiated Speech) ✅ Implemented
 
-**Goal:** The bot can speak without being prompted by the user — to deliver agent results, reminders, greetings, or contextual observations.
+**Goal:** The bot can speak without being prompted by the user — to deliver agent results, inference observations, or ACP agent questions.
 
-**Approach:**
+**Approach:
 
-The main `tokio::select!` loop is extended with a proactive events channel:
+The main loop watches both audio and a proactive events channel:
 
 ```rust
-enum ProactiveEvent {
-    AgentResult { task: String, result: String },
-    Reminder { message: String },
-    Scheduled { prompt: String },
+pub enum ProactiveEvent {
+    AgentResult { task: String, result: String, tool_call_id: Option<String> },
+    InferenceDaemon { message: String },
+    AgentQuestion { question: String, options: Vec<String>, response_tx: oneshot::Sender<String> },
 }
 
 tokio::select! {
-    chunk = audio_rx.recv()    => { /* VAD processing */ }
-    event = proactive_rx.recv() => { run_proactive_pipeline(event, ...).await }
-    _ = ctrl_c()               => { /* shutdown */ }
+    chunk = audio_rx.recv()       => { /* VAD processing */ }
+    event = proactive_rx.recv()   => { run_proactive_pipeline(event, ...).await }
+    _ = ctrl_c()                  => { /* shutdown */ }
 }
 ```
 
-**Event sources:**
-- **Agent completion**: async agent task pushes to `proactive_tx` when done
-- **Scheduler**: background task fires at configured times (reminders, daily briefings)
-- **Idle trigger**: after N minutes of silence, LLM generates a contextual observation or question (configurable, off by default)
-- **External trigger**: Unix socket or local HTTP endpoint that external processes can POST to
+**Event sources (all implemented):**
+- **Agent completion**: async agent task pushes `AgentResult` to the channel when done
+- **Inference daemon**: periodic LLM check (`src/daemon.rs`) pushes `InferenceDaemon` when something noteworthy surfaces
+- **EYES**: periodic screen capture (`src/eyes.rs`) pushes `AgentResult` when the vision LLM detects something worth mentioning
+- **ACP agent questions**: `AgentQuestion` routes an agent's interactive prompt through the voice pipeline, waits for the user's vocal response, and returns it via oneshot channel
 
 **Voice UX:**
-- Play a subtle audio cue before speaking proactively (so the user isn't startled)
 - Respect barge-in — user can interrupt proactive speech exactly like regular responses
-- Check if the user appears to be in the middle of speaking before interrupting with a proactive message
-
-**Key challenge:** Idle detection in the current VAD loop. The VAD only sees `Silence`/`Speech` events. Need a timer that resets on any `Speech` or `SpeechEnd` event, and fires a proactive event after a configurable idle timeout.
+- `run_proactive_pipeline` reformulates the raw event into Jarvis's voice before speaking
 
 ---
 
@@ -672,8 +720,8 @@ Useful when the agent's API expects specific input formats, or when responses ar
 
 Triggered automatically at the end of each pipeline turn, after the assistant response is saved.
 
-- **Detection:** `chars / 3.5 > context_tokens * 75%` — rough token estimate; tunable via `LLM_CONTEXT_TOKENS`
-- **Summarization:** one-shot LLM call (`slot_id: -1`, `temperature: 0.3`) asking to summarize the old turns in the same language as the conversation
+- **Detection:** `chars / 3.5 > context_tokens * threshold_pct` — rough token estimate; threshold configurable via `LLM_CONSOLIDATION_THRESHOLD_PCT` (default 90%). Also triggered by idle timer (`LLM_IDLE_CONSOLIDATION_SECS`, default 30 min) when context exceeds `LLM_IDLE_MIN_CONTEXT_PCT`.
+- **Summarization:** one-shot LLM call routed to the secondary LLM if available (for GPU overlap), asking to summarize the old turns in the same language as the conversation
 - **Compaction:** `LlmSession::apply_summary()` rebuilds `accumulated_prompt` as:
   ```
   <|im_start|>system
@@ -818,7 +866,7 @@ This prompt is a starting point. It should be refined over time as Jarvis learns
 
 **Voicebot implementation (done):**
 - `take_screenshot` tool: `screencapture -x -t png` → base64 → secondary vision provider (LM Studio)
-- System state injection: `INJECT_SYSTEM_DATA=true` prepends `[SYSTEM STATE] time | app | battery` to each turn ephemerally
+- `current_time` tool: LLM can request current date/time via tool call, injected into conversation context
 
 **Agent implementation (agent-side, not in voicebot):**
 - Calendar queries, reminders, upcoming deadlines
@@ -840,18 +888,22 @@ The voicebot keeps only the instant, side-effect-light operations that are natur
 | Tool | Latency | Use case |
 |------|---------|----------|
 | `open_app(name)` | <100ms | "Abre Spotify" |
-| `send_notification(title, msg)` | <100ms | Alert alongside voice response |
 | `read_clipboard()` | <50ms | "¿Qué tengo copiado?" |
 | `set_clipboard(text)` | <50ms | "Copia esto al portapapeles" |
+| `current_time()` | <1ms | "¿Qué hora es?" |
+| `take_screenshot()` | ~200ms | "¿Qué hay en pantalla?" |
+| `run_shell(cmd)` | varies | "Elimina el archivo X" (gated by `SHELL_ENABLED`) |
+| `read_file(path)` | varies | "Muéstrame el contenido de foo.txt" |
+| `web_search(query)` | ~1-3s | Network call via SearXNG |
+| `mcp_tool(name, args)` | varies | Dynamic proxy to any connected MCP server |
 
 **Agent tools (delegated via `run_agent`):**
 
 | Tool | Why in the agent |
 |------|-----------------|
-| `run_shell(cmd)` | Arbitrary execution time; dangerous |
-| `read_file` / `write_file` | File size unknown; stateful |
+| `write_file` | File size unknown; stateful |
 | `calendar_events` / `create_event` | AppleScript 1–3s |
-| `web_search` / `browse` | Network, seconds |
+| `browse` | Complex multi-step web interaction |
 | `send_email` | Async by nature |
 
 **Safety:** Shell access in the agent is the agent's responsibility to sandbox. The voicebot never executes shell commands directly.
@@ -1304,24 +1356,26 @@ WAKE_WORD                 keyword to respond in ambient mode (default: "jarvis")
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| STT → LLM → TTS streaming pipeline | ✅ Done | Whisper + mlx-lm/oMLX + macOS say |
-| Barge-in interruption | ✅ Done | `Arc<AtomicBool>` cancel, CPAL callback |
+| STT → LLM → TTS streaming pipeline | ✅ Done | whisper-cpp-plus + mlx-lm/oMLX + AVSpeech/Kokoro |
+| Barge-in interruption | ✅ Done | `CancellationToken` cancel, CPAL callback |
 | Persistent conversation history | ✅ Done | SQLite, restored on startup |
-| Tool use (native function calling) | ✅ Done | OpenAI `tools:[]` format; multi-tool loop; voice-layer tools only |
-| Context summarization | ✅ Done | Auto-trigger at 75% context; persisted in DB |
+| Tool use (XML-based calling) | ✅ Done | XML markers; multi-tool loop; 10+ built-in tools |
+| Context summarization | ✅ Done | Configurable threshold (default 90%); idle consolidation; persisted in DB |
 | User profile extraction + injection | ✅ Done | Background LLM; `user_profile` table |
 | Startup greeting | ✅ Done | Bot speaks first on launch; uses name if known |
+| AVSpeech TTS | ✅ Done | Native macOS AVSpeechSynthesizer; `--features avspeech` |
 | Kokoro TTS | ✅ Done | ONNX, 24 kHz, `--features kokoro`, selectable via `TTS_PROVIDER` |
 | CoreML STT encoder | ✅ Done | Neural Engine inference; `WHISPER_COREML=1`; requires `.mlmodelc` |
-| Background GPU overlap | ✅ Done | `maybe_summarize` + `extract_facts` start while last TTS plays |
-| System state injection | ✅ Done | `INJECT_SYSTEM_DATA=true`; time, active app, battery prepended ephemerally |
-| Screenshot + vision | ✅ Done | `take_screenshot` tool; secondary LM Studio provider; base64 PNG |
-| Inference daemon | ✅ Done | `DAEMON_ENABLED=true`; background proactive check every N min |
-| Voice-layer tools | ✅ Done | `send_notification`, `read_clipboard`, `set_clipboard`, `open_app`, `read_file` |
-| Agent delegation (stdin/stdout) | 🔶 Partial | Architecture defined; implementation uses HTTP; needs subprocess refactor |
-| Conversation awareness | Planned | Speaker ID (sherpa-onnx) + state machine + linguistic classifier |
-| Episodic memory (embeddings) | Planned | sqlite-vec + embedding model; semantic recall |
-| Always-on daemon (launchd) | Planned | plist + wake word detection |
+| Background inference overlap | ✅ Done | `maybe_summarize` + `extract_facts` start while last TTS plays |
+| EYES visual awareness | ✅ Done | Periodic screen capture + secondary vision LLM; `EYES_INTERVAL_SECS` |
+| Inference daemon | ✅ Done | `DAEMON_ENABLED`; background proactive check every N min |
+| MCP integration | ✅ Done | JSON-RPC 2.0 stdio client; dynamic tool discovery + proxy |
+| Agent delegation (subprocess + ACP) | ✅ Done | `cli` (subprocess) + `acp` (persistent JSON-RPC stdio) modes |
+| Control API | ✅ Done | HTTP + SSE endpoints; `--features control`; port via `CONTROL_PORT` |
+| Conversation modes | ✅ Done | Ambient/Active state machine; wake-word activation; auto-return |
+| Speaker verification | ✅ Done | sherpa-onnx; auto-enrollment; multi-profile support |
+| Secondary LLM routing | ✅ Done | Vision, summarization, profile extraction routed to secondary model |
+| Always-on daemon (launchd) | Planned | launchd plist + wake word detection |
 
 ### Butler pillars
 
@@ -1329,19 +1383,23 @@ WAKE_WORD                 keyword to respond in ambient mode (default: "jarvis")
 |--------|--------|-------------------|
 | A — Character system prompt | ✅ Done | `LLM_SYSTEM_PROMPT` env var + Jarvis prompt in `.env` |
 | B — Eyes (situational awareness) | 🔶 Partial | `take_screenshot` + vision done; system state injection done; calendar/FSEvents → agent-side |
-| C — Arms (computer agency) | 🔶 Partial | Voice-layer tools done (`notification`, `clipboard`, `open_app`); shell/files/web/calendar → agent-side |
-| D — Voice of its own (proactive) | 🔶 Partial | Startup greeting + inference daemon done; calendar reminders + scheduler → agent-side |
+| C — Arms (computer agency) | ✅ Done | Voice-layer tools: `run_shell`, `read_file`, `open_app`, `web_search`, `mcp_tool`; delegation bridge via `run_agent` |
+| D — Voice of its own (proactive) | ✅ Done | Startup greeting + inference daemon + EYES visual awareness; proactive speech from agent results & ACP questions |
 | E — Episodic memory (embeddings) | Planned | sqlite-vec + embedding model; semantic recall |
 | F — Always-on daemon | Planned | launchd plist + wake word detection |
 
 ### Recommended implementation order
 
 1. **Pillar A** ✅ — Character prompt. Done.
-2. **Voice-layer tools** ✅ — Notification, clipboard, open_app, screenshot, vision. Done.
+2. **Voice-layer tools** ✅ — Clipboard, open_app, screenshot, vision, shell, file reader, web search, MCP proxy. Done.
 3. **Inference daemon** ✅ — Proactive background loop. Done.
-4. **Agent delegation (stdin/stdout)** 🔶 — Refactor `run_agent`/`run_agent_async` from HTTP to subprocess. This is the bridge that moves eyes + arms + calendar to the agent side cleanly.
-5. **Conversation awareness** — Speaker ID + state machine. This is the next high-value voicebot-specific feature that has no parallel in agent work.
-6. **Pillar E** — Episodic memory. Embeddings + semantic recall. Makes conversations feel like they have history.
+4. **EYES** ✅ — Visual awareness via periodic screen capture + secondary vision LLM. Done.
+5. **MCP integration** ✅ — Dynamic tool discovery + proxy from MCP servers. Done.
+6. **Agent delegation (cli + ACP)** ✅ — Subprocess + persistent JSON-RPC stdio modes. Done.
+7. **Conversation modes** ✅ — Ambient/Active state machine with wake-word activation. Done.
+8. **Speaker verification** ✅ — sherpa-onnx with auto-enrollment. Done.
+9. **Control API** ✅ — HTTP + SSE for remote monitoring and control. Done.
+10. **Pillar E** — Episodic memory. Embeddings + semantic recall. Makes conversations feel like they have history.
 7. **Pillar F** — Always-on daemon (launchd). Butler becomes a permanent presence.
 
 **What the agent side should implement** (not tracked here — agent's own roadmap):
@@ -1366,11 +1424,11 @@ Available open-source Speech-to-Speech models (alternative to the current STT+LL
 | [Moshi](https://github.com/kyutai-labs/moshi) | — | Full-duplex (listen + respond simultaneously) |
 | [Ultravox](https://github.com/fixie-ai/ultravox) | — | Whisper + LLaMA hybrid |
 
-The current cascade (Whisper + mlx-lm/oMLX + say) is preferred because it supports streaming sentence-by-sentence TTS while the LLM is still generating — true S2S models don't stream output token-by-token in a way that maps to sentence-level TTS.
+The current cascade (Whisper + mlx-lm/oMLX + AVSpeech/Kokoro) is preferred because it supports streaming sentence-by-sentence TTS while the LLM is still generating — true S2S models don't stream output token-by-token in a way that maps to sentence-level TTS.
 
 ## Kokoro TTS Setup
 
-Kokoro is an ONNX-based TTS model that runs offline at 24 kHz. It produces higher-quality and more natural-sounding speech than macOS `say`.
+Kokoro is an ONNX-based TTS model that runs offline at 24 kHz. It produces higher-quality and more natural-sounding speech than the default AVSpeech backend.
 
 ### 1. Install system dependency
 
@@ -1407,8 +1465,8 @@ For Spanish phonemisation: `KOKORO_LANGUAGE=es`. Note that the base model is pri
 
 ### Architecture
 
-- `TtsEngine` enum with variants `Say(SayTts)` and `Kokoro(KokoroTts)`, compiled conditionally with `#[cfg(feature = "kokoro")]`
-- `TTS_PROVIDER=avspeech` (default) — no extra build flags needed, no espeak-ng dependency
+- `TtsEngine` enum with variants `AvSpeech(AvSpeechTts)` and `Kokoro(KokoroTts)`, compiled conditionally with `#[cfg(feature = "kokoro")]` and `#[cfg(feature = "avspeech")]`
+- `TTS_PROVIDER=avspeech` (default) — requires `--features avspeech`; macOS native AVSpeechSynthesizer
 - `TTS_PROVIDER=kokoro` + `--features kokoro` — enables Kokoro; fails with a clear message at runtime if the feature flag is missing
 - The rest of the pipeline (`stream_and_tts`, `run_pipeline`, `run_proactive_pipeline`) is backend-agnostic
 

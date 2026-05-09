@@ -1,18 +1,17 @@
-# Voicebot Architecture
+# Jarvis Architecture
 
 ## Overview
 
-Voicebot is a mono-user voice AI assistant in Rust. It runs as a single binary using a
+Jarvis is a mono-user voice AI assistant in Rust. It runs as a single binary using a
 **streaming STT → LLM → TTS pipeline** where every stage is connected by `tokio` channels.
 There is no inter-service communication; everything runs in-process.
 
 ```
 Microphone → AudioCapture (CPAL)
-           → VAD (Silero)
-           → STT (Whisper)          ← speaks transcription as soon as speech ends
-           → LLM (OpenAI-compat.)   ← starts while STT is still running (speculative prefill)
-           → SentenceSplitter       ← fires per sentence as tokens arrive
-           → TTS synthesizer        ← synthesis of sentence N overlaps playback of N-1
+           → WhisperSTTVAD (Silero VAD + Whisper transcription, whisper-cpp-plus)
+           → LLM (OpenAI-compatible SSE streaming)
+           → SentenceSplitter    ← fires per sentence as tokens arrive
+           → TTS synthesizer     ← AvSpeech or Kokoro; sentence N overlaps playback of N-1
            → AudioOutput (CPAL)
 ```
 
@@ -25,52 +24,80 @@ loop stays unblocked.
 
 ```
 src/
-├── main.rs                    # Pipeline orchestration, VAD loop, barge-in logic
+├── main.rs                    # Pipeline orchestration, pipeline tasks, VAD loop
+├── lib.rs                     # Library exports
 ├── config.rs                  # All config (env-var driven)
+├── daemon.rs                  # InferenceDaemon — proactive suggestions
+├── eyes.rs                    # EYES visual awareness daemon
+├── e2e_tests.rs               # End-to-end tests
 │
 ├── audio/
-│   ├── audio_capture.rs       # CPAL mic input; normalises I16/U16/F32 → f32
-│   ├── audio_transform.rs     # Rubato resampling (FftFixedIn, 1024-chunk)
-│   ├── vad.rs                 # Silero VAD; emits SpeechStart/Speech/SpeechEnd/Silence
-│   ├── buffer.rs              # Circular VecDeque buffer with duration tracking
-│   ├── output.rs              # CPAL speaker playback (play_blocking + cancel support)
-│   └── speaker.rs             # Optional speaker verification (ONNX embedding model)
+│   ├── mod.rs
+│   ├── audio_capture.rs       # CPAL mic input
+│   ├── audio_transform.rs     # Rubato resampling
+│   ├── buffer.rs              # Circular VecDeque buffer
+│   ├── output.rs              # CPAL speaker playback
+│   ├── ambient_buffer.rs      # Ambient speech context buffer
+│   └── speaker.rs             # Speaker verification (ONNX)
 │
 ├── stt/
-│   ├── whisper.rs             # WhisperStt — whisper-rs FFI, Metal GPU state cached
-│   └── stream.rs              # SttStream — always-on background Whisper worker
+│   ├── mod.rs                 # WhisperSTTVAD — integrated STT+VAD (whisper-cpp-plus)
+│   └── whisper.rs             # Legacy WhisperStt wrapper (deprecated, whisper-rs)
 │
 ├── llm/
-│   ├── client.rs              # LlamaClient — OpenAI-compatible streaming SSE client
-│   └── session.rs             # LlmSession — message history + all_messages_api()
+│   ├── mod.rs                 # OpenAIClient, LlmSession, Message
+│   ├── client.rs              # OpenAIClient — OpenAI-compatible streaming SSE client
+│   ├── manager.rs             # LLM client management
+│   └── session.rs             # LlmSession — message history
 │
 ├── tts/
-│   ├── mod.rs                 # TtsEngine enum (Say | Kokoro | Mock)
-│   ├── say.rs                 # SayTts — macOS `say` subprocess → raw PCM
-│   ├── piper.rs               # PiperTts — Piper subprocess (kept for reference)
+│   ├── mod.rs                 # TtsEngine enum (AvSpeech | Kokoro | Mock)
+│   ├── avspeech.rs            # AvSpeechTts — macOS AVSpeechSynthesizer (native)
 │   ├── kokoro.rs              # KokoroTts — ONNX model (--features kokoro)
+│   ├── piper.rs               # PiperTts — reference only, not integrated
 │   └── sentence.rs            # SentenceSplitter — buffers tokens; emits on punctuation
 │
+├── pipeline/
+│   ├── mod.rs
+│   ├── fsm.rs                 # PipelineState FSM (Idle/Listening/Thinking/Speaking/Paused)
+│   ├── state.rs               # PipelineEvents channel types
+│   ├── frames.rs              # PipelineFrame — utterance data carrier
+│   ├── llm_task.rs            # LLM streaming task (per utterance)
+│   ├── sen_task.rs            # Sentence splitting task
+│   ├── tts_task.rs            # TTS synthesis + playback task
+│   └── consolidation.rs       # Context consolidation (summarization)
+│
 ├── tools/                     # Tool registry + individual tool implementations
-│   ├── mod.rs                 # ToolRegistry, ToolDefinition, format_history
+│   ├── mod.rs                 # ToolRegistry, Tool trait
 │   ├── current_time.rs
-│   ├── calendar.rs
-│   ├── clipboard.rs
+│   ├── clipboard.rs           # ReadClipboardTool, SetClipboardTool
 │   ├── read_file.rs
 │   ├── open_app.rs
-│   ├── run_shell.rs           # Enabled via SHELL_ENABLED=1
-│   ├── send_notification.rs
-│   ├── take_screenshot.rs     # Enabled via 
-│   ├── run_agent.rs           # Delegates to external agent binary (AGENT_COMMAND)
-│   └── conversation_mode.rs   # SetConversationModeTool (Active / Ambient)
+│   ├── run_shell.rs           # SHELL_ENABLED=1
+│   ├── take_screenshot.rs     # SECONDARY_LLM_URL for vision
+│   ├── run_agent.rs           # Agent delegation (ACP/CLI)
+│   ├── web_search.rs          # SearXNG web search
+│   ├── conversation_mode.rs   # Active/Ambient mode switching
+│   └── mcp_tool.rs            # MCP tool proxy
 │
-├── agents/
-│   └── mod.rs                 # ProactiveEvent — agent result delivery to main loop
+├── control/                   # HTTP + SSE Control API
+│   ├── mod.rs
+│   ├── api.rs                 # axum routes: state, events, history, mute, barge_in, input
+│   ├── state.rs               # ControlState — shared mutable state for the API
+│   └── broadcast.rs           # ControlEvent enum + broadcast channel
 │
-├── daemon.rs                  # InferenceDaemon — periodic "anything worth saying?" check
-├── profile/mod.rs             # User profile: fact extraction + context injection
-└── db/
-    └── database.rs            # SQLite: sessions, messages, summaries, user_profile
+├── db/
+│   ├── mod.rs
+│   └── database.rs            # SQLite: sessions, messages, memories, user_profile
+│
+├── memory/                    # Memory extraction from conversations
+├── profile/                   # User profile fact extraction
+├── agents/                    # ACP protocol agent delegation
+├── mcp/                       # MCP stdio protocol
+├── analysis/                  # Identity analyzer, ContextLens
+├── remote/                    # WebSocket server
+├── tui/                       # Terminal UI (ratatui)
+└── bin/acp_agent_chat.rs      # Debug ACP agent chat
 ```
 
 ---
@@ -78,8 +105,7 @@ src/
 ## Provider Interfaces
 
 The pipeline uses three pluggable provider layers: **STT**, **LLM**, and **TTS**.
-Each is designed so the rest of the pipeline (`stream_and_tts`, `run_pipeline`, etc.)
-is completely backend-agnostic.
+Each is designed so the rest of the pipeline is completely backend-agnostic.
 
 ### TTS — `TtsEngine` (enum dispatch)
 
@@ -87,9 +113,12 @@ Location: `src/tts/mod.rs`
 
 ```rust
 pub enum TtsEngine {
-    Say(SayTts),                  // macOS `say`         — no build flags needed
-    Kokoro(KokoroTts),            // ONNX model          — requires --features kokoro
-    Mock(MockTts),                // test only
+    #[cfg(feature = "avspeech")]
+    AvSpeech(AvSpeechTts),         // macOS AVSpeechSynthesizer — default
+    #[cfg(feature = "kokoro")]
+    Kokoro(KokoroTts),             // ONNX model
+    #[cfg(test)]
+    Mock(MockTts),                 // test only
 }
 
 impl TtsEngine {
@@ -98,73 +127,74 @@ impl TtsEngine {
 }
 ```
 
-**Adding a new TTS backend** (e.g. Piper, Coqui, ElevenLabs):
+TTS is selected at startup via `TTS_PROVIDER` env var. AvSpeech is the default on
+macOS and requires `--features avspeech`. Kokoro requires `--features kokoro` plus
+`espeak-ng` installed.
 
-1. Create `src/tts/my_backend.rs` with a struct implementing `synthesize(&self, text) -> Result<Vec<f32>>` and `sample_rate()`.
-2. Add a variant to `TtsEngine` and its two `match` arms.
-3. Add the branch to the `match config.tts_provider.as_str()` block in `main.rs`.
-4. Add `TTS_PROVIDER=my_backend` to the env-var docs.
+`piper.rs` exists as a Piper subprocess wrapper but is NOT integrated into `TtsEngine`.
+All its public methods are marked `#[allow(dead_code)]`. It is kept for reference.
 
 | Backend | Provider key | Feature flag | Notes |
 |---------|-------------|--------------|-------|
-| macOS say | `say` | — | default; macOS only |
+| AvSpeech | `avspeech` | `avspeech` | default; macOS native AVSpeechSynthesizer |
 | Kokoro ONNX | `kokoro` | `kokoro` | offline, high quality |
-| Piper | `piper` | — | subprocess; `piper.rs` is a starting point |
+| Piper | — | — | `piper.rs` exists but is not integrated |
 
 ---
 
-### STT — `WhisperStt` + `SttStream`
+### STT — `WhisperSTTVAD`
 
-Location: `src/stt/`
+Location: `src/stt/mod.rs`
+
+VAD and transcription are integrated into a single struct that processes audio chunks
+via an async tokio channel. Built on whisper-cpp-plus.
 
 ```rust
-// Core transcription — one blocking call per audio snapshot
-pub struct WhisperStt { ... }
-impl WhisperStt {
-    pub fn new(model_path: &str, language: &str) -> Result<Self>;
-    pub fn transcribe(&self, audio: &[f32]) -> Result<String>;   // 16kHz mono f32
+pub struct WhisperSTTVAD {
+    ctx: Arc<WhisperContext>,
+    vad: WhisperVadProcessor,       // Silero VAD from whisper-cpp-plus
+    // ... state machine fields
 }
 
-// Always-on streaming wrapper — submits audio snapshots and returns
-// results keyed by sequence number. Decouples VAD timing from Whisper latency.
-pub struct SttStream { ... }
-impl SttStream {
-    pub fn new(stt: Arc<WhisperStt>) -> Arc<Self>;
-    pub fn submit(&self, audio: Vec<f32>) -> u64;                // returns seq number
-    pub async fn await_result(&self, min_seq: u64) -> String;
+impl WhisperSTTVAD {
+    pub fn new(config: WhisperSTTVADConfig) -> Result<Self>;
+
+    /// Feed a chunk of 16 kHz mono f32 audio. Emits SpeechEvent via channel.
+    pub async fn process_audio(
+        &mut self,
+        audio: &[f32],
+        tx: &mpsc::Sender<SpeechEvent>,
+    ) -> Result<()>;
+}
+
+pub enum SpeechEvent {
+    SpeechStart,
+    Speech(String),
+    SpeechEnd(String),
+    Silence,
 }
 ```
 
-**Adding a new STT backend** (e.g. faster-whisper via HTTP, Deepgram, Apple Speech):
+`WhisperSTTVADConfig` specifies whisper model path, VAD model path (`ggml-silero-vad.bin`),
+language, and silence threshold in milliseconds. Defaults to 500ms silence.
 
-1. Create `src/stt/my_backend.rs` with a struct that has `transcribe(&self, audio: &[f32]) -> Result<String>`.
-2. Wrap it in `SttStream::new_with(Arc<dyn SttTranscriber>)` — or replace the concrete
-   `WhisperStt` reference in `SttStream` with a trait object:
+The VAD runs Silero on 200ms probe windows with a configurable probability threshold
+(0.5). A 300ms pre-roll buffer prevents clipping the first phoneme. 20s hard cap on
+any single speech segment.
 
-```rust
-pub trait SttTranscriber: Send + Sync {
-    fn transcribe(&self, audio: &[f32]) -> Result<String>;
-}
-```
-
-3. Update `main.rs` to construct the chosen backend based on `STT_PROVIDER` env var.
-
-| Backend | Notes |
-|---------|-------|
-| whisper-rs (whisper.cpp) | default; embedded; Metal GPU on Apple Silicon |
-| faster-whisper HTTP | call a Python sidecar via HTTP |
-| Apple Speech (AVSpeechRecognizer) | macOS native; requires `CoreML` bindings |
+`src/stt/whisper.rs` contains legacy `WhisperStt` based on whisper-rs. It is deprecated
+and maintained for backwards compatibility only.
 
 ---
 
-### LLM — `LlamaClient`
+### LLM — `OpenAIClient`
 
 Location: `src/llm/client.rs`
 
 ```rust
-pub struct LlamaClient { ... }
+pub struct OpenAIClient { ... }
 
-impl LlamaClient {
+impl OpenAIClient {
     // Streaming completion — yields StreamToken::Content or StreamToken::ToolCall
     pub async fn stream(
         &self,
@@ -172,35 +202,99 @@ impl LlamaClient {
         tools: &[serde_json::Value],
     ) -> Result<mpsc::Receiver<StreamToken>>;
 
-    // One-shot completion — used for summarisation / profile extraction
+    // One-shot completion — used for memory extraction, profile, daemon
     pub async fn complete(&self, messages: &[Message]) -> Result<String>;
-    pub async fn complete_short(&self, messages: &[Message]) -> Result<String>;
 
+    // Lightweight one-shot — daemon and short prompts (no KV-cache pressure)
+    pub async fn complete_short(&self, messages: &[Message]) -> Result<String>;
 }
 ```
 
 `OpenAIClient` targets **any OpenAI-compatible endpoint** (mlx-lm, oMLX, OpenAI, Ollama).
-Extra sampling params (`repetition_penalty`, `top_k`, `min_p`) are sent unconditionally on every streaming request for best output quality with mlx-lm and oMLX.
+Extra sampling params (`repetition_penalty`, `top_k`, `min_p`) are sent unconditionally
+on every streaming request for best output quality with mlx-lm and oMLX.
 
-**Adding a non-OpenAI LLM backend** (e.g. a gRPC model, custom HTTP API):
+The `ThinkFilter` strips `<antThinking>...</antThinking>` blocks from reasoning model
+output before tokens reach TTS or tool detection.
 
-Define a trait and make both the existing client and the new one implement it:
+`src/llm/session.rs` contains `LlmSession` for message history management.
+`src/llm/manager.rs` handles LLM client lifecycle.
+
+---
+
+## Pipeline FSM
+
+Location: `src/pipeline/`
+
+The pipeline is implemented as a finite state machine with per-utterance tasks.
+Each utterance gets a unique `utterance_id` tracked through all states.
 
 ```rust
-pub trait LlmProvider: Send + Sync {
-    async fn stream(
-        &self,
-        messages: &[serde_json::Value],
-        tools: &[serde_json::Value],
-    ) -> Result<mpsc::Receiver<StreamToken>>;
-
-    async fn complete(&self, messages: &[Message]) -> Result<String>;
-    fn supports_prefill_warm(&self) -> bool { false }
+pub enum PipelineState {
+    Idle,
+    Listening { utterance_id: u64 },
+    Thinking { utterance_id: u64 },
+    Speaking { utterance_id: u64 },
+    Paused { reason: PauseReason },
 }
 ```
 
-Then replace `LlamaClient` in `run_pipeline` / `run_text_pipeline` signatures with
-`Arc<dyn LlmProvider>`.
+State is held in a `watch::Sender<PipelineState>`. Each task that owns a transition
+writes directly with no central coordinator on the hot path. Observers (TUI, Control API)
+subscribe via `watch::Receiver::changed()`.
+
+Per-utterance tasks:
+- `llm_task` — streams tokens from `OpenAIClient`, detects tools, feeds SentenceSplitter
+- `sen_task` — token buffering and sentence boundary detection
+- `tts_task` — synthesis and playback via `TtsEngine` + `AudioOutput`
+- `consolidation_task` — context summarization when history grows too large
+
+`PipelineFrame` carries utterance data (transcript, LLM response, tools used) between tasks.
+`PipelineEvents` is the channel type for inter-task communication.
+
+---
+
+## Daemons
+
+### InferenceDaemon (`src/daemon.rs`)
+
+Periodic background loop that asks the LLM if there is something worth telling the user.
+Calls `complete_short()` every `interval_secs`. If the LLM returns a non-`NOTHING`
+response, pushes a `ProactiveEvent::InferenceDaemon` through the proactive channel.
+
+### EyesDaemon (`src/eyes.rs`)
+
+Periodic visual awareness. Takes a screenshot every `interval_secs`, sends it to a
+secondary vision LLM (configured via `SECONDARY_LLM_URL`), and asks whether anything
+on screen warrants a user notification. Responses follow a structured format:
+
+```
+warn_user: true|false
+message: <optional natural-language sentence>
+```
+
+When `warn_user` is true, an `AgentResult` proactive event is pushed for the main
+assistant LLM to reformulate and vocalize.
+
+---
+
+## Control API
+
+Location: `src/control/`
+
+An HTTP + SSE server (built on axum) for external management of the voicebot.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/control/events` | GET | SSE stream of `ControlEvent` updates |
+| `/control/state` | GET | Current `PipelineState`, utterance ID, mute status |
+| `/control/history` | GET | Conversation history |
+| `/control/mute` | POST | Toggle TTS mute |
+| `/control/barge_in` | POST | Trigger barge-in (cancel current pipeline) |
+| `/control/input` | POST | Send text input to the pipeline |
+
+`ControlEvent` types include: `StateChanged`, `Transcript`, `LlmToken`, `LlmDone`,
+`TtsStart`, `ToolCall`, `MuteChanged`, `Error`.
 
 ---
 
@@ -209,29 +303,17 @@ Then replace `LlamaClient` in `run_pipeline` / `run_text_pipeline` signatures wi
 ### Normal turn
 
 ```
-SpeechStart
+SpeechStart  (from WhisperSTTVAD.process_audio)
   ├─ pre-roll flushed into speech_buffer
-  ├─ SttStream.submit(snapshot) → seq = N   ← Whisper starts immediately
   └─ barge-in: if pipeline running → cancel=true, abort handle
 
-Speech (every ~500ms)
-  └─ SttStream.submit(snapshot) → seq = N+k  ← keeps Whisper current
-
-SpeechEnd
-  ├─ SttStream.submit(final_audio) → min_seq  (or re-use last Silence seq)
-  ├─ cancel old handle, sleep 25ms, cancel=false
-  └─ spawn run_pipeline(min_seq, ...)
-
-run_pipeline
-  ├─ await_result(min_seq)                   ← Whisper result (usually already ready)
-  ├─ llm_client.stream(messages, tools)      ← streaming SSE
-  ├─ stream_and_tts(token_rx, ...)
-  │   ├─ SentenceSplitter buffers tokens
-  │   ├─ on sentence boundary → spawn synthesize(sentence N)
-  │   ├─ await previous play_blocking
-  │   └─ spawn play_blocking(samples N)      ← CPAL output
+SpeechEnd(transcript)
+  ├─ spawn llm_task(transcript, ...)
+  │   ├─ OpenAIClient.stream(messages, tools)
+  │   ├─ sen_task buffers tokens, emits on punctuation
+  │   └─ tts_task.synthesize(sentence) → AudioOutput.play_blocking()
   ├─ db.save_message(User + Assistant)
-  └─ spawn maybe_summarize()
+  └─ spawn maybe_consolidate()
 ```
 
 ### Barge-in
@@ -251,10 +333,11 @@ When `SpeechStart` fires while a pipeline is playing:
 | Decision | Rationale |
 |----------|-----------|
 | Single binary, tokio channels | No IPC overhead; easy to reason about cancellation |
-| Always-on Whisper (`SttStream`) | Transcript is ready ~0ms after SpeechEnd |
+| Integrated VAD+STT (`WhisperSTTVAD`) | Single struct, shared Whisper context; avoids double-buffering between separate VAD and STT stages |
 | Apple MLX backends | mlx-lm and oMLX maintain KV-cache implicitly; substantially faster than llama.cpp on Apple Silicon |
-| Sentence-by-sentence TTS | First word heard in <1s; synthesis of N overlaps playback of N-1 |
+| Sentence-by-sentence TTS | First word heard in <1s; synthesis of sentence N overlaps playback of N-1 |
 | `TtsEngine` enum | Zero-cost dispatch; each variant owns its state; easy to add variants |
+| Pipeline FSM | Clear state tracking per utterance; enables TUI, Control API, and external observers |
 | SQLite for history | Survives restarts; restored to `LlmSession` on startup |
 | `cancel: Arc<AtomicBool>` | Single barge-in flag shared between async tasks and blocking threads |
 
@@ -269,18 +352,18 @@ All config is loaded from environment variables (`.env` file supported via `dote
 | `AUDIO_SAMPLE_RATE` | `16000` | Microphone sample rate |
 | `AUDIO_DEVICE` | — | Substring match for input device name |
 | `AUDIO_OUTPUT_DEVICE` | — | Substring match for output device name |
-| `VAD_SILENCE_MS` | `1500` | ms of silence before SpeechEnd fires |
-| `VOICEBOT_LANGUAGE` | `es` | `es` or `en` — Whisper hint + TTS voice selection |
+| `VOICEBOT_LANGUAGE` | `es` | `es` or `en` — Whisper language + TTS voice |
 | `WHISPER_MODEL` | `models/ggml-large-v3-turbo.bin` | Path to GGML model |
-| `LLM_URL` | `http://localhost:8000` | OpenAI-compatible endpoint base URL (mlx-lm default: 8000; oMLX: 8001) |
+| `LLM_URL` | `http://localhost:8000` | OpenAI-compatible endpoint (mlx-lm: 8000; oMLX: 8001) |
 | `LLM_MODEL` | — | Model name sent in API requests |
 | `LLM_MAX_TOKENS` | `400` | Max tokens per response |
 | `LLM_TEMPERATURE` | `0.7` | Sampling temperature |
 | `LLM_SYSTEM_PROMPT` | — | System prompt text |
-| `LLM_CONTEXT_TOKENS` | `4096` | Triggers summarisation above 75% |
-| `LLM_SUMMARY_KEEP_TURNS` | `6` | Verbatim turns kept after summarisation |
-| `TTS_PROVIDER` | `say` | `say` or `kokoro` (requires `--features kokoro`) |
-| `SAY_VOICE` | `Marisol (Enhanced)` | macOS voice name; list with `say -v ?` |
+| `LLM_CONTEXT_TOKENS` | `4096` | Triggers consolidation above 75% |
+| `LLM_SUMMARY_KEEP_TURNS` | `6` | Verbatim turns kept after consolidation |
+| `TTS_PROVIDER` | `avspeech` | `avspeech` or `kokoro` |
+| `AVSPEECH_VOICE` | `Marisol (Enhanced)` | macOS voice name |
+| `AVSPEECH_RATE` | `1.0` | Speech rate multiplier |
 | `KOKORO_MODEL` | — | Path to `kokoro-v1.0.onnx` |
 | `KOKORO_VOICES` | — | Path to `voices-v1.0.bin` |
 | `KOKORO_VOICE` | `af_bella` | Voice style name |
@@ -288,7 +371,7 @@ All config is loaded from environment variables (`.env` file supported via `dote
 | `DB_PATH` | `voicebot.db` | SQLite database file |
 | `SHELL_ENABLED` | `0` | `1` to enable the `run_shell` tool |
 | `AGENT_COMMAND` | — | External agent CLI command (enables `run_agent_async`) |
-| `DAEMON_ENABLED` | `0` | `1` to enable background inference daemon |
+| `DAEMON_ENABLED` | `0` | `1` to enable InferenceDaemon |
 | `SPEAKER_MODEL` | — | Path to speaker embedding ONNX model |
 
 ---
@@ -304,21 +387,20 @@ All config is loaded from environment variables (`.env` file supported via `dote
 
 ### New STT backend
 
-- [ ] `src/stt/<name>.rs` — struct with `transcribe(&self, audio: &[f32]) -> Result<String>` (input: 16kHz mono f32)
-- [ ] Introduce `SttTranscriber` trait in `src/stt/mod.rs` if not already present
-- [ ] Update `SttStream::new` to accept `Arc<dyn SttTranscriber>`
-- [ ] Update `main.rs` construction block; add `STT_PROVIDER` env var
+- [ ] `src/stt/<name>.rs` — struct that implements `process_audio` with VAD+transcription integration
+- [ ] Replace `WhisperSTTVAD` in `main.rs` construction block
+- [ ] Update config for new model paths and params
 
 ### New LLM backend (OpenAI-compatible)
 
-- [ ] Just set `LLM_URL`, `LLM_MODEL`, `LLM_PROVIDER` in `.env` — `LlamaClient` handles it
-- [ ] If the server needs extra request fields, add them in the `else` branch of `LlamaClient::stream`
+- [ ] Just set `LLM_URL`, `LLM_MODEL`, `LLM_PROVIDER` in `.env` — `OpenAIClient` handles it
+- [ ] If the server needs extra request fields, add them in `OpenAIClient::stream`
 
 ### New LLM backend (non-OpenAI)
 
-- [ ] Extract `LlmProvider` trait from `LlamaClient` (see the trait sketch in the LLM section above)
+- [ ] Extract `LlmProvider` trait from `OpenAIClient`
 - [ ] `src/llm/<name>.rs` — implement `stream` and `complete`
-- [ ] Change `run_pipeline` / `run_text_pipeline` / `daemon.rs` signatures to `Arc<dyn LlmProvider>`
+- [ ] Change pipeline/daemon signatures to `Arc<dyn LlmProvider>`
 
 ---
 
@@ -329,16 +411,18 @@ All logging uses [`tracing`](https://docs.rs/tracing). Filter targets independen
 | Target | Level(s) used | What it covers |
 |--------|--------------|----------------|
 | `voicebot` | info | Startup, config summary, shutdown |
-| `audio` | info, debug, trace | Device selection, CPAL stream events, resampling, VAD threshold |
-| `pipeline` | info, debug | Per-utterance lifecycle: SpeechEnd → STT → LLM → TTS → commit; barge-in; tool calls; cancellation; `[pipe=N]` run IDs |
-| `performance` | info, debug | End-to-end latency milestones: `[+Xms] SpeechStart`, `STT wait`, `STT ready`, `LLM request`, `LLM first token`, `TTS start`, `TTS end`, `LLM TG` (total generation) |
-| `stt` | info, debug | Whisper model load, per-submission timing (`seq=N`, duration, transcript) |
-| `llm` | info, debug | LLM endpoint, streaming errors, speculative prefill, summarisation |
-| `tts` | info, debug | Per-sentence synthesis (`[pipe=N] TTS sentence K: "…"`), `play_blocking start/done` with sample counts, WAV header debug |
-| `db` | info, warn | Session restore/create, message save failures, summary persistence |
+| `audio` | info, debug, trace | Device selection, CPAL stream events, resampling |
+| `pipeline` | info, debug | Per-utterance lifecycle; barge-in; tool calls; cancellation; `[pipe=N]` run IDs |
+| `performance` | info, debug | End-to-end latency milestones |
+| `sttvad` | info, debug, trace | WhisperSTTVAD events: SpeechStart/SpeechEnd, VAD threshold, transcribe timing |
+| `llm` | info, debug | LLM endpoint, streaming errors, speculative prefill, consolidation |
+| `tts` | info, debug | Per-sentence synthesis, `play_blocking` start/done, WAV header debug |
+| `db` | info, warn | Session restore/create, message save, memory persistence |
 | `speaker` | info, debug, warn | Enrollment, similarity scores, auto-enroll |
-| `daemon` | info, debug, warn | Background inference daemon ticks, proactive messages |
+| `daemon` | info, debug, warn | Inference daemon ticks, proactive messages |
+| `eyes` | info, debug, warn | EYES ticks, screenshot failures, vision LLM calls |
 | `profile` | info, debug, warn | Profile fact extraction and injection |
+| `control` | info | Control API startup, endpoint hits |
 
 ### Useful `RUST_LOG` recipes
 
@@ -346,23 +430,20 @@ All logging uses [`tracing`](https://docs.rs/tracing). Filter targets independen
 # Default — only info and above for all targets
 RUST_LOG=info cargo run
 
-# Full pipeline debug without noisy audio/VAD trace
+# Full pipeline debug without noisy audio trace
 RUST_LOG=info,pipeline=debug,llm=debug,tts=debug cargo run
 
 # Latency profiling only
 RUST_LOG=warn,performance=info cargo run
 
-# TTS sentence trace (see every sentence sent to synthesizer and play_blocking timings)
+# TTS sentence trace
 RUST_LOG=info,tts=debug cargo run
 
-# STT timing (see per-submission Whisper timings)
-RUST_LOG=info,stt=debug cargo run
+# STT+VAD timing
+RUST_LOG=info,sttvad=debug cargo run
 
 # Everything — very verbose
 RUST_LOG=debug cargo run
-
-# Silence whisper.cpp internal logs (always on via install_logging_hooks())
-# — no env-var needed; handled in code
 ```
 
 ---
@@ -373,12 +454,12 @@ RUST_LOG=debug cargo run
 cargo test                          # all unit + integration tests
 cargo test -p voicebot <name>       # single test
 RUST_LOG=debug cargo run            # verbose pipeline logs
-RUST_LOG=info,tts=debug cargo run   # TTS-only debug (sentence + play_blocking trace)
+RUST_LOG=info,tts=debug cargo run   # TTS-only debug
 ```
 
 Key test patterns:
 - **VAD / buffer**: synthetic sine waves + silence
 - **SentenceSplitter**: pure unit tests, no I/O
 - **LLM client**: `wiremock` mock server for SSE response tests
-- **Pipeline (e2e)**: `SttStream::mock(transcript)` + `TtsEngine::Mock` → no real audio hardware needed
+- **Pipeline (e2e)**: `TtsEngine::Mock` with mock transcripts — no real audio needed
 - **Whisper tests**: require model file; tagged `#[ignore]` in CI

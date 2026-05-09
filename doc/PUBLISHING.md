@@ -151,7 +151,7 @@ tar -czf voicebot-aarch64-unknown-linux-gnu.tar.gz -C target/release voicebot
 | Xcode CLT | `xcode-select --install` | Provides `cc`, Metal SDK, CoreML framework |
 | Rust stable | rustup | 1.80+ recommended |
 
-`whisper-rs` compiles in Metal + CoreML acceleration automatically on macOS.
+`whisper-cpp-plus` compiles with Metal acceleration automatically on macOS.
 No extra libraries need to be installed.
 
 ### Linux (both architectures)
@@ -162,7 +162,7 @@ No extra libraries need to be installed.
 | `espeak-ng` | `apt-get install espeak-ng` | Kokoro TTS phonemization (runtime) |
 | `pkg-config` | `apt-get install pkg-config` | Used by several crates |
 | `build-essential` | `apt-get install build-essential` | C toolchain for native crates |
-| `cmake` | `apt-get install cmake` | Required by whisper-rs build scripts |
+| `cmake` | `apt-get install cmake` | Required by whisper-cpp-plus build scripts |
 | `libssl-dev` | `apt-get install libssl-dev` | reqwest TLS (build-time) |
 
 #### Runtime dependencies (must be present on the user's machine)

@@ -12,7 +12,7 @@ The tests are split into two categories:
 
 | Category | STT | LLM | Requires |
 |----------|-----|-----|---------|
-| **Mocked** (fast) | `SttStream::mock(transcript)` | wiremock | Audio output device |
+| **Mocked** (fast) | Direct transcript injection via `E2eHarness::run()` | wiremock | Audio output device (CPAL `null` sink) |
 | **Real STT** | Real Whisper on a WAV file | wiremock | Audio output device + Whisper model + WAV fixture |
 
 ## Running the tests
@@ -104,7 +104,7 @@ tests/fixtures/           ← pre-recorded WAV files (gitkeep, record manually)
 1. Starts a wiremock HTTP server to stand in for the LLM server (mlx-lm / oMLX).
 2. Creates a `TtsEngine::Mock` that captures synthesized sentence text instead of playing audio.
 3. Opens a real SQLite database in a `tempfile::TempDir`.
-4. Calls `run_pipeline()` with `SttStream::mock(transcript)` (bypasses Whisper).
+4. Injects transcript directly into pipeline tasks (bypasses STT/VAD for deterministic tests).
 5. After the pipeline returns, asserts on captured TTS sentences and DB rows.
 
 ### Why not temperature=0 against a live LLM server?
