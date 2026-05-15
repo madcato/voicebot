@@ -1,4 +1,4 @@
-# Testing Strategy for Voicebot (Jarvis)
+# Testing Strategy for Voicebot
 
 ## Test Layers Overview
 

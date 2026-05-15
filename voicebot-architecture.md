@@ -1,4 +1,4 @@
-# Jarvis Voicebot — Architecture Analysis & Redesign
+# Voicebot — Architecture Analysis & Redesign
 
 ## 1. Current Data Flows — Diagnosis
 

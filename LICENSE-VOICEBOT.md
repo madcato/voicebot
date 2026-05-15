@@ -1,10 +1,10 @@
-# Jarvis Voicebot - Legal Notice & License
+# Voicebot - Legal Notice & License
 
 ## ⚠️ LEGAL DISCLAIMER
 
 **Jarvis® is a registered trademark of Marvel Studios, a subsidiary of The Walt Disney Company.**
 
-This project ("Jarvis Voicebot") is:
+This project ("Voicebot") is:
 - A **fan-made, independent Open Source project**
 - **NOT** affiliated with, endorsed by, or connected to Marvel Studios or The Walt Disney Company
 - Created as a personal/hobby project with no commercial intent
@@ -19,7 +19,7 @@ This project is released under the **MIT License** with additional **commerciali
 
 ### MIT License Terms
 
-Copyright © 2024 Jarvis Voicebot Contributors
+Copyright © 2024 Voicebot Contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, **subject to the Commercialization Restrictions below**, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 
@@ -57,7 +57,7 @@ If you wish to use this software commercially:
 2. Negotiate terms and licensing fees
 3. Obtain written permission before commercial use
 
-**Contact:** [Add your contact information]
+**Contact:** Dani Vela
 
 ---
 
@@ -69,7 +69,7 @@ If you wish to use this software commercially:
 
 If you are a representative of Marvel Studios, The Walt Disney Company, or any entity with legitimate trademark concerns:
 
-1. **Contact:** [Add your contact information]
+1. **Contact:** Dani Vela
 2. **Action Required:** Remove the "Jarvis" name and related branding
 3. **Timeline:** Will be completed within 48 hours of verified request
 
@@ -95,7 +95,7 @@ For:
 - Trademark concerns
 - Legal questions
 
-**Contact:** [Add your contact information]
+**Contact:** Dani Vela
 
 ---
 

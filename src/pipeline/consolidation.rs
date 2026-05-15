@@ -4,6 +4,7 @@ use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 use crate::db::{Database, Memory};
+use crate::i18n;
 use crate::llm::{OpenAIClient, LlmSession};
 use crate::memory::{build_memory_context, extract_memories};
 use crate::profile::{build_profile_context, extract_facts, ProfileFact};
@@ -173,6 +174,7 @@ pub async fn consolidation_task(
     idle_min_context_pct: usize,
     base_prompt: String,
     tool_section: String,
+    language: String,
 ) {
     let mut cancel_rx = events.barge_in_tx.subscribe();
     let mut last_turn_at = Instant::now();
@@ -238,8 +240,7 @@ pub async fn consolidation_task(
                 pipeline_state_rx.changed().await.ok();
             }
             transcript_tx.send(PipelineFrame::SystemNotification {
-                text: "[Sistema: necesitas reorganizar tu memoria para seguir conversando. \
-                        Avisa al usuario de que vuelves en unos minutos.]"
+                text: i18n::get_notification("reorganize_memory", &language)
                     .to_string(),
             }).await.ok();
 
@@ -266,10 +267,9 @@ pub async fn consolidation_task(
             let _ = pipeline_state_tx.send(PipelineState::Idle);
             let now = chrono::Local::now().format("%H:%M").to_string();
             transcript_tx.send(PipelineFrame::SystemNotification {
-                text: format!(
-                    "[Sistema: has terminado de reorganizar tu memoria. Son las {now}. \
-                     Avisa al usuario de que ya estás disponible de nuevo.]"
-                ),
+                text: i18n::get_notification("memory_reorganized", &language)
+                    .replace("{now}", &now)
+                    .to_string(),
             }).await.ok();
             info!(target: "memory", "Consolidation cycle finished — pipeline resumed");
         }

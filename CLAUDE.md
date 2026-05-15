@@ -8,7 +8,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Name
 
-This project is called **Jarvis Voicebot**. All documentation and code should refer to it as "Jarvis" (not "Hive" or "Voicebot" alone).
+This project is called **Voicebot**. All documentation and code should refer to it as "Voicebot" (not "Jarvis" or "Hive").
+
+See [LICENSE-VOICEBOT.md](LICENSE-VOICEBOT.md) for trademark information.
 
 ## Commands
 

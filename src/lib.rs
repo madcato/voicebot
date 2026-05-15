@@ -2,6 +2,7 @@ pub mod agents;
 pub mod audio;
 pub mod config;
 pub mod db;
+pub mod i18n;
 pub mod llm;
 pub mod mcp;
 pub mod memory;

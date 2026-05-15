@@ -1,11 +1,49 @@
+# Build artifacts
 /target
 /models
 
+# Environment and secrets
 .env
+.env.local
+.env.*.local
 
+# Database and runtime data
 data/voicebot.db
 data/speaker.emb
+data/*.db
+data/*.emb
 
-.claude/settings.local.json
+# IDE and editor
+.vscode/
+.idea/
+*.swp
+*.swo
 
+# Claude / AI assistant artifacts
+.claude/
+.hermes/
+.opencode/
+.sisyphus/
+.sisyphus/
+
+# Development logs
 voicebot.log
+*.log
+
+# macOS
+.DS_Store
+.DS_Store?
+
+# Python / venv
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+npm-debug.log
+
+# Cache
+.cache/
+.rustfmt.toml

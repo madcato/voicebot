@@ -1,14 +1,14 @@
-# Análisis de Mejoras y Nuevas Funcionalidades para Jarvis Voicebot
+# Análisis de Mejoras y Nuevas Funcionalidades para Voicebot
 
 **Fecha:** 5 de Abril de 2026  
-**Proyecto:** Jarvis Voicebot (Rust)  
+**Proyecto:** Voicebot (Rust)  
 **Referencia:** [Voicebot Article](https://x.com/danieltvela/status/2033972678197997743)
 
 ---
 
 ## Resumen Ejecutivo
 
-El proyecto Jarvis Voicebot ya cuenta con una arquitectura sólida y bien diseñada que cubre la mayoría de las funcionalidades descritas en el artículo de referencia. La base del pipeline STT→LLM→TTS está bien implementada, junto con integración de herramientas, memoria persistente, monitoreo de pantalla (EYES), y comunicación asíncrona con agentes.
+El proyecto Voicebot ya cuenta con una arquitectura sólida y bien diseñada que cubre la mayoría de las funcionalidades descritas en el artículo de referencia. La base del pipeline STT→LLM→TTS está bien implementada, junto con integración de herramientas, memoria persistente, monitoreo de pantalla (EYES), y comunicación asíncrona con agentes.
 
 A continuación se detallan las mejoras y funcionalidades adicionales categorizadas por prioridad.
 
@@ -36,7 +36,7 @@ A continuación se detallan las mejoras y funcionalidades adicionales categoriza
 **Falta implementar:**
 
 - Detectar cuando el usuario está hablando **al voicebot** vs. speaking-elsewhere (conversación con otras personas o hacia la pantalla).
-- Diferenciar entre comandos directos ("Hey Jarvis, haz esto") vs. respuestas contextuales.
+- Diferenciar entre comandos directos ("Hey Voicebot, haz esto") vs. respuestas contextuales.
 - Soporte para múltiples usuarios con identificación de quién habla.
 
 **Propuesta técnica:**
@@ -226,4 +226,4 @@ A continuación se detallan las mejoras y funcionalidades adicionales categoriza
 
 ---
 
-_Documento generado como análisis de oportunidades de mejora para Jarvis Voicebot._
+_Documento generado como análisis de oportunidades de mejora para Voicebot._

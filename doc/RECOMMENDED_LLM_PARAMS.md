@@ -1,15 +1,15 @@
-# Recommended LLM Parameters for Voicebot (Jarvis)
+# Recommended LLM Parameters for Voicebot
 
 Optimized for real-time voice conversation with Qwen3.5-35B-A3B (MoE, 3B active params).
-The goal: the user feels like talking to Jarvis (Iron Man) — fast, natural, concise responses.
+The goal: the user feels like talking to a voice assistant — fast, natural, concise responses.
 
 ## Server-side parameters
 
 | Parameter | mlx-lm | oMLX | Rationale |
 |-----------|--------|------|-----------|
 | CTX Window | 3GB cache (`--prompt-cache-bytes`) | server-managed | Voice turns are short. 8K holds ~50 turns + summary. Summarization triggers at 75%. |
-| Max Tokens | `--max-tokens 300` | per-request | Jarvis replies in 2-3 sentences. 300 tokens ~ 200 words. Keeps TTS queue short. |
-| Temperature | `--temp 0.5` | per-request | 0.3 is too robotic for Jarvis personality. 0.5 adds natural variety without hallucination. |
+| Max Tokens | `--max-tokens 300` | per-request | Voicebot replies in 2-3 sentences. 300 tokens ~ 200 words. Keeps TTS queue short. |
+| Temperature | `--temp 0.5` | per-request | 0.3 is too robotic. 0.5 adds natural variety without hallucination. |
 | Top P | 0.90 (client-side) | 0.90 (client-side) | Tighter nucleus than 0.95. Safety net — min_p does the heavy lifting. |
 | Top K | 40 (client-side) | 40 (client-side) | Caps candidate tokens. Prevents obscure word choices in voice output. |
 | Min P | 0.05 (client-side) | 0.05 (client-side) | Most impactful sampler for Qwen3. Prunes tokens below 5% of top probability. |
@@ -66,7 +66,7 @@ LLM_SUMMARY_KEEP_TURNS=6
 ## Parameter priority (impact ranking)
 
 1. **min_p = 0.05** — Primary quality control for Qwen3. Dynamically prunes low-probability tokens.
-2. **temperature = 0.5** — Natural Jarvis personality without hallucination.
+2. **temperature = 0.5** — Natural personality without hallucination.
 3. **max_tokens = 300** — Faster TTS pipeline, concise responses.
 4. **ctx_size = 8192** — Saves VRAM, faster prefill. Summarization handles long conversations.
 5. **top_k = 40** — Extra safety net, negligible performance cost.

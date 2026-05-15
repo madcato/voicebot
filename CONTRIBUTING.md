@@ -1,6 +1,6 @@
-# Contributing to Jarvis Voicebot
+# Contributing to Voicebot
 
-Thank you for your interest in contributing to **Jarvis Voicebot**! This document provides guidelines and information for contributors.
+Thank you for your interest in contributing to **Voicebot**! This document provides guidelines and information for contributors.
 
 ---
 
@@ -20,7 +20,7 @@ Thank you for your interest in contributing to **Jarvis Voicebot**! This documen
 
 ## Code of Conduct
 
-Jarvis Voicebot follows a simple code of conduct:
+Voicebot follows a simple code of conduct:
 
 - Be respectful and inclusive in all interactions
 - Provide constructive feedback, not criticism

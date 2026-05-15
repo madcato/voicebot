@@ -1,6 +1,6 @@
-# Apple Watch Client for Jarvis Voicebot
+# Apple Watch Client for Voicebot
 
-Guide for building a watchOS app that connects to the Jarvis voicebot WebSocket server, streams microphone audio, and plays back TTS responses.
+Guide for building a watchOS app that connects to the Voicebot WebSocket server, streams microphone audio, and plays back TTS responses.
 
 ## Prerequisites
 
@@ -16,7 +16,7 @@ Guide for building a watchOS app that connects to the Jarvis voicebot WebSocket 
 
 ### Info.plist / Capabilities
 
-- Add `NSMicrophoneUsageDescription` to Info.plist: `"Jarvis needs microphone access to hear your voice."`
+- Add `NSMicrophoneUsageDescription` to Info.plist: `"Voicebot needs microphone access to hear your voice."`
 - Enable **Background Modes** capability with **Audio, AirPlay, and Picture in Picture** checked
 
 ## Wire Protocol

@@ -1,9 +1,9 @@
-# Jarvis Voicebot — Agent Instructions
+# Voicebot — Agent Instructions
 
 ## ⚠️ Legal & Naming
 
 - **Jarvis®** is a trademark of Marvel Studios/Disney. This is an independent fan project.
-- Refer to this project as **"Jarvis"** or **"Jarvis Voicebot"**. Never "Hive" or just "Voicebot".
+- Refer to this project as **"Voicebot"**. Never "Jarvis", "Hive" or just "Voicebot".
 - See `LICENSE-VOICEBOT.md` for full details.
 
 ---
@@ -208,4 +208,4 @@ Log with `RUST_LOG=trace cargo run` for detailed timing.
 - `CLAUDE.md`: Detailed architecture (keep synced with this file).
 - `readme.md`: User-facing documentation.
 - `CONTRIBUTING.md`: Contributor guidelines.
-- `seconday-agent.md`: Secondary LLM orchestration design (Spanish).
+- `secondary-agent.md`: Secondary LLM orchestration design (Spanish).

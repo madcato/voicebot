@@ -1,6 +1,6 @@
 # Voicebot — Butler
 
-A voice AI assistant built in Rust. The long-term goal is a **Jarvis-style digital butler**: not a conversational chatbot, but a proactive, situationally-aware companion that anticipates needs, controls the computer, and speaks with a defined personality — without being asked.
+A voice AI assistant built in Rust. The long-term goal is a digital butler: not a conversational chatbot, but a proactive, situationally-aware companion that anticipates needs, controls the computer, and speaks with a defined personality — without being asked.
 
 > A chatbot answers questions. A butler anticipates needs.
 
@@ -14,7 +14,7 @@ WHISPER_COREML=1 TTS_PROVIDER=kokoro cargo run --features kokoro --release
 
 ## Vision
 
-The gap between a chatbot and Jarvis is not the AI model — it is the surrounding architecture. Jarvis has:
+The gap between a chatbot and a proactive assistant is not the AI model — it is the surrounding architecture. Voicebot has:
 
 - **Eyes** — knows what is on your screen, what apps are open, what the calendar says
 - **Arms** — can actually do things on the computer, not just talk about them

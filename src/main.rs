@@ -1,5 +1,5 @@
-#![allow(unreachable_code)]
 #![allow(dead_code)]
+#![allow(unreachable_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
 
@@ -10,6 +10,7 @@ mod config;
 mod daemon;
 mod db;
 mod eyes;
+mod i18n;
 mod llm;
 mod mcp;
 mod memory;
@@ -746,12 +747,13 @@ async fn async_main() -> Result<()> {
         let idle_min_pct          = config.llm_idle_min_context_pct;
         let base_prompt           = config.llm_system_prompt.clone();
         let tool_section_c        = tool_section.clone();
+        let language_c            = config.language.clone();
         tokio::spawn(async move {
             consolidation_task(
                 events_c, pipeline_state_tx_c, pipeline_state_rx_c, transcript_tx_c,
                 llm_session_c, background_c, db_c,
                 session_id, context_tokens, keep_turns, threshold_pct, idle_secs, idle_min_pct,
-                base_prompt, tool_section_c,
+                base_prompt, tool_section_c, language_c,
             ).await;
         });
     }
@@ -829,10 +831,9 @@ async fn async_main() -> Result<()> {
         let now = chrono::Local::now();
         let time_str = now.format("%H:%M").to_string();
         let date_str = now.format("%d/%m/%Y").to_string();
-        let notification = format!(
-            "[Sistema: el voicebot acaba de arrancar. Son las {time_str}, del día {date_str}\n\
-             Saluda al usuario de forma natural y muy concisa.]"
-        );
+        let notification = i18n::get_notification("startup", &config.language)
+            .replace("{time_str}", &time_str)
+            .replace("{date_str}", &date_str);
         transcript_tx.send(PipelineFrame::SystemNotification { text: notification }).await.ok();
     }
 
@@ -845,12 +846,9 @@ async fn async_main() -> Result<()> {
                 if llm_idle && current_agent_announcement.is_none()
                     && let Some((task, result)) = pending_agent_results.pop_front()
                 {
-                    let notification = format!(
-                        "[Sistema: una tarea en segundo plano ha terminado.]\n\
-                         Tarea: {task}\n\
-                         Resultado: {result}\n\
-                         Informa al usuario de forma natural y concisa."
-                    );
+                    let notification = i18n::get_notification("background_task_done", &config.language)
+                        .replace("{task}", &task)
+                        .replace("{result}", &result);
                     current_agent_announcement = Some((task, result));
                     transcript_tx.send(PipelineFrame::SystemNotification { text: notification }).await.ok();
                 }
@@ -917,12 +915,9 @@ async fn async_main() -> Result<()> {
                                 }
                                 pending_agent_question = Some(response_tx);
                                 let opts_str = options.join(" / ");
-                                let prompt = format!(
-                                    "[Sistema: el agente ACP necesita permiso para realizar una acción.]\n\
-                                     Acción solicitada: {question}\n\
-                                     Opciones: {opts_str}\n\
-                                     Pregunta al usuario de forma natural si desea permitirlo (sí/no)."
-                                );
+                                let prompt = i18n::get_notification("acp_permission", &config.language)
+                                    .replace("{question}", &question)
+                                    .replace("{opts_str}", &opts_str);
                                 transcript_tx.send(PipelineFrame::SystemNotification { text: prompt }).await.ok();
                             }
                         }
