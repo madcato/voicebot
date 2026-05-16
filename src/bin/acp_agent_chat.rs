@@ -17,7 +17,7 @@ use tracing_subscriber::EnvFilter;
 
 // Re-use library modules from the voicebot crate.
 use voicebot::config::Config;
-use voicebot::tools::run_agent::{HermesAcpWriter, JsonRpcMessage};
+use voicebot::tools::run_agent::{AcpWriter, JsonRpcMessage};
 
 /// How permission requests from the agent are handled.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
     let acp_command = &config.agent_acp_command;
     eprintln!("Spawning ACP agent: {acp_command}");
 
-    let (mut writer, mut rx) = HermesAcpWriter::spawn(acp_command).await?;
+    let (mut writer, mut rx) = AcpWriter::spawn(acp_command).await?;
 
     let cwd = std::env::current_dir()?
         .to_string_lossy()
@@ -352,7 +352,7 @@ async fn wait_for_session_id(
 /// Handles streaming `session/update` notifications and permission requests.
 /// Returns the accumulated text when the prompt response arrives.
 async fn collect_response(
-    writer: &Arc<Mutex<HermesAcpWriter>>,
+    writer: &Arc<Mutex<AcpWriter>>,
     rx: &mut mpsc::Receiver<JsonRpcMessage>,
     prompt_request_id: u64,
     permission_mode: PermissionMode,

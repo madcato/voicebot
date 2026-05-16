@@ -14,18 +14,20 @@ use super::state::PipelineEvents;
 
 /// Assemble the full system prompt from its components.
 ///
-/// Order: base prompt → [USER PROFILE] → [MEMORIES] → tool instructions.
+/// Order: base prompt → [USER PROFILE] → [MEMORIES] → [AGENTS] → tool instructions.
 pub fn build_system_prompt(
     base_prompt: &str,
     profile_facts: &[ProfileFact],
     memories: &[Memory],
+    agent_section: &str,
     tool_section: &str,
 ) -> String {
     format!(
-        "{}{}{}{}",
+        "{}{}{}{}{}",
         base_prompt,
         build_profile_context(profile_facts),
         build_memory_context(memories),
+        agent_section,
         tool_section,
     )
 }
@@ -43,6 +45,7 @@ pub async fn run_consolidation_cycle(
     llm_session: &Arc<Mutex<LlmSession>>,
     keep_turns: usize,
     base_prompt: &str,
+    agent_section: &str,
     tool_section: &str,
 ) {
     let (conversation_text, summary_prompt, turns_to_summarize) = {
@@ -137,7 +140,7 @@ pub async fn run_consolidation_cycle(
         .collect();
     let fresh_memories = db.load_active_memories().await.unwrap_or_default();
     let new_system_prompt = build_system_prompt(
-        base_prompt, &fresh_profile_facts, &fresh_memories, tool_section,
+        base_prompt, &fresh_profile_facts, &fresh_memories, agent_section, tool_section,
     );
 
     {
@@ -173,6 +176,7 @@ pub async fn consolidation_task(
     idle_consolidation_secs: u64,
     idle_min_context_pct: usize,
     base_prompt: String,
+    agent_section: String,
     tool_section: String,
     language: String,
 ) {
@@ -259,7 +263,7 @@ pub async fn consolidation_task(
 
         run_consolidation_cycle(
             &background_client, &db, session_id, &llm_session,
-            keep_turns, &base_prompt, &tool_section,
+            keep_turns, &base_prompt, &agent_section, &tool_section,
         )
         .await;
 

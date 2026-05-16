@@ -50,10 +50,11 @@ use crate::pipeline::{
     build_system_prompt, consolidation_task, llm_task, run_consolidation_cycle, sen_task,
     PipelineEvents, PipelineFrame, PipelineState, tts_task,
 };
+use crate::agents::AgentRegistry;
 use crate::profile::ProfileFact;
 use crate::stt::{SpeechEvent, WhisperSTTVAD, WhisperSTTVADConfig};
 use crate::tools::{
-    ActiveAcpTask, ConversationMode, CurrentTimeTool, HermesAcpWriter,
+    ActiveAcpTask, AcpWriter, ConversationMode, CurrentTimeTool,
     JsonRpcMessage, McpToolProxy, OpenAppTool, ReadClipboardTool, RunAgentTool, RunShellTool,
     SetClipboardTool, SetConversationModeTool, TakeScreenshotTool, ToolRegistry, WebSearchTool,
 };
@@ -235,97 +236,93 @@ async fn async_main() -> Result<()> {
         info!(target: "voicebot", "web_search tool enabled (url={})", searxng_url);
     }
 
-    let acp_writer: Arc<tokio::sync::Mutex<Option<HermesAcpWriter>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
-    let acp_inbound: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<JsonRpcMessage>>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
-    let active_task: Arc<tokio::sync::Mutex<Option<ActiveAcpTask>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
+    // ── Agent delegation (multi-agent registry) ───────────────────────────────
+    let agent_registry = AgentRegistry::from_env();
+    let agent_section = agent_registry.system_prompt_section();
 
-    if config.agent_mode == "acp" || config.agent_command.is_some() {
-        let mode = config.agent_mode.clone();
-        let agent_cmd = config.agent_command.clone();
-        let acp_cmd = config.agent_acp_command.clone();
-        info!(target: "voicebot", "Agent delegation enabled (mode={})", mode);
+    // Per-agent ACP state maps.
+    let mut acp_writers: std::collections::HashMap<String, Arc<tokio::sync::Mutex<Option<AcpWriter>>>> = std::collections::HashMap::new();
+    let mut acp_inbounds: std::collections::HashMap<String, Arc<tokio::sync::Mutex<Option<mpsc::Receiver<JsonRpcMessage>>>>> = std::collections::HashMap::new();
+    let mut active_tasks: std::collections::HashMap<String, Arc<tokio::sync::Mutex<Option<ActiveAcpTask>>>> = std::collections::HashMap::new();
+
+    for agent in &agent_registry.agents {
+        let writer_arc: Arc<tokio::sync::Mutex<Option<AcpWriter>>> = Arc::new(tokio::sync::Mutex::new(None));
+        let inbound_arc: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<JsonRpcMessage>>>> = Arc::new(tokio::sync::Mutex::new(None));
+        let task_arc: Arc<tokio::sync::Mutex<Option<ActiveAcpTask>>> = Arc::new(tokio::sync::Mutex::new(None));
+
+        info!(target: "voicebot", "Agent '{}' enabled (mode={})", agent.name, agent.mode);
         let mut run_agent_tool = RunAgentTool::new(
-            agent_cmd,
-            Arc::clone(&acp_writer),
-            Arc::clone(&acp_inbound),
-            Arc::clone(&active_task),
+            agent.clone(),
+            Arc::clone(&writer_arc),
+            Arc::clone(&inbound_arc),
+            Arc::clone(&task_arc),
             shared_history.clone(),
             proactive_tx.clone(),
-            mode,
-            acp_cmd,
         );
         if let Some(ref sec) = secondary_llm_client {
             run_agent_tool = run_agent_tool.with_synthesis(std::sync::Arc::new(sec.clone()));
-            info!(target: "voicebot", "run_agent result synthesis via secondary LLM enabled");
+            info!(target: "voicebot", "run_{} result synthesis via secondary LLM enabled", agent.name);
         }
         tool_registry.register(run_agent_tool);
+
+        acp_writers.insert(agent.name.clone(), writer_arc);
+        acp_inbounds.insert(agent.name.clone(), inbound_arc);
+        active_tasks.insert(agent.name.clone(), task_arc);
     }
 
-    // ── ACP pre-warm ──────────────────────────────────────────────────────────
-    if config.agent_mode == "acp" {
-        let acp_cmd     = config.agent_acp_command.clone();
-        let warmup      = config.agent_acp_warmup;
-        let writer_arc  = Arc::clone(&acp_writer);
-        let inbound_arc = Arc::clone(&acp_inbound);
+    // ── ACP pre-warm (per-agent) ─────────────────────────────────────────────
+    for agent in &agent_registry.agents {
+        if agent.mode != "acp" || !agent.acp_warmup {
+            continue;
+        }
+        let agent_name = agent.name.clone();
+        let acp_cmd = agent.acp_command.clone();
+        let writer_arc = acp_writers.get(&agent.name).unwrap().clone();
+        let inbound_arc = acp_inbounds.get(&agent.name).unwrap().clone();
 
         tokio::spawn(async move {
-            info!(target: "agent", "ACP pre-warm: spawning {}…", acp_cmd);
-            let (mut writer, mut rx) = match HermesAcpWriter::spawn(&acp_cmd).await {
+            info!(target: "agent", "ACP pre-warm [{}]: spawning {}…", agent_name, acp_cmd);
+            let (mut writer, mut rx) = match AcpWriter::spawn(&acp_cmd).await {
                 Ok(pair) => pair,
-                Err(e) => { warn!(target: "agent", "ACP pre-warm: spawn failed: {e}"); return; }
+                Err(e) => { warn!(target: "agent", "ACP pre-warm [{}]: spawn failed: {e}", agent_name); return; }
             };
             let cwd = std::env::current_dir()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
             match writer.initialize(&mut rx, &cwd).await {
-                Ok(sid) => info!(target: "agent", "ACP pre-warm: session ready (sid={sid})"),
-                Err(e)  => { warn!(target: "agent", "ACP pre-warm: init failed: {e}"); return; }
+                Ok(sid) => info!(target: "agent", "ACP pre-warm [{}]: session ready (sid={sid})", agent_name),
+                Err(e)  => { warn!(target: "agent", "ACP pre-warm [{}]: init failed: {e}", agent_name); return; }
             }
             *writer_arc.lock().await  = Some(writer);
             *inbound_arc.lock().await = Some(rx);
 
-            if warmup {
-                info!(target: "agent", "ACP pre-warm: sending warmup prompt…");
-                let mut taken_rx = inbound_arc.lock().await.take();
-                if let Some(rx) = taken_rx.as_mut() {
-                    let prompt_id = {
-                        let mut w = writer_arc.lock().await;
-                        let sid = w.as_ref()
-                            .and_then(|w| w.session_id.clone())
-                            .unwrap_or_default();
-                        match w.as_mut() {
-                            Some(w) => w.send_prompt(&sid, "hola").await.ok(),
-                            None    => None,
-                        }
-                    };
-                    if let Some(id) = prompt_id {
-                        let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
-                        tokio::pin!(deadline);
-                        loop {
-                            tokio::select! {
-                                _ = &mut deadline => {
-                                    warn!(target: "agent", "ACP pre-warm: warmup timed out");
-                                    break;
-                                }
-                                msg = rx.recv() => match msg {
-                                    Some(JsonRpcMessage::Response { id: resp_id, .. })
-                                        if resp_id == id => {
-                                            info!(target: "agent", "ACP pre-warm: warmup complete");
-                                            break;
-                                        }
-                                    Some(_) => continue,
-                                    None    => break,
-                                }
-                            }
-                        }
+            let sid = {
+                let w = writer_arc.lock().await;
+                w.as_ref().and_then(|w| w.session_id.clone()).unwrap_or_default()
+            };
+            if sid.is_empty() {
+                return;
+            }
+
+            info!(target: "agent", "ACP pre-warm [{}]: sending warmup prompt…", agent_name);
+            let prompt_id = {
+                let mut w = writer_arc.lock().await;
+                w.as_mut().unwrap().send_prompt(&sid, "Responde solo: OK").await.unwrap_or(0)
+            };
+            let mut taken_rx = inbound_arc.lock().await.take();
+            if let Some(rx) = taken_rx.as_mut() {
+                loop {
+                    match tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv()).await {
+                        Ok(Some(crate::tools::JsonRpcMessage::Response { id, .. })) if id == prompt_id => break,
+                        Ok(None) => { warn!(target: "agent", "ACP pre-warm [{}]: channel closed during warmup", agent_name); return; }
+                        Ok(_) => {}
+                        Err(_) => { warn!(target: "agent", "ACP pre-warm [{}]: warmup timed out", agent_name); return; }
                     }
                 }
-                *inbound_arc.lock().await = taken_rx;
             }
+            *inbound_arc.lock().await = taken_rx;
+            info!(target: "agent", "ACP pre-warm [{}]: warmup complete", agent_name);
         });
     }
 
@@ -387,11 +384,12 @@ async fn async_main() -> Result<()> {
     }
 
     // ── LLM session ───────────────────────────────────────────────────────────
-    let tool_section = tools.system_prompt_section();
+    let tool_section = tools.system_prompt_section(&agent_section);
     let system_prompt = build_system_prompt(
         &config.llm_system_prompt,
         &profile_facts,
         &memories,
+        &agent_section,
         &tool_section,
     );
     let llm_session = Arc::new(Mutex::new(LlmSession::from_history(
@@ -746,6 +744,7 @@ async fn async_main() -> Result<()> {
         let idle_secs             = config.llm_idle_consolidation_secs;
         let idle_min_pct          = config.llm_idle_min_context_pct;
         let base_prompt           = config.llm_system_prompt.clone();
+        let agent_section_c       = agent_section.clone();
         let tool_section_c        = tool_section.clone();
         let language_c            = config.language.clone();
         tokio::spawn(async move {
@@ -753,7 +752,7 @@ async fn async_main() -> Result<()> {
                 events_c, pipeline_state_tx_c, pipeline_state_rx_c, transcript_tx_c,
                 llm_session_c, background_c, db_c,
                 session_id, context_tokens, keep_turns, threshold_pct, idle_secs, idle_min_pct,
-                base_prompt, tool_section_c, language_c,
+                base_prompt, agent_section_c, tool_section_c, language_c,
             ).await;
         });
     }
@@ -821,7 +820,7 @@ async fn async_main() -> Result<()> {
             info!(target: "memory", "Startup: context exceeds idle threshold — running silent consolidation before greeting");
             run_consolidation_cycle(
                 &background_client, &db, session_id, &llm_session,
-                config.llm_summary_keep_turns, &config.llm_system_prompt, &tool_section,
+                config.llm_summary_keep_turns, &config.llm_system_prompt, &agent_section, &tool_section,
             ).await;
         }
     }

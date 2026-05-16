@@ -20,7 +20,7 @@ pub use current_time::CurrentTimeTool;
 pub use mcp_tool::McpToolProxy;
 pub use open_app::OpenAppTool;
 pub use run_agent::{
-    format_history, ActiveAcpTask, HermesAcpWriter, JsonRpcMessage, RunAgentTool,
+    format_history, ActiveAcpTask, AcpWriter, JsonRpcMessage, RunAgentTool,
 };
 pub use run_shell::RunShellTool;
 pub use take_screenshot::TakeScreenshotTool;
@@ -83,15 +83,24 @@ impl ToolRegistry {
     }
 
     /// Returns a section to append to the system prompt describing how to call tools.
-    pub fn system_prompt_section(&self) -> String {
-        if self.tools.is_empty() {
+    /// If `agent_section` is provided, it is inserted before the tool instructions.
+    pub fn system_prompt_section(&self, agent_section: &str) -> String {
+        if self.tools.is_empty() && agent_section.is_empty() {
             return String::new();
         }
-        "\n\nREGLA CRÍTICA: Cuando el usuario pida una acción, SIEMPRE llama \
-         a la herramienta correspondiente — nunca simules ni describas la acción sin llamarla. \
-         Esto incluye run_agent: si el historial muestra una delegación a Hermes sin registro \
-         de llamada a run_agent, fue un error; no lo repitas."
-            .to_string()
+        format!(
+            "{}{}",
+            agent_section,
+            if self.tools.is_empty() {
+                String::new()
+            } else {
+                "\n\nREGLA CRÍTICA: Cuando el usuario pida una acción, SIEMPRE llama \
+                 a la herramienta correspondiente — nunca simules ni describas la acción sin llamarla. \
+                 Esto incluye run_agent: si el historial muestra una delegación a un agente externo sin registro \
+                 de llamada a la herramienta correspondiente, fue un error; no lo repitas."
+                    .to_string()
+            },
+        )
     }
 
     /// Parse a tool call from LLM output.
@@ -240,14 +249,14 @@ mod tests {
     #[test]
     fn system_prompt_section_empty_for_empty_registry() {
         let r = ToolRegistry::new();
-        assert!(r.system_prompt_section().is_empty());
+        assert!(r.system_prompt_section("").is_empty());
     }
 
     #[test]
     fn system_prompt_section_non_empty_when_tools_registered() {
         let r = registry_with_current_time();
-        assert!(!r.system_prompt_section().is_empty());
-        assert!(r.system_prompt_section().contains("herramienta"));
+        assert!(!r.system_prompt_section("").is_empty());
+        assert!(r.system_prompt_section("").contains("herramienta"));
     }
 
     #[test]

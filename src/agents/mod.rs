@@ -1,3 +1,7 @@
+pub mod config;
+
+pub use config::{AgentConfig, AgentRegistry};
+
 /// Events that trigger proactive speech from Jarvis without a user utterance.
 pub enum ProactiveEvent {
     /// A background agent task completed. Jarvis will vocalize the result.

@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{debug, info, warn};
 
 use super::Tool;
-use crate::agents::ProactiveEvent;
+use crate::agents::{AgentConfig, ProactiveEvent};
 use crate::llm::{Message, OpenAIClient};
 
 // ── History formatting ────────────────────────────────────────────────────────
@@ -220,56 +220,39 @@ async fn synthesize_agent_result(
 
 /// Unified agent delegation tool.
 ///
-/// Supports two modes (selected by the `mode` field):
+/// Supports two modes (selected by the `config.mode` field):
 /// - `"cli"` — spawns the agent as a one-shot CLI subprocess (fire-and-forget).
 /// - `"acp"` — maintains a persistent ACP subprocess via JSON-RPC 2.0 over stdio.
 ///
 /// Additionally handles two inline commands that require no subprocess:
-/// - `run_agent: cancel` — cancels the currently running ACP task.
-/// - `run_agent: status` — reports whether the ACP agent is busy.
+/// - `run_<name>: cancel` — cancels the currently running ACP task.
+/// - `run_<name>: status` — reports whether the ACP agent is busy.
 pub struct RunAgentTool {
-    /// CLI executable (and optional args) — used in `"cli"` mode.
-    command: Option<String>,
-    /// Persistent ACP process write-side — lazily initialized on first use.
-    acp_writer: Arc<Mutex<Option<HermesAcpWriter>>>,
-    /// Inbound message channel from the ACP process.
+    config: AgentConfig,
+    acp_writer: Arc<Mutex<Option<AcpWriter>>>,
     acp_inbound: Arc<Mutex<Option<mpsc::Receiver<JsonRpcMessage>>>>,
-    /// Currently executing ACP task, if any.
     active_task: Arc<Mutex<Option<ActiveAcpTask>>>,
-    /// Formatted conversation history shared with the agent for context.
     history: Arc<RwLock<String>>,
-    /// Channel for delivering agent results back to the main pipeline.
     proactive_tx: mpsc::Sender<ProactiveEvent>,
-    /// `"cli"` or `"acp"`.
-    mode: String,
-    /// ACP subprocess command — used in `"acp"` mode.
-    acp_command: String,
-    /// When set, the secondary LLM synthesizes Hermes's raw result into a
-    /// concise voice-ready summary before the ProactiveEvent is injected.
     synthesis_client: Option<std::sync::Arc<OpenAIClient>>,
 }
 
 impl RunAgentTool {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        command: Option<String>,
-        acp_writer: Arc<Mutex<Option<HermesAcpWriter>>>,
+        config: AgentConfig,
+        acp_writer: Arc<Mutex<Option<AcpWriter>>>,
         acp_inbound: Arc<Mutex<Option<mpsc::Receiver<JsonRpcMessage>>>>,
         active_task: Arc<Mutex<Option<ActiveAcpTask>>>,
         history: Arc<RwLock<String>>,
         proactive_tx: mpsc::Sender<ProactiveEvent>,
-        mode: String,
-        acp_command: String,
     ) -> Self {
         Self {
-            command,
+            config,
             acp_writer,
             acp_inbound,
             active_task,
             history,
             proactive_tx,
-            mode,
-            acp_command,
             synthesis_client: None,
         }
     }
@@ -307,11 +290,11 @@ impl RunAgentTool {
 
     /// CLI mode: spawn agent as one-shot subprocess, deliver result proactively.
     async fn run_cli(&self, task: String) -> String {
-        let command = match &self.command {
+        let command = match &self.config.command {
             Some(c) => c.clone(),
             None => return "Error: CLI agent command not configured.".to_string(),
         };
-        let query = build_agent_query(&self.history, &task);
+        let query = build_agent_query(&self.history, &task, &self.config.instructions);
         let proactive_tx = self.proactive_tx.clone();
         let synthesis_client = self.synthesis_client.clone();
 
@@ -345,13 +328,13 @@ impl RunAgentTool {
             }
         }
 
-        let query = build_agent_query(&self.history, &task);
+        let query = build_agent_query(&self.history, &task, &self.config.instructions);
         let task_c = task.clone();
         let acp_writer = Arc::clone(&self.acp_writer);
         let acp_inbound = Arc::clone(&self.acp_inbound);
         let active_task = Arc::clone(&self.active_task);
         let proactive_tx = self.proactive_tx.clone();
-        let acp_command = self.acp_command.clone();
+        let acp_command = self.config.acp_command.clone();
         let synthesis_client = self.synthesis_client.clone();
 
         tokio::spawn(async move {
@@ -359,7 +342,7 @@ impl RunAgentTool {
             let session_id = {
                 let mut w_guard = acp_writer.lock().await;
                 if w_guard.is_none() {
-                    match HermesAcpWriter::spawn(&acp_command).await {
+                    match AcpWriter::spawn(&acp_command).await {
                         Ok((mut writer, mut rx)) => {
                             let cwd = std::env::current_dir()
                                 .unwrap_or_default()
@@ -496,13 +479,12 @@ impl Tool for RunAgentTool {
     }
 
     fn description(&self) -> &str {
-        "Delega una tarea al agente externo (Hermes). El agente tiene acceso a \
-         herramientas de computadora, archivos, web, calendario y razonamiento extendido. \
+        "Delega una tarea al agente externo. Consulta la sección AGENTES EXTERNOS DISPONIBLES \
+         del system prompt para saber qué agentes están disponibles y cuándo usar cada uno. \
          IMPORTANTE: DEBES llamar a esta función para delegar tareas. Nunca describas \
-         verbalmente que 'has enviado al agente' o que 'el agente está buscando' sin \
-         haber llamado primero a run_agent — eso sería un error. \
+         verbalmente que 'has enviado al agente' sin haber llamado primero a run_agent. \
          El resultado llega de forma proactiva cuando el agente termina. \
-         Para cancelar una tarea en curso usa run_agent con task='cancel'. \
+         Para cancelar una tarea en curso usa task='cancel'. \
          Para consultar el estado usa task='status'."
     }
 
@@ -522,7 +504,7 @@ impl Tool for RunAgentTool {
 
     async fn run(&self, args: &str) -> String {
         let task = parse_task(args);
-        info!(target: "agent", "run_agent invoked: mode={} raw_args={:?} task={:?}", self.mode, args, task);
+        info!(target: "agent", "run_agent({}) invoked: mode={} raw_args={:?} task={:?}", self.config.name, self.config.mode, args, task);
         if task.is_empty() {
             warn!(target: "agent", "run_agent called with empty task");
             return "Error: run_agent requires a task description.".to_string();
@@ -537,7 +519,7 @@ impl Tool for RunAgentTool {
             return self.status().await;
         }
 
-        match self.mode.as_str() {
+        match self.config.mode.as_str() {
             "acp" => self.run_acp(task).await,
             _ => self.run_cli(task).await,
         }
@@ -549,14 +531,23 @@ impl Tool for RunAgentTool {
 /// Build the prompt sent to the agent.
 ///
 /// Always includes the delegated `task` so the agent knows exactly what to do.
-/// Prepends the conversation history when available so the agent has context.
-fn build_agent_query(history: &std::sync::RwLock<String>, task: &str) -> String {
+/// Prepends the agent's own instructions (role, capabilities, style) and the
+/// conversation history when available so the agent has full context.
+fn build_agent_query(
+    history: &std::sync::RwLock<String>,
+    task: &str,
+    instructions: &str,
+) -> String {
     let history = history.read().map(|h| h.clone()).unwrap_or_default();
-    if history.is_empty() {
-        task.to_string()
-    } else {
-        format!("{history}\n\n[Tarea delegada: {task}]")
+    let mut parts = Vec::new();
+    if !instructions.is_empty() {
+        parts.push(format!("[Instrucciones del agente]: {instructions}"));
     }
+    if !history.is_empty() {
+        parts.push(history);
+    }
+    parts.push(format!("[Tarea delegada]: {task}"));
+    parts.join("\n\n")
 }
 
 fn parse_task(args: &str) -> String {
@@ -566,13 +557,13 @@ fn parse_task(args: &str) -> String {
         .unwrap_or_else(|| args.to_string())
 }
 
-// ── HermesAcpWriter ───────────────────────────────────────────────────────────
+// ── AcpWriter ───────────────────────────────────────────────────────────
 
-/// Write-side of a persistent `hermes acp` subprocess using JSON-RPC 2.0.
+/// Write-side of a persistent ACP subprocess using JSON-RPC 2.0 over stdio.
 ///
 /// Reads are served by a background reader task that forwards parsed
 /// `JsonRpcMessage` messages on an `mpsc` channel returned from `spawn()`.
-pub struct HermesAcpWriter {
+pub struct AcpWriter {
     pub session_id: Option<String>,
     stdin: ChildStdin,
     #[allow(dead_code)]
@@ -582,7 +573,11 @@ pub struct HermesAcpWriter {
     pub verbose: Arc<AtomicBool>,
 }
 
-impl HermesAcpWriter {
+/// Backward-compat alias. Renamed from `HermesAcpWriter` → `AcpWriter`.
+#[deprecated(since = "0.2.0", note = "Use AcpWriter instead")]
+pub type HermesAcpWriter = AcpWriter;
+
+impl AcpWriter {
     /// Spawn the ACP process and start the reader task.
     ///
     /// Returns `(writer, inbound_rx)`. The caller owns `inbound_rx`; it should
@@ -994,7 +989,7 @@ pub struct ActiveAcpTask {
 /// Handles streaming session/update notifications, permission requests, and
 /// cancellation. Returns the accumulated text result or an error/cancel string.
 async fn collect_acp_response(
-    acp_writer: Arc<Mutex<Option<HermesAcpWriter>>>,
+    acp_writer: Arc<Mutex<Option<AcpWriter>>>,
     inbound_rx: &mut mpsc::Receiver<JsonRpcMessage>,
     proactive_tx: mpsc::Sender<ProactiveEvent>,
     _session_id: String,
@@ -1149,6 +1144,8 @@ mod tests {
 
     use super::*;
 
+    use crate::agents::AgentConfig;
+
     fn empty_history() -> Arc<RwLock<String>> {
         Arc::new(RwLock::new(String::new()))
     }
@@ -1157,33 +1154,43 @@ mod tests {
         Arc::new(RwLock::new(s.to_string()))
     }
 
+    fn test_agent_config(name: &str, mode: &str, command: Option<String>) -> AgentConfig {
+        AgentConfig {
+            name: name.to_string(),
+            mode: mode.to_string(),
+            command,
+            acp_command: format!("{name} acp"),
+            acp_warmup: false,
+            when_to_use: "Test".to_string(),
+            instructions: "Test instructions".to_string(),
+        }
+    }
+
     fn cli_tool(command: &str, history: Arc<RwLock<String>>, tx: mpsc::Sender<ProactiveEvent>) -> RunAgentTool {
+        let config = test_agent_config("hermes", "cli", Some(command.to_string()));
         RunAgentTool::new(
-            Some(command.to_string()),
+            config,
             Arc::new(Mutex::new(None)),
             Arc::new(Mutex::new(None)),
             Arc::new(Mutex::new(None)),
             history,
             tx,
-            "cli".to_string(),
-            String::new(),
         )
     }
 
     fn cancel_tool(
         active_task: Arc<Mutex<Option<ActiveAcpTask>>>,
-        acp_writer: Arc<Mutex<Option<HermesAcpWriter>>>,
+        acp_writer: Arc<Mutex<Option<AcpWriter>>>,
         tx: mpsc::Sender<ProactiveEvent>,
     ) -> RunAgentTool {
+        let config = test_agent_config("hermes", "acp", None);
         RunAgentTool::new(
-            None,
+            config,
             acp_writer,
             Arc::new(Mutex::new(None)),
             active_task,
             empty_history(),
             tx,
-            "acp".to_string(),
-            String::new(),
         )
     }
 
@@ -1396,7 +1403,7 @@ mod tests {
             prompt_request_id: 2,
             cancel_tx,
         })));
-        let acp_writer: Arc<Mutex<Option<HermesAcpWriter>>> = Arc::new(Mutex::new(None));
+        let acp_writer: Arc<Mutex<Option<AcpWriter>>> = Arc::new(Mutex::new(None));
         let (tx, _rx) = mpsc::channel::<ProactiveEvent>(8);
         let tool = cancel_tool(active_task, acp_writer, tx);
         let result = tool.run(r#"{"task": "cancel"}"#).await;
@@ -1575,7 +1582,7 @@ mod integration_tests {
     #[tokio::test]
     #[ignore]
     async fn acp_initialize_handshake() {
-        let (mut writer, mut rx) = HermesAcpWriter::spawn("hermes acp")
+        let (mut writer, mut rx) = AcpWriter::spawn("hermes acp")
             .await
             .expect("failed to spawn hermes acp");
 
@@ -1602,7 +1609,7 @@ mod integration_tests {
     #[tokio::test]
     #[ignore]
     async fn acp_simple_prompt() {
-        let (mut writer, mut rx) = HermesAcpWriter::spawn("hermes acp")
+        let (mut writer, mut rx) = AcpWriter::spawn("hermes acp")
             .await
             .expect("failed to spawn hermes acp");
 
@@ -1661,7 +1668,7 @@ mod integration_tests {
     #[tokio::test]
     #[ignore]
     async fn acp_cancel_running_task() {
-        let (mut writer, mut rx) = HermesAcpWriter::spawn("hermes acp")
+        let (mut writer, mut rx) = AcpWriter::spawn("hermes acp")
             .await
             .expect("failed to spawn hermes acp");
 
