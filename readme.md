@@ -119,9 +119,21 @@ brew install node
 
 ### Models Required
 
-You will need to download the following models:
+The installer (`install.sh`) automatically downloads the required models (Whisper STT, Silero VAD, and Kokoro TTS on Linux). You do not need to download them manually unless building from source.
 
-#### Whisper STT Model
+**What the installer downloads:**
+
+| Model | Purpose | Source |
+|-------|---------|--------|
+| Whisper STT | Speech-to-text | HuggingFace (ggml-small.bin) |
+| Silero VAD | Voice activity detection | sherpa-onnx (ggml-silero-vad.bin) |
+| Kokoro TTS | Text-to-speech (Linux) | Kokoro GitHub release |
+
+#### Advanced: Manual Model Setup
+
+If you are building from source, download the models manually:
+
+**Whisper STT Model:**
 
 ```bash
 # Download whisper.cpp model (choose size: tiny, small, base, medium, large-v3-turbo)
@@ -131,17 +143,17 @@ wget https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin -O
 # See CONTRIBUTING.md for CoreML conversion instructions
 ```
 
-#### LLM Model
+**LLM Model:**
 
 ```bash
 # Download a GGUF model (Qwen2.5-7B recommended)
-wget https://hgpu.space/file/hjz3n4QwZbU/Qwen2.5-7B-Instruct-Q4_K_M.gguf -O ./models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+wget https://hgpu.space/file/hjz3n4QwZbU/Qwen2.5-7B-Instruct-Q4_K_M.gguf -O ./models/Qwen2.5-7B
 
 # Alternative: mlx-lm format (auto-downloads from HuggingFace)
 # No manual download needed for mlx-lm
 ```
 
-#### VAD Model
+**VAD Model (Silero):**
 
 The Silero VAD model is used by `whisper-cpp-plus` for voice activity detection:
 
@@ -150,7 +162,7 @@ The Silero VAD model is used by `whisper-cpp-plus` for voice activity detection:
 wget https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx -O ./models/ggml-silero-vad.bin
 ```
 
-#### Optional: Kokoro TTS Models
+**Optional: Kokoro TTS Models:**
 
 ```bash
 # Download Kokoro ONNX model and voices
@@ -162,10 +174,20 @@ wget https://github.com/leloykun/kokoro/releases/download/v1.0/voices-v1.0.bin -
 
 ## Quick Start
 
-### 1. Clone the repository
+### Quick Install (recommended for end users)
 
 ```bash
-git clone https://github.com/voicebot/voicebot.git
+curl -fsSL https://github.com/danielvela/voicebot/releases/latest/download/install.sh | sh
+```
+
+The installer downloads all required models and sets up a working configuration.
+
+### For Developers
+
+#### 1. Clone the repository
+
+```bash
+git clone https://github.com/danielvela/voicebot.git
 cd voicebot
 ```
 
@@ -278,6 +300,18 @@ The output depends on the `TTS_PROVIDER` setting:
 
 ---
 
+### Private / Internal Install
+
+Internal teams with access to the private Gitea instance can use the Gitea installer instead:
+
+```bash
+curl -fsSL <gitea_url>/danielvela/voicebot/releases/latest/download/install-gitea.sh | sh
+```
+
+This installer is functionally identical to the GitHub installer but pulls from the internal repository.
+
+---
+
 ## Architecture
 
 Voicebot is intentionally **narrow in scope**: it owns the audio pipeline and conversational experience. Complex tasks are delegated to an external agent via stdin/stdout protocol.
@@ -353,7 +387,7 @@ Most configuration is done via environment variables (or `.env` file):
 | `LLM_COMMAND` | - | Full shell command to launch the LLM server. Required when `LLM_SELF_MANAGED=1`. |
 | `LLM_MODEL` | `local-model` | Model name or path |
 | `LLM_SYSTEM_PROMPT` | - | System prompt for the LLM |
-| `LLM_MAX_TOKENS` | `400` | Max response tokens |
+| `LLM_MAX_TOKENS` | `1024` | Max response tokens |
 | `LLM_TEMPERATURE` | `0.7` | Sampling temperature |
 | `LLM_CONTEXT_TOKENS` | `4096` | Context window size in tokens. Set to match your model's context length. |
 | `LLM_CONSOLIDATION_THRESHOLD_PCT` | `90` | Percentage of context window that triggers memory consolidation (see below). |
@@ -397,7 +431,7 @@ Most configuration is done via environment variables (or `.env` file):
 | **EYES (visual awareness)** | | |
 | `EYES_INTERVAL_SECS` | `0` (disabled) | Seconds between automatic screen captures. Set to e.g. `15` to enable. Requires `SECONDARY_LLM_URL` (vision model). Voicebot speaks when something important is detected on screen. |
 | **Web Search (SearXNG)** | | |
-| `SEARXNG_URL` | - (disabled) | Base URL of SearXNG instance (e.g. `http://tesla.local:8080`). Enables the `web_search` tool. |
+| `SEARXNG_URL` | - (disabled) | Base URL of your SearXNG instance (e.g. `http://localhost:8080`). Enables the `web_search` tool. |
 | `SEARXNG_SECRET` | (empty) | Bearer token for SearXNG API authentication. |
 | `WEB_SEARCH_ENABLED` | `1` | Enable/disable the web_search tool independently of SEARXNG_URL. Set to `0` to disable. |
 | **MCP (Model Context Protocol)** | | |

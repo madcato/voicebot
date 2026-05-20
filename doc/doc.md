@@ -216,7 +216,7 @@ This is a fire-and-read pattern — no JSON protocol, no shared state, no persis
 | `LLM_API_KEY` | _(empty)_ | Bearer token sent as `Authorization: Bearer <key>` on all `/v1/chat/completions` calls. Leave unset for local servers that require no auth |
 | `LLM_MODEL` | `local-model` | Model name sent in API requests |
 | `LLM_SYSTEM_PROMPT` | — | System prompt for the LLM |
-| `LLM_MAX_TOKENS` | `400` | Max generation tokens per response |
+| `LLM_MAX_TOKENS` | `1024` | Max generation tokens per response |
 | `LLM_TEMPERATURE` | `0.7` | LLM sampling temperature |
 | `LLM_CONTEXT_TOKENS` | `4096` | Approximate context window size in tokens |
 | `LLM_CONSOLIDATION_THRESHOLD_PCT` | `90` | Percentage of context window that triggers consolidation (default 90%) |
@@ -251,7 +251,7 @@ This is a fire-and-read pattern — no JSON protocol, no shared state, no persis
 | `EYES_INTERVAL_SECS` | `0` | Seconds between screen-capture checks for EYES (0 = disabled). Requires SECONDARY_LLM_URL. |
 | `SECONDARY_LLM_URL` | — | Base URL for secondary LLM (vision, summarization, profile extraction). Unset = disabled. |
 | `SECONDARY_LLM_MODEL` | — | Model name for secondary LLM requests |
-| `SECONDARY_LLM_MAX_TOKENS` | `512` | Max tokens for secondary LLM responses |
+| `SECONDARY_LLM_MAX_TOKENS` | `1024` | Max tokens for secondary LLM responses |
 | `SECONDARY_LLM_API_KEY` | _(empty)_ | Bearer token for secondary LLM API |
 | `SECONDARY_LLM_THINKING` | `0` | Enable Qwen3 thinking mode on secondary LLM (auto-strips thinking tags) |
 | `MCP_COMMAND` | — | Command to spawn MCP server subprocess (e.g. `bunx apple-mcp@latest`). Unset = MCP disabled. |

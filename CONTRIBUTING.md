@@ -45,7 +45,7 @@ Voicebot follows a simple code of conduct:
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/danielvela/voicebot.git
 cd voicebot
 
 # Set up your environment variables
@@ -417,7 +417,7 @@ When adding features:
 2. ✅ Code is formatted: `cargo fmt`
 3. ✅ No Clippy warnings: `cargo clippy --all-targets --all-features`
 4. ✅ Docs updated (README, inline docs if needed)
-5. ✅ Branch synced with main: `git pull origin main`
+5. ✅ Branch synced with master: `git pull origin master`
 
 ### PR Checklist
 
@@ -431,7 +431,7 @@ When adding features:
 
 1. Maintainers will test your changes locally
 2. May request modifications or ask clarifying questions
-3. Once approved, squash-and-merge into main
+3. Once approved, squash-and-merge into master
 4. Don't be discouraged by review feedback — it ensures quality!
 
 ---

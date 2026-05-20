@@ -20,10 +20,11 @@ VOICEBOT_HOME="${VOICEBOT_HOME:-$HOME/.voicebot}"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 VOICEBOT_VERSION="${VOICEBOT_VERSION:-}"   # empty = resolve from API
 
-# Model download URLs (same public sources as the GitHub installer)
-WHISPER_MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
-KOKORO_MODEL_URL="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
-KOKORO_VOICES_URL="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
+# Model download URLs (all overrideable via env vars)
+WHISPER_MODEL_URL="${WHISPER_MODEL_URL:-https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin}"
+KOKORO_MODEL_URL="${KOKORO_MODEL_URL:-https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx}"
+KOKORO_VOICES_URL="${KOKORO_VOICES_URL:-https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin}"
+VAD_MODEL_URL="${VAD_MODEL_URL:-https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx}"
 
 # ── Output helpers ────────────────────────────────────────────────────────────
 if [ -t 1 ]; then
@@ -230,6 +231,21 @@ install_kokoro_models() {
     fi
 }
 
+# ── Step 5.5: Silero VAD model ────────────────────────────────────────────────
+install_vad_model() {
+    step "Installing Silero VAD model"
+    local dest="$VOICEBOT_MODELS_DIR/ggml-silero-vad.bin"
+
+    if [ -f "$dest" ]; then
+        info "  Already present — skipping (delete to re-download)."
+        return
+    fi
+
+    warn "  Downloading Silero VAD model (~10 MB)..."
+    download "$VAD_MODEL_URL" "$dest" "Silero VAD"
+    info "  VAD model installed."
+}
+
 # ── Step 6: Default .env ──────────────────────────────────────────────────────
 create_default_env() {
     step "Writing default configuration"
@@ -298,6 +314,7 @@ export WHISPER_MODEL="\${WHISPER_MODEL:-\$VOICEBOT_HOME/models/ggml-large-v3-tur
 export DB_PATH="\${DB_PATH:-\$VOICEBOT_HOME/data/voicebot.db}"
 export KOKORO_MODEL="\${KOKORO_MODEL:-\$VOICEBOT_HOME/models/kokoro-v1.0.onnx}"
 export KOKORO_VOICES="\${KOKORO_VOICES:-\$VOICEBOT_HOME/models/voices-v1.0.bin}"
+export VAD_MODEL="\${VAD_MODEL:-\$VOICEBOT_HOME/models/ggml-silero-vad.bin}"
 export TTS_PROVIDER="\${TTS_PROVIDER:-$DEFAULT_TTS}"
 
 if [ -f "\$VOICEBOT_HOME/.env" ]; then
@@ -347,6 +364,7 @@ check_dependencies
 setup_directories
 install_binary
 install_whisper_model
+install_vad_model
 
 if [ "$OS" = "Linux" ]; then
     install_kokoro_models

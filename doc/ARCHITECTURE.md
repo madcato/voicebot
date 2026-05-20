@@ -356,7 +356,7 @@ All config is loaded from environment variables (`.env` file supported via `dote
 | `WHISPER_MODEL` | `models/ggml-large-v3-turbo.bin` | Path to GGML model |
 | `LLM_URL` | `http://localhost:8000` | OpenAI-compatible endpoint (mlx-lm: 8000; oMLX: 8001) |
 | `LLM_MODEL` | — | Model name sent in API requests |
-| `LLM_MAX_TOKENS` | `400` | Max tokens per response |
+| `LLM_MAX_TOKENS` | `1024` | Max tokens per response |
 | `LLM_TEMPERATURE` | `0.7` | Sampling temperature |
 | `LLM_SYSTEM_PROMPT` | — | System prompt text |
 | `LLM_CONTEXT_TOKENS` | `4096` | Triggers consolidation above 75% |

@@ -6,8 +6,8 @@ servers:
       vllm:
         port: 8005
         token: ""
-        models: []
-          # - Qwen3.6-27B-FP8
+        models: 
+          - Qwen3.6-27B
           # - gemma-4-31B-it-NVFP4
           # - gemma-4-31B-it
           # - Qwen3.6-35B-A3B-FP8
@@ -52,7 +52,7 @@ evaluator:
   runtime: "llama-server-nvidia"
   port: 8005
   token: ""
-  model: Qwen3.6-27B-FP8
+  model: Qwen3.6-27B
   # temperature: 0.0 — evaluator always runs at zero temperature for determinism
   temperature: 0.0
   # max_tokens: budget for the evaluator's JSON verdict per fixture

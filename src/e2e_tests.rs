@@ -31,6 +31,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use crate::agents::ProactiveEvent;
 use crate::analysis::ContextLens;
 use crate::audio::output::AudioOutput;
+use crate::config::Config;
 use crate::db::Database;
 use crate::llm::{LlmSession, OpenAIClient};
 use crate::pipeline::{llm_task, sen_task, tts_task, PipelineEvents, PipelineState};
@@ -364,7 +365,7 @@ async fn stt_transcribes_wav_file() {
     let model_path = std::env::var("WHISPER_MODEL")
         .unwrap_or_else(|_| "models/ggml-large-v3-turbo.bin".to_string());
     let vad_model = std::env::var("VAD_MODEL")
-        .unwrap_or_else(|_| "models/silero_vad.onnx".to_string());
+        .unwrap_or_else(|_| "models/ggml-silero-vad.bin".to_string());
 
     if !std::path::Path::new(&model_path).exists() {
         eprintln!("SKIP: Whisper model not found at {model_path}");
@@ -403,7 +404,7 @@ async fn full_pipeline_wav_to_db() {
     let model_path = std::env::var("WHISPER_MODEL")
         .unwrap_or_else(|_| "models/ggml-large-v3-turbo.bin".to_string());
     let vad_model = std::env::var("VAD_MODEL")
-        .unwrap_or_else(|_| "models/silero_vad.onnx".to_string());
+        .unwrap_or_else(|_| "models/ggml-silero-vad.bin".to_string());
     let wav_path = "tests/fixtures/es_long_intro.wav";
 
     if !std::path::Path::new(&model_path).exists() {
@@ -437,6 +438,33 @@ async fn full_pipeline_wav_to_db() {
     );
     println!("DB messages: {msgs:?}");
     println!("TTS sentences: {:?}", h.tts_sentences());
+}
+
+// ── VAD model path regression tests ─────────────────────────────────────────
+
+/// Verify the default VAD model path matches the canonical path.
+/// This prevents drift between Config defaults and documentation.
+/// The canonical VAD model path is `models/ggml-silero-vad.bin`.
+#[test]
+fn default_vad_model_path() {
+    let canonical = "models/ggml-silero-vad.bin";
+
+    // Structural check: verify the filename part is correct
+    let path = std::path::Path::new(canonical);
+    assert_eq!(
+        path.file_name().unwrap(),
+        "ggml-silero-vad.bin",
+        "canonical VAD model filename must be ggml-silero-vad.bin"
+    );
+
+    // Verify Config default when VAD_MODEL env var is unset
+    temp_env::with_var("VAD_MODEL", None::<&str>, || {
+        let config = Config::from_env().expect("Config::from_env() should succeed");
+        assert_eq!(
+            config.vad_model, canonical,
+            "Config default VAD model must match canonical path"
+        );
+    });
 }
 
 // ── WAV loading helper ────────────────────────────────────────────────────────

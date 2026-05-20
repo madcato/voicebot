@@ -276,7 +276,7 @@ impl Config {
             llm_api_key: env::var("LLM_API_KEY").unwrap_or_default(),
             llm_model: env::var("LLM_MODEL").unwrap_or_else(|_| "local-model".to_string()),
             llm_max_tokens: env::var("LLM_MAX_TOKENS")
-                .unwrap_or_else(|_| "200".to_string())
+                .unwrap_or_else(|_| "1024".to_string())
                 .parse()
                 .context("Invalid LLM_MAX_TOKENS")?,
             llm_system_prompt: env::var("LLM_SYSTEM_PROMPT").unwrap_or_else(|_| {
@@ -366,7 +366,7 @@ impl Config {
             secondary_llm_model: env::var("SECONDARY_LLM_MODEL")
                 .unwrap_or_else(|_| "local-model".to_string()),
             secondary_llm_max_tokens: env::var("SECONDARY_LLM_MAX_TOKENS")
-                .unwrap_or_else(|_| "512".to_string())
+                .unwrap_or_else(|_| "1024".to_string())
                 .parse()
                 .context("Invalid SECONDARY_LLM_MAX_TOKENS")?,
             secondary_llm_api_key: env::var("SECONDARY_LLM_API_KEY").unwrap_or_default(),

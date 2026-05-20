@@ -4,7 +4,7 @@ This document explains how to build and publish a new voicebot release so that
 users can install it with:
 
 ```sh
-curl -fsSL https://github.com/OWNER/REPO/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/danielvela/voicebot/releases/latest/download/install.sh | sh
 ```
 
 ---
@@ -36,11 +36,11 @@ bundled**. Users are expected to have them installed separately.
 
 ---
 
-## Automated release via GitHub Actions
+## GitHub Releases (Canonical / Public)
 
-The workflow at `.github/workflows/release.yml` runs automatically whenever you
-push a version tag.  It builds all four targets in parallel using native GitHub
-runners (no cross-compilation, no Docker).
+This is the primary release path.  The workflow at `.github/workflows/release.yml`
+runs automatically whenever you push a version tag.  It builds all four targets in
+parallel using native GitHub runners (no cross-compilation, no Docker).
 
 ### Step-by-step
 
@@ -77,7 +77,7 @@ runners (no cross-compilation, no Docker).
    progress.  Four jobs run in parallel (~10–15 min on GitHub's free runners).
 
 6. Once all jobs succeed, a GitHub Release is created automatically at
-   `https://github.com/OWNER/REPO/releases/tag/v1.2.0`.
+   `https://github.com/danielvela/voicebot/releases/tag/v1.2.0`.
 
 ### Pre-releases
 
@@ -87,7 +87,7 @@ automatically marked as **pre-release** on GitHub and are **not** served by the
 
 ```sh
 VOICEBOT_VERSION=v1.2.0-beta.1 \
-  curl -fsSL https://github.com/OWNER/REPO/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/danielvela/voicebot/releases/latest/download/install.sh | sh
 ```
 
 ---
@@ -225,22 +225,17 @@ VOICEBOT_HOME=/tmp/voicebot-test sh install.sh
 
 ## Updating the install.sh URL in documentation
 
-After you confirm the first release works, update `readme.md` to use the real
-GitHub URL (replace `OWNER/REPO` with the actual repository path):
-
-```sh
-sed -i 's|OWNER/REPO|yourname/voicebot|g' install.sh readme.md
-```
-
-Also update the `GITHUB_REPO` default at the top of `install.sh`.
+The `readme.md` and `install.sh` already use the real GitHub URL
+(`danielvela/voicebot`). No manual replacement is needed.
 
 ---
 
 ---
 
-## Publishing to Gitea (tesla.local)
+## Gitea Releases (Private / Secondary)
 
-The project has a second workflow and installer for the private Gitea instance.
+This section covers the private/secondary release path for the local Gitea
+instance at `tesla.local`.  Gitea is used for internal releases only.
 
 ### Gitea release workflow
 
@@ -323,8 +318,16 @@ VOICEBOT_VERSION=v1.2.0 \
 - [ ] Version bumped in `Cargo.toml`
 - [ ] `Cargo.lock` updated (`cargo build` or `cargo update`)
 - [ ] All tests pass: `cargo test`
+- [ ] Clippy clean: `cargo clippy --all-targets --no-deps` (no errors)
+- [ ] No stale placeholders: `grep -Rn 'OWNER/REPO\|github.com/voicebot/voicebot\|origin main\|merge into main' Cargo.toml install.sh readme.md doc/PUBLISHING.md CONTRIBUTING.md`
+- [ ] No old VAD path references: `grep -Rn 'models/silero_vad.onnx' src/e2e_tests.rs readme.md .env.example doc/`
+- [ ] VAD model URL in installers is correct (`VAD_MODEL_URL` defaults to k2-fsa/sherpa-onnx release)
+- [ ] All model URLs overrideable: `WHISPER_MODEL_URL`, `VAD_MODEL_URL`, `KOKORO_MODEL_URL`, `KOKORO_VOICES_URL`
+- [ ] Installer smoke test passes: `bash scripts/test-installers.sh`
 - [ ] `readme.md` updated for new features / config vars
 - [ ] `GITHUB_REPO` at the top of `install.sh` points to the real repo
+- [ ] CI workflow exists and is valid: `.github/workflows/ci.yml`
+- [ ] Release workflows exist: `.github/workflows/release.yml` and `.gitea/workflows/release.yml`
 - [ ] Annotated tag created: `git tag -a vX.Y.Z -m "..."`
 - [ ] Tag pushed to GitHub: `git push origin vX.Y.Z`
 - [ ] Tag pushed to Gitea: `git push gitea vX.Y.Z`

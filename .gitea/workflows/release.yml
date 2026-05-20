@@ -1,0 +1,216 @@
+name: Release
+
+# Trigger: push a version tag like v1.0.0 or v1.0.0-beta.1
+on:
+  push:
+    tags:
+      - 'v[0-9]*.*.*'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── macOS — one Apple Silicon runner builds both macOS targets ────────────
+  build-macos:
+    name: Build · ${{ matrix.target }}
+    runs-on: macos-latest      # Gitea act_runner label
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin   # native
+          - target: x86_64-apple-darwin    # cross-compiled via Apple universal SDK
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --bin voicebot --target ${{ matrix.target }} --features avspeech
+
+      - name: Package
+        run: |
+          BIN="target/${{ matrix.target }}/release/voicebot"
+          strip "$BIN"
+          tar -czf "voicebot-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" voicebot
+          shasum -a 256 "voicebot-${{ matrix.target }}.tar.gz" > "voicebot-${{ matrix.target }}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voicebot-${{ matrix.target }}
+          path: voicebot-${{ matrix.target }}.tar.gz*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── Linux x86_64 — native on ubuntu-latest ───────────────────────────────
+  build-linux-x86_64:
+    name: Build · x86_64-unknown-linux-gnu
+    runs-on: ubuntu-latest     # Gitea act_runner label
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev espeak-ng pkg-config build-essential libssl-dev cmake libclang-dev
+
+      - name: Build
+        run: cargo build --release --bin voicebot --target x86_64-unknown-linux-gnu --features kokoro
+
+      - name: Package
+        run: |
+          BIN="target/x86_64-unknown-linux-gnu/release/voicebot"
+          strip "$BIN" 2>/dev/null || true
+          tar -czf "voicebot-x86_64-unknown-linux-gnu.tar.gz" -C "target/x86_64-unknown-linux-gnu/release" voicebot
+          sha256sum "voicebot-x86_64-unknown-linux-gnu.tar.gz" > "voicebot-x86_64-unknown-linux-gnu.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voicebot-x86_64-unknown-linux-gnu
+          path: voicebot-x86_64-unknown-linux-gnu.tar.gz*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── Linux ARM64 — native on linux-arm64 runner ───────────────────────────
+  build-linux-arm64:
+    name: Build · aarch64-unknown-linux-gnu
+    runs-on: linux-arm64       # Gitea act_runner label (native aarch64 host)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev espeak-ng pkg-config build-essential libssl-dev cmake libclang-dev
+
+      - name: Build
+        run: cargo build --release --bin voicebot --target aarch64-unknown-linux-gnu --features kokoro
+
+      - name: Package
+        run: |
+          BIN="target/aarch64-unknown-linux-gnu/release/voicebot"
+          strip "$BIN" 2>/dev/null || true
+          tar -czf "voicebot-aarch64-unknown-linux-gnu.tar.gz" -C "target/aarch64-unknown-linux-gnu/release" voicebot
+          sha256sum "voicebot-aarch64-unknown-linux-gnu.tar.gz" > "voicebot-aarch64-unknown-linux-gnu.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voicebot-aarch64-unknown-linux-gnu
+          path: voicebot-aarch64-unknown-linux-gnu.tar.gz*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── Gitea Release ─────────────────────────────────────────────────────────
+  release:
+    name: Gitea Release
+    needs: [build-macos, build-linux-x86_64, build-linux-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh artifacts/
+
+      - name: Build release body
+        id: body
+        run: |
+          TAG="${{ github.ref_name }}"
+          {
+            echo 'body<<EOF'
+            echo "## Installation"
+            echo ""
+            echo '```sh'
+            echo "curl -fsSL http://tesla.local:3000/danielvela/voicebot/releases/download/latest/install-gitea.sh | sh"
+            echo '```'
+            echo ""
+            echo "Pin a specific version:"
+            echo '```sh'
+            echo "VOICEBOT_VERSION=${TAG} \\"
+            echo "  curl -fsSL http://tesla.local:3000/danielvela/voicebot/releases/download/latest/install-gitea.sh | sh"
+            echo '```'
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create Gitea Release
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          RELEASE_API="http://tesla.local:3000/api/v1/repos/danielvela/voicebot/releases"
+          TAG="${{ github.ref_name }}"
+
+          IS_PRERELEASE=false
+          if echo "$TAG" | grep -q '-'; then
+            IS_PRERELEASE=true
+          fi
+
+          # Collect SHASUMs from artifacts
+          SHASUMS=""
+          for f in artifacts/*.sha256; do
+            [ -f "$f" ] && SHASUMS="$SHASUMS$(cat "$f")\\n"
+          done
+
+          # Create the release
+          curl -s -X POST "$RELEASE_API" \
+            -H "Authorization: Bearer $GITEA_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg tag "$TAG" \
+              --arg title "Voicebot $TAG" \
+              --arg note "$SHASUMS" \
+              --argjson prerelease $IS_PRERELEASE \
+              '{tag_name: $tag, title: $title, note: $note, draft: false, prerelease: $prerelease}'
+            )"
+
+      - name: Upload release assets
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          REPO_API="http://tesla.local:3000/api/v1/repos/danielvela/voicebot"
+
+          # Find the release ID for this tag
+          RELEASES=$(curl -s "$REPO_API/releases" \
+            -H "Authorization: Bearer $GITEA_TOKEN")
+          RELEASE_ID=$(echo "$RELEASES" | jq -r ".[] | select(.tag_name == \"$TAG\") | .id")
+          echo "Release ID: $RELEASE_ID"
+
+          # Upload each asset
+          ASSETS="artifacts/*.tar.gz artifacts/*.sha256 install-gitea.sh"
+          for file in $ASSETS; do
+            [ -f "$file" ] || continue
+            echo "Uploading: $file"
+            curl -s -X POST "$REPO_API/releases/$RELEASE_ID/assets" \
+              -H "Authorization: Bearer $GITEA_TOKEN" \
+              -F "attachment=@$file" \
+              -o /dev/null
+          done
