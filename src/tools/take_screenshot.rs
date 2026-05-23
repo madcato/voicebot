@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use tracing::{info, warn};
 
 use crate::llm::OpenAIClient;
@@ -103,7 +103,10 @@ impl Tool for TakeScreenshotTool {
             Err(e) => return format!("Screenshot failed: {e}"),
         };
 
-        info!("take_screenshot: sending {} KB to vision model", png_bytes.len() / 1024);
+        info!(
+            "take_screenshot: sending {} KB to vision model",
+            png_bytes.len() / 1024
+        );
 
         self.describe_image(&png_bytes, &prompt).await
     }
@@ -150,7 +153,9 @@ mod tests {
             .await;
 
         let t = tool(&server.uri());
-        let result = t.describe_image(b"fake-png-bytes", "What do you see?").await;
+        let result = t
+            .describe_image(b"fake-png-bytes", "What do you see?")
+            .await;
         assert_eq!(result, "A terminal window showing Rust code.");
     }
 
@@ -166,7 +171,10 @@ mod tests {
             .await;
 
         let t = tool(&server.uri());
-        assert_eq!(t.describe_image(b"data", "describe").await, "Finder window.");
+        assert_eq!(
+            t.describe_image(b"data", "describe").await,
+            "Finder window."
+        );
     }
 
     #[tokio::test]

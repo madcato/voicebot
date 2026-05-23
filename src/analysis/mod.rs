@@ -98,7 +98,9 @@ pub struct AnalysisDispatcher {
 
 impl AnalysisDispatcher {
     pub fn new() -> Self {
-        Self { senders: Vec::new() }
+        Self {
+            senders: Vec::new(),
+        }
     }
 
     /// Register an audio analyzer and return the receiver end of its channel.

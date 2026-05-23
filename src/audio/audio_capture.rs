@@ -1,9 +1,9 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_channel::Sender;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, StreamConfig};
 use std::sync::Arc;
-use tracing::{error, info, warn, trace};
+use tracing::{error, info, trace, warn};
 
 /// Raw audio data from the microphone
 #[derive(Debug, Clone)]
@@ -64,9 +64,10 @@ impl AudioCapture {
     /// Parse a device name that may include an index suffix: "Name#N" → ("name", Some(N))
     fn parse_device_name(name: &str) -> (&str, Option<usize>) {
         if let Some(pos) = name.rfind('#')
-            && let Ok(idx) = name[pos + 1..].parse::<usize>() {
-                return (&name[..pos], Some(idx));
-            }
+            && let Ok(idx) = name[pos + 1..].parse::<usize>()
+        {
+            return (&name[..pos], Some(idx));
+        }
         (name, None)
     }
 
@@ -106,15 +107,17 @@ impl AudioCapture {
 
         if let Some(idx) = index {
             // Explicit index — honour it directly
-            return candidates
-                .into_iter()
-                .nth(idx)
-                .ok_or_else(|| anyhow!("Device index #{} out of range for '{}'", idx, name_filter));
+            return candidates.into_iter().nth(idx).ok_or_else(|| {
+                anyhow!("Device index #{} out of range for '{}'", idx, name_filter)
+            });
         }
 
         // No index — pick the first candidate whose default config succeeds
         for device in candidates {
-            let desc = device.description().map(|d| d.name().to_string()).unwrap_or_default();
+            let desc = device
+                .description()
+                .map(|d| d.name().to_string())
+                .unwrap_or_default();
             match device.default_input_config() {
                 Ok(cfg) => {
                     info!(

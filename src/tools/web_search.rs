@@ -57,7 +57,12 @@ impl WebSearchTool {
             .timeout(Duration::from_secs(SEARCH_TIMEOUT_SECS))
             .build()
             .expect("failed to build HTTP client for web_search");
-        Self { base_url, secret, client, synthesis_client: None }
+        Self {
+            base_url,
+            secret,
+            client,
+            synthesis_client: None,
+        }
     }
 
     /// Attach a secondary LLM client for result synthesis.
@@ -105,11 +110,7 @@ impl Tool for WebSearchTool {
         // Parse arguments.
         let (query, max_results) = match serde_json::from_str::<serde_json::Value>(args) {
             Ok(v) => {
-                let q = v["query"]
-                    .as_str()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
+                let q = v["query"].as_str().unwrap_or("").trim().to_string();
                 let n = v["max_results"]
                     .as_u64()
                     .map(|n| n as usize)
@@ -127,7 +128,9 @@ impl Tool for WebSearchTool {
 
         // Build request.
         let url = format!("{}/search", self.base_url.trim_end_matches('/'));
-        let mut req = self.client.get(&url)
+        let mut req = self
+            .client
+            .get(&url)
             .query(&[("q", &query), ("format", &"json".to_string())]);
 
         if !self.secret.is_empty() {
@@ -195,13 +198,7 @@ impl Tool for WebSearchTool {
 fn format_results(results: &[SearxResult], max: usize) -> String {
     let mut out = String::new();
     for (i, r) in results.iter().take(max).enumerate() {
-        let entry = format!(
-            "{}. {}\n   {}\n   {}\n\n",
-            i + 1,
-            r.title,
-            r.content,
-            r.url,
-        );
+        let entry = format!("{}. {}\n   {}\n   {}\n\n", i + 1, r.title, r.content, r.url,);
         if out.len() + entry.len() > MAX_OUTPUT_BYTES {
             break;
         }

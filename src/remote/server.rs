@@ -1,15 +1,15 @@
+use axum::Router;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
-use futures_util::stream::StreamExt;
 use futures_util::SinkExt;
+use futures_util::stream::StreamExt;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tracing::{error, info, warn};
 
 use crate::audio::audio_capture::AudioChunk;
@@ -33,10 +33,7 @@ pub struct RemoteState {
 }
 
 /// Start the WebSocket server. Returns a JoinHandle for the server task.
-pub async fn start_server(
-    port: u16,
-    state: Arc<RemoteState>,
-) -> anyhow::Result<()> {
+pub async fn start_server(port: u16, state: Arc<RemoteState>) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/ws", get(ws_upgrade))
         .with_state(state);
@@ -56,7 +53,10 @@ async fn ws_upgrade(
 ) -> impl IntoResponse {
     // Only allow one connection at a time.
     if state.connected.load(Ordering::SeqCst) {
-        return (StatusCode::CONFLICT, "Another remote client is already connected")
+        return (
+            StatusCode::CONFLICT,
+            "Another remote client is already connected",
+        )
             .into_response();
     }
 
@@ -109,7 +109,6 @@ async fn handle_connection(socket: WebSocket, state: Arc<RemoteState>) {
 
     // Task: read WS messages, fan out binary vs text.
     let barge_in_tx = state.barge_in_tx.clone();
-    let play_cancel = Arc::clone(&state.play_cancel);
     let ws_write = Arc::new(tokio::sync::Mutex::new(ws_write));
     let ws_write_ctrl = Arc::clone(&ws_write);
 
@@ -130,25 +129,21 @@ async fn handle_connection(socket: WebSocket, state: Arc<RemoteState>) {
                         warn!(target: "remote", "Binary channel full, dropping frame");
                     }
                 }
-                Message::Text(text) => {
-                    match serde_json::from_str::<ClientMessage>(&text) {
-                        Ok(ClientMessage::SessionStart { sample_rate: _ }) => {
-                            info!(target: "remote", "Session started");
-                            let ready =
-                                serde_json::to_string(&ServerMessage::SessionReady).unwrap();
-                            let mut tx = ws_write_ctrl.lock().await;
-                            let _ = tx.send(Message::Text(ready.into())).await;
-                        }
-                        Ok(ClientMessage::BargeIn) => {
-                            info!(target: "remote", "Barge-in from remote client");
-                            play_cancel.store(true, Ordering::SeqCst);
-                            let _ = barge_in_tx.send(0);
-                        }
-                        Err(e) => {
-                            warn!(target: "remote", "Unknown control message: {e}");
-                        }
+                Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
+                    Ok(ClientMessage::SessionStart { sample_rate: _ }) => {
+                        info!(target: "remote", "Session started");
+                        let ready = serde_json::to_string(&ServerMessage::SessionReady).unwrap();
+                        let mut tx = ws_write_ctrl.lock().await;
+                        let _ = tx.send(Message::Text(ready.into())).await;
                     }
-                }
+                    Ok(ClientMessage::BargeIn) => {
+                        info!(target: "remote", "Barge-in from remote client");
+                        let _ = barge_in_tx.send(0);
+                    }
+                    Err(e) => {
+                        warn!(target: "remote", "Unknown control message: {e}");
+                    }
+                },
                 Message::Close(_) => {
                     info!(target: "remote", "WS close frame received");
                     break;
@@ -221,7 +216,11 @@ async fn handle_connection(socket: WebSocket, state: Arc<RemoteState>) {
                     break;
                 }
                 let bytes = f32_to_i16le(chunk);
-                if tx.send(Message::Binary(bytes.into_iter().collect())).await.is_err() {
+                if tx
+                    .send(Message::Binary(bytes.into_iter().collect()))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -261,21 +260,12 @@ fn f32_to_i16le(samples: &[f32]) -> Vec<u8> {
     bytes
 }
 
-fn resample_mono_simple(
-    samples: &[f32],
-    from_rate: u32,
-    to_rate: u32,
-) -> anyhow::Result<Vec<f32>> {
+fn resample_mono_simple(samples: &[f32], from_rate: u32, to_rate: u32) -> anyhow::Result<Vec<f32>> {
     use rubato::{FftFixedIn, Resampler};
 
     let chunk_size = 1024usize;
-    let mut resampler = FftFixedIn::<f32>::new(
-        from_rate as usize,
-        to_rate as usize,
-        chunk_size,
-        2,
-        1,
-    )?;
+    let mut resampler =
+        FftFixedIn::<f32>::new(from_rate as usize, to_rate as usize, chunk_size, 2, 1)?;
 
     let mut output = Vec::new();
     let mut pos = 0;
@@ -293,8 +283,7 @@ fn resample_mono_simple(
         let input = vec![tail];
         let result = resampler.process(&input, None)?;
         let remaining = samples.len() - pos;
-        let expected =
-            (remaining as f64 * to_rate as f64 / from_rate as f64).ceil() as usize;
+        let expected = (remaining as f64 * to_rate as f64 / from_rate as f64).ceil() as usize;
         let take = expected.min(result[0].len());
         output.extend_from_slice(&result[0][..take]);
     }

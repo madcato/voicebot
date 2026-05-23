@@ -29,7 +29,12 @@ impl McpToolProxy {
         parameters: Value,
         client: Arc<McpClient>,
     ) -> Self {
-        Self { name, description, parameters, client }
+        Self {
+            name,
+            description,
+            parameters,
+            client,
+        }
     }
 }
 
@@ -53,7 +58,8 @@ impl Tool for McpToolProxy {
     }
 
     async fn run(&self, args: &str) -> String {
-        let arguments: Value = serde_json::from_str(args).unwrap_or(Value::Object(Default::default()));
+        let arguments: Value =
+            serde_json::from_str(args).unwrap_or(Value::Object(Default::default()));
         match self.client.call_tool(&self.name, arguments).await {
             Ok(text) => text,
             Err(e) => {

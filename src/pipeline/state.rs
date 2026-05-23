@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::{Notify, broadcast};
 
 /// Signals and events for inter-task communication.
 pub struct PipelineEvents {

@@ -89,9 +89,10 @@ impl Tool for ReadFileTool {
 #[allow(dead_code)]
 fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/")
-        && let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{rest}");
-        }
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return format!("{home}/{rest}");
+    }
     path.to_string()
 }
 
@@ -160,7 +161,10 @@ mod tests {
         let result = ReadFileTool
             .run(&format!(r#"{{"path": "{}"}}"#, path.display()))
             .await;
-        assert!(result.contains("truncated"), "should mention truncation: {result:?}");
+        assert!(
+            result.contains("truncated"),
+            "should mention truncation: {result:?}"
+        );
         assert!(result.len() <= MAX_BYTES + 200); // truncated + notice
     }
 

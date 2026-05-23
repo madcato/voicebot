@@ -2,8 +2,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
-use crate::audio::speaker::{SpeakerVerdict, SpeakerVerifier};
 use super::{ContextEntry, ContextLens};
+use crate::audio::speaker::{SpeakerVerdict, SpeakerVerifier};
 
 /// How long an identity entry stays fresh in the ContextLens.
 const IDENTITY_TTL: Duration = Duration::from_secs(120);
@@ -46,7 +46,11 @@ impl IdentityAnalyzer {
                 };
                 (main, label.clone(), 1.0_f32, value)
             }
-            SpeakerVerdict::Known { id, label, similarity } => {
+            SpeakerVerdict::Known {
+                id,
+                label,
+                similarity,
+            } => {
                 let main = *id == 0;
                 let value = format!("{label} (similarity={similarity:.2})");
                 (main, label.clone(), *similarity, value)
@@ -72,6 +76,9 @@ impl IdentityAnalyzer {
         };
         self.lens.lock().unwrap().upsert(entry);
 
-        IdentityResult { is_main_speaker, speaker_label }
+        IdentityResult {
+            is_main_speaker,
+            speaker_label,
+        }
     }
 }

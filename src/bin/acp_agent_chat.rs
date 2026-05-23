@@ -7,11 +7,11 @@
 //! Run: `cargo run --bin acp_agent_chat`
 
 use std::io::{self, Write as _};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use anyhow::Result;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tracing::debug;
 use tracing_subscriber::EnvFilter;
 
@@ -46,9 +46,7 @@ async fn main() -> Result<()> {
 
     let (mut writer, mut rx) = AcpWriter::spawn(acp_command).await?;
 
-    let cwd = std::env::current_dir()?
-        .to_string_lossy()
-        .to_string();
+    let cwd = std::env::current_dir()?.to_string_lossy().to_string();
 
     let session_id = writer.initialize(&mut rx, &cwd).await?;
     eprintln!("Session initialized: {session_id}\n");
@@ -123,7 +121,11 @@ async fn main() -> Result<()> {
                     let uptime = start_time.elapsed();
                     println!("Session ID: {current_session_id}");
                     println!("Messages:   {message_count}");
-                    println!("Uptime:     {}m {}s", uptime.as_secs() / 60, uptime.as_secs() % 60);
+                    println!(
+                        "Uptime:     {}m {}s",
+                        uptime.as_secs() / 60,
+                        uptime.as_secs() % 60
+                    );
                     let w = writer.lock().await;
                     let verbose = w.verbose.load(Ordering::Relaxed);
                     println!("Verbose:    {}", if verbose { "ON" } else { "OFF" });
@@ -214,26 +216,24 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                "/permissions" => {
-                    match arg {
-                        "auto" => {
-                            permission_mode = PermissionMode::Auto;
-                            println!("Permission mode: Auto (allow all)");
-                        }
-                        "ask" => {
-                            permission_mode = PermissionMode::Ask;
-                            println!("Permission mode: Ask (prompt before responding)");
-                        }
-                        "deny" => {
-                            permission_mode = PermissionMode::Deny;
-                            println!("Permission mode: Deny (reject all)");
-                        }
-                        _ => {
-                            println!("Usage: /permissions <auto|ask|deny>");
-                            println!("Current: {:?}", permission_mode);
-                        }
+                "/permissions" => match arg {
+                    "auto" => {
+                        permission_mode = PermissionMode::Auto;
+                        println!("Permission mode: Auto (allow all)");
                     }
-                }
+                    "ask" => {
+                        permission_mode = PermissionMode::Ask;
+                        println!("Permission mode: Ask (prompt before responding)");
+                    }
+                    "deny" => {
+                        permission_mode = PermissionMode::Deny;
+                        println!("Permission mode: Deny (reject all)");
+                    }
+                    _ => {
+                        println!("Usage: /permissions <auto|ask|deny>");
+                        println!("Current: {:?}", permission_mode);
+                    }
+                },
 
                 "/raw" => {
                     if arg.is_empty() {
@@ -304,10 +304,7 @@ fn print_help() {
 }
 
 /// Wait for a response to a specific request ID and return the raw result.
-async fn wait_for_response(
-    rx: &mut mpsc::Receiver<JsonRpcMessage>,
-    request_id: u64,
-) -> String {
+async fn wait_for_response(rx: &mut mpsc::Receiver<JsonRpcMessage>, request_id: u64) -> String {
     loop {
         match rx.recv().await {
             Some(JsonRpcMessage::Response { id, result, error }) if id == request_id => {
@@ -427,9 +424,7 @@ async fn collect_response(
                 if method == "session/request_permission" =>
             {
                 let params = params.unwrap_or_default();
-                let tool_name = params["toolCall"]["name"]
-                    .as_str()
-                    .unwrap_or("unknown");
+                let tool_name = params["toolCall"]["name"].as_str().unwrap_or("unknown");
 
                 let option_id = match permission_mode {
                     PermissionMode::Auto => {
@@ -507,22 +502,20 @@ async fn collect_response(
 
 /// Find the "allow" option in a permission request's options array.
 fn find_allow_option(params: &serde_json::Value) -> Option<String> {
-    params["options"]
-        .as_array()
-        .and_then(|arr| {
-            arr.iter()
-                .find_map(|o| {
-                    let oid = o["optionId"].as_str()?;
-                    if oid == "allow" || o["kind"].as_str() == Some("allow") {
-                        Some(oid.to_string())
-                    } else {
-                        None
-                    }
-                })
-                .or_else(|| {
-                    arr.first()
-                        .and_then(|o| o["optionId"].as_str())
-                        .map(String::from)
-                })
-        })
+    params["options"].as_array().and_then(|arr| {
+        arr.iter()
+            .find_map(|o| {
+                let oid = o["optionId"].as_str()?;
+                if oid == "allow" || o["kind"].as_str() == Some("allow") {
+                    Some(oid.to_string())
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                arr.first()
+                    .and_then(|o| o["optionId"].as_str())
+                    .map(String::from)
+            })
+    })
 }

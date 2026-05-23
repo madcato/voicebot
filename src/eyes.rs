@@ -11,7 +11,7 @@
 /// When `warn_user` is true, an `AgentResult` proactive event is pushed so
 /// the main assistant LLM reformulates the message in Jarvis's voice before
 /// speaking it to the user.
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -78,7 +78,11 @@ impl EyesDaemon {
             let b64 = B64.encode(&png_bytes);
             let data_url = format!("data:image/png;base64,{b64}");
 
-            let raw = match self.vision_client.complete_multimodal(&data_url, EYES_PROMPT).await {
+            let raw = match self
+                .vision_client
+                .complete_multimodal(&data_url, EYES_PROMPT)
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => {
                     warn!(target: "eyes", "Vision LLM call failed: {}", e);

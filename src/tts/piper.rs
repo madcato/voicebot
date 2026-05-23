@@ -63,7 +63,11 @@ impl PiperTts {
             piper_bin
         );
 
-        Ok(Self { model_onnx, sample_rate, piper_bin })
+        Ok(Self {
+            model_onnx,
+            sample_rate,
+            piper_bin,
+        })
     }
 
     fn read_sample_rate(config_path: &Path) -> Result<u32> {

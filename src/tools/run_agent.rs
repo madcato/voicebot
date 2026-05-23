@@ -6,7 +6,7 @@ use dashmap::DashMap;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -89,7 +89,7 @@ async fn call_agent(command: String, query: String) -> String {
 /// Strip structural lines Hermes emits even in quiet mode:
 ///   - Box borders: lines whose trimmed content starts with ╭, ╰, or │
 ///   - Session trailer: lines starting with "session_id:"
-/// 
+///
 /// Everything else is kept; leading/trailing whitespace is removed.
 fn strip_hermes_cli_noise(raw: &str) -> String {
     let lines: Vec<&str> = raw.lines().collect();
@@ -98,10 +98,7 @@ fn strip_hermes_cli_noise(raw: &str) -> String {
         .iter()
         .position(|l| {
             let t = l.trim();
-            !t.is_empty()
-                && !t.starts_with('╭')
-                && !t.starts_with('╰')
-                && !t.starts_with('│')
+            !t.is_empty() && !t.starts_with('╭') && !t.starts_with('╰') && !t.starts_with('│')
         })
         .unwrap_or(0);
 
@@ -192,11 +189,7 @@ fn parse_jsonrpc(v: &Value) -> Option<JsonRpcMessage> {
 /// Ask the secondary LLM to summarize a raw agent result into a concise,
 /// voice-ready response. Falls back to `raw` if synthesis fails or is not
 /// configured.
-async fn synthesize_agent_result(
-    task: &str,
-    raw: String,
-    client: Option<&OpenAIClient>,
-) -> String {
+async fn synthesize_agent_result(task: &str, raw: String, client: Option<&OpenAIClient>) -> String {
     let Some(client) = client else { return raw };
     if raw.is_empty() || raw.starts_with("Agent error:") || raw.starts_with("ACP") {
         return raw;
@@ -284,7 +277,8 @@ impl RunAgentTool {
     /// Report whether the ACP agent is currently busy.
     async fn status(&self) -> String {
         // Clone data to avoid holding read lock
-        let entries: Vec<(String, std::time::Instant)> = self.task_map
+        let entries: Vec<(String, std::time::Instant)> = self
+            .task_map
             .iter()
             .map(|e| (e.key().clone(), e.value().created_at))
             .collect();
@@ -319,11 +313,17 @@ impl RunAgentTool {
             info!("RunAgentTool(cli): task complete ({} chars)", raw.len());
             let result = synthesize_agent_result(&task, raw, synthesis_client.as_deref()).await;
             if proactive_tx
-                .send(ProactiveEvent::AgentResult { task, result, tool_call_id: None })
+                .send(ProactiveEvent::AgentResult {
+                    task,
+                    result,
+                    tool_call_id: None,
+                })
                 .await
                 .is_err()
             {
-                warn!("RunAgentTool(cli): failed to deliver agent result: main loop channel closed");
+                warn!(
+                    "RunAgentTool(cli): failed to deliver agent result: main loop channel closed"
+                );
             }
         });
 
@@ -416,7 +416,8 @@ impl RunAgentTool {
             task_map.insert(task_id.clone(), active);
 
             // ── Collect responses ─────────────────────────────────────────────
-            let acp_writer_for_collect: Arc<Mutex<Option<AcpWriter>>> = Arc::new(Mutex::new(Some(writer)));
+            let acp_writer_for_collect: Arc<Mutex<Option<AcpWriter>>> =
+                Arc::new(Mutex::new(Some(writer)));
 
             let result = collect_acp_response(
                 Arc::clone(&acp_writer_for_collect),
@@ -444,17 +445,27 @@ impl RunAgentTool {
             task_map.remove(&task_id);
 
             info!(target: "acp", "Agent task complete [{}] — sending result ({} chars)", task_id, result.len());
-            let final_result = synthesize_agent_result(&task_c, result, synthesis_client.as_deref()).await;
+            let final_result =
+                synthesize_agent_result(&task_c, result, synthesis_client.as_deref()).await;
             if proactive_tx
-                .send(ProactiveEvent::AgentResult { task: task_c, result: final_result, tool_call_id: None })
+                .send(ProactiveEvent::AgentResult {
+                    task: task_c,
+                    result: final_result,
+                    tool_call_id: None,
+                })
                 .await
                 .is_err()
             {
-                warn!("RunAgentTool(acp): failed to deliver agent result: main loop channel closed");
+                warn!(
+                    "RunAgentTool(acp): failed to deliver agent result: main loop channel closed"
+                );
             }
         });
 
-        format!("[Tarea ACP delegada al agente ({}). El resultado llegará en breve.]", task_id_return)
+        format!(
+            "[Tarea ACP delegada al agente ({}). El resultado llegará en breve.]",
+            task_id_return
+        )
     }
 }
 
@@ -570,7 +581,9 @@ impl AcpWriter {
     /// not be shared (single-consumer design).
     pub async fn spawn(command: &str) -> anyhow::Result<(Self, mpsc::Receiver<JsonRpcMessage>)> {
         let parts: Vec<&str> = command.split_whitespace().collect();
-        let program = parts.first().copied()
+        let program = parts
+            .first()
+            .copied()
             .ok_or_else(|| anyhow::anyhow!("ACP: AGENT_ACP_COMMAND is empty"))?;
         let args = &parts[1..];
 
@@ -589,9 +602,13 @@ impl AcpWriter {
             .spawn()
             .map_err(|e| anyhow::anyhow!("ACP: failed to spawn '{}': {}", command, e))?;
 
-        let stdin = child.stdin.take()
+        let stdin = child
+            .stdin
+            .take()
             .ok_or_else(|| anyhow::anyhow!("ACP: no stdin handle"))?;
-        let stdout = child.stdout.take()
+        let stdout = child
+            .stdout
+            .take()
             .ok_or_else(|| anyhow::anyhow!("ACP: no stdout handle"))?;
 
         let (tx, rx) = mpsc::channel::<JsonRpcMessage>(64);
@@ -626,7 +643,16 @@ impl AcpWriter {
             debug!(target: "acp", "ACP reader task ended");
         });
 
-        Ok((Self { session_id: None, stdin, child, next_id: 0, verbose }, rx))
+        Ok((
+            Self {
+                session_id: None,
+                stdin,
+                child,
+                next_id: 0,
+                verbose,
+            },
+            rx,
+        ))
     }
 
     /// Write a raw JSON value as a newline-delimited line to the process stdin.
@@ -675,11 +701,16 @@ impl AcpWriter {
         cwd: &str,
     ) -> anyhow::Result<String> {
         // ── Step 1: initialize ───────────────────────────────────────────────
-        let init_id = self.send_request("initialize", serde_json::json!({
-            "protocolVersion": 1,
-            "clientCapabilities": {},
-            "clientInfo": {"name": "voicebot", "version": "0.1.0"}
-        })).await?;
+        let init_id = self
+            .send_request(
+                "initialize",
+                serde_json::json!({
+                    "protocolVersion": 1,
+                    "clientCapabilities": {},
+                    "clientInfo": {"name": "voicebot", "version": "0.1.0"}
+                }),
+            )
+            .await?;
 
         // Wait for initialize response
         loop {
@@ -697,22 +728,31 @@ impl AcpWriter {
         }
 
         // ── Step 2: session/new ──────────────────────────────────────────────
-        let session_id = self.send_request("session/new", serde_json::json!({
-            "cwd": cwd,
-            "mcpServers": []
-        })).await?;
+        let session_id = self
+            .send_request(
+                "session/new",
+                serde_json::json!({
+                    "cwd": cwd,
+                    "mcpServers": []
+                }),
+            )
+            .await?;
 
         // Wait for session/new response with sessionId
         let sid = loop {
             match rx.recv().await {
-                Some(JsonRpcMessage::Response { id, result, error, .. }) if id == session_id => {
+                Some(JsonRpcMessage::Response {
+                    id, result, error, ..
+                }) if id == session_id => {
                     if let Some(err) = error {
                         anyhow::bail!("ACP session/new error: {}", err);
                     }
                     let result = result.unwrap_or_default();
                     let sid = result["sessionId"]
                         .as_str()
-                        .ok_or_else(|| anyhow::anyhow!("ACP session/new response missing sessionId"))?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("ACP session/new response missing sessionId")
+                        })?
                         .to_string();
                     break sid;
                 }
@@ -728,17 +768,25 @@ impl AcpWriter {
 
     /// Send a session/prompt request and return the request id.
     pub async fn send_prompt(&mut self, session_id: &str, text: &str) -> anyhow::Result<u64> {
-        self.send_request("session/prompt", serde_json::json!({
-            "sessionId": session_id,
-            "prompt": [{"type": "text", "text": text}]
-        })).await
+        self.send_request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": text}]
+            }),
+        )
+        .await
     }
 
     /// Send a session/cancel notification for a running prompt request.
     pub async fn send_cancel(&mut self, request_id: u64) -> anyhow::Result<()> {
-        self.send_notification("session/cancel", serde_json::json!({
-            "requestId": request_id
-        })).await
+        self.send_notification(
+            "session/cancel",
+            serde_json::json!({
+                "requestId": request_id
+            }),
+        )
+        .await
     }
 
     /// Open a live Terminal window that polls Hermes' SQLite database for the
@@ -758,14 +806,12 @@ impl AcpWriter {
         };
 
         // Locate Hermes state.db via HERMES_HOME
-        let hermes_home = std::env::var("HERMES_HOME")
-            .ok()
-            .unwrap_or_else(|| {
-                std::env::var("HOME")
-                    .ok()
-                    .map(|h| format!("{h}/.hermes"))
-                    .unwrap_or_default()
-            });
+        let hermes_home = std::env::var("HERMES_HOME").ok().unwrap_or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| format!("{h}/.hermes"))
+                .unwrap_or_default()
+        });
         let db_path = format!("{}/state.db", hermes_home);
         if !std::path::Path::new(&db_path).exists() {
             warn!(target: "agent", "Hermes state.db not found at {db_path}; cannot open session viewer");
@@ -908,45 +954,69 @@ echo "Session viewer closed."
     /// Create a new session (without re-initializing the process).
     #[allow(dead_code)]
     pub async fn send_new_session(&mut self, cwd: &str) -> anyhow::Result<u64> {
-        self.send_request("session/new", serde_json::json!({
-            "cwd": cwd,
-            "mcpServers": []
-        })).await
+        self.send_request(
+            "session/new",
+            serde_json::json!({
+                "cwd": cwd,
+                "mcpServers": []
+            }),
+        )
+        .await
     }
 
     /// Fork an existing session.
     #[allow(dead_code)]
     pub async fn send_fork_session(&mut self, session_id: &str, cwd: &str) -> anyhow::Result<u64> {
-        self.send_request("session/fork", serde_json::json!({
-            "sessionId": session_id,
-            "cwd": cwd
-        })).await
+        self.send_request(
+            "session/fork",
+            serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd
+            }),
+        )
+        .await
     }
 
     /// Load a previous session by ID.
     #[allow(dead_code)]
     pub async fn send_load_session(&mut self, session_id: &str, cwd: &str) -> anyhow::Result<u64> {
-        self.send_request("session/load", serde_json::json!({
-            "sessionId": session_id,
-            "cwd": cwd
-        })).await
+        self.send_request(
+            "session/load",
+            serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd
+            }),
+        )
+        .await
     }
 
     /// Resume a suspended session.
     #[allow(dead_code)]
-    pub async fn send_resume_session(&mut self, session_id: &str, cwd: &str) -> anyhow::Result<u64> {
-        self.send_request("session/resume", serde_json::json!({
-            "sessionId": session_id,
-            "cwd": cwd
-        })).await
+    pub async fn send_resume_session(
+        &mut self,
+        session_id: &str,
+        cwd: &str,
+    ) -> anyhow::Result<u64> {
+        self.send_request(
+            "session/resume",
+            serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd
+            }),
+        )
+        .await
     }
 
     /// List active sessions.
     #[allow(dead_code)]
     pub async fn send_list_sessions(&mut self, cwd: &str) -> anyhow::Result<u64> {
-        self.send_request("session/list", serde_json::json!({
-            "cwd": cwd
-        })).await
+        self.send_request(
+            "session/list",
+            serde_json::json!({
+                "cwd": cwd
+            }),
+        )
+        .await
     }
 
     /// Kill the subprocess.
@@ -1081,7 +1151,11 @@ async fn collect_acp_response(
                     return format!("[Progreso: {}]", progress.join("; "));
                 }
                 if !accumulated_text.is_empty() && !progress.is_empty() {
-                    return format!("{}\n\n[Progreso: {}]", accumulated_text.trim(), progress.join("; "));
+                    return format!(
+                        "{}\n\n[Progreso: {}]",
+                        accumulated_text.trim(),
+                        progress.join("; ")
+                    );
                 }
                 if accumulated_text.is_empty() {
                     return format!("[Agente terminó con stopReason={stop_reason}]");
@@ -1121,7 +1195,9 @@ async fn collect_acp_response(
                 }
             }
             // ── session/request_permission request → auto-allow or ask user ─
-            Some(JsonRpcMessage::Request { id, method, params }) if method == "session/request_permission" => {
+            Some(JsonRpcMessage::Request { id, method, params })
+                if method == "session/request_permission" =>
+            {
                 let params = params.unwrap_or_default();
 
                 // Extract permission options for the user
@@ -1152,18 +1228,14 @@ async fn collect_acp_response(
                     })
                     .await;
 
-                let outcome_option_id = match tokio::time::timeout(
-                    std::time::Duration::from_secs(60),
-                    resp_rx,
-                )
-                .await
-                {
-                    Ok(Ok(ans)) => ans,
-                    _ => {
-                        warn!(target: "acp", "Permission timeout — defaulting to cancelled");
-                        String::new() // will send cancelled outcome
-                    }
-                };
+                let outcome_option_id =
+                    match tokio::time::timeout(std::time::Duration::from_secs(60), resp_rx).await {
+                        Ok(Ok(ans)) => ans,
+                        _ => {
+                            warn!(target: "acp", "Permission timeout — defaulting to cancelled");
+                            String::new() // will send cancelled outcome
+                        }
+                    };
 
                 // Build the response: AllowedOutcome or DeniedOutcome
                 let result = if outcome_option_id.is_empty() || outcome_option_id == "cancelled" {
@@ -1219,24 +1291,18 @@ mod tests {
         }
     }
 
-    fn cli_tool(command: &str, history: Arc<RwLock<String>>, tx: mpsc::Sender<ProactiveEvent>) -> RunAgentTool {
+    fn cli_tool(
+        command: &str,
+        history: Arc<RwLock<String>>,
+        tx: mpsc::Sender<ProactiveEvent>,
+    ) -> RunAgentTool {
         let config = test_agent_config("hermes", "cli", Some(command.to_string()));
-        RunAgentTool::new(
-            config,
-            Arc::new(DashMap::new()),
-            history,
-            tx,
-        )
+        RunAgentTool::new(config, Arc::new(DashMap::new()), history, tx)
     }
 
     fn acp_tool(tx: mpsc::Sender<ProactiveEvent>) -> RunAgentTool {
         let config = test_agent_config("hermes", "acp", None);
-        RunAgentTool::new(
-            config,
-            Arc::new(DashMap::new()),
-            empty_history(),
-            tx,
-        )
+        RunAgentTool::new(config, Arc::new(DashMap::new()), empty_history(), tx)
     }
 
     // ── strip_hermes_cli_noise ────────────────────────────────────────────────
@@ -1262,7 +1328,10 @@ mod tests {
     #[test]
     fn strip_noise_multiline_response() {
         let input = "╭─ Hermes ─╮\nPrimera línea.\nSegunda línea.\n\nsession_id: xyz\n";
-        assert_eq!(strip_hermes_cli_noise(input), "Primera línea.\nSegunda línea.");
+        assert_eq!(
+            strip_hermes_cli_noise(input),
+            "Primera línea.\nSegunda línea."
+        );
     }
 
     // ── format_history ────────────────────────────────────────────────────────
@@ -1295,7 +1364,10 @@ mod tests {
             serde_json::json!({"role": "assistant", "content": "hola"}),
         ];
         let result = format_history(&msgs);
-        assert!(!result.contains("Eres Jarvis"), "system message should be excluded");
+        assert!(
+            !result.contains("Eres Jarvis"),
+            "system message should be excluded"
+        );
         assert!(result.contains("[User]: hola"));
     }
 
@@ -1307,7 +1379,10 @@ mod tests {
             serde_json::json!({"role": "assistant", "content": "Son las 14:30"}),
         ];
         let result = format_history(&msgs);
-        assert!(!result.contains("14:30\n"), "bare tool result should be excluded");
+        assert!(
+            !result.contains("14:30\n"),
+            "bare tool result should be excluded"
+        );
         assert!(result.contains("[Jarvis]: Son las 14:30"));
     }
 
@@ -1322,7 +1397,10 @@ mod tests {
             serde_json::json!({"role": "assistant", "content": "Modo ambiente activado."}),
         ];
         let result = format_history(&msgs);
-        assert!(!result.contains("Ambient mode activated."), "tool result should be excluded");
+        assert!(
+            !result.contains("Ambient mode activated."),
+            "tool result should be excluded"
+        );
         assert!(result.contains("[Jarvis]: Modo ambiente activado."));
         assert!(result.contains("[User]: Activa el modo ambiente"));
     }
@@ -1335,7 +1413,8 @@ mod tests {
             serde_json::json!({"role": "user", "content": "segunda"}),
             serde_json::json!({"role": "assistant", "content": "respuesta dos"}),
         ];
-        let expected = "[User]: primera\n[Jarvis]: respuesta uno\n[User]: segunda\n[Jarvis]: respuesta dos";
+        let expected =
+            "[User]: primera\n[Jarvis]: respuesta uno\n[User]: segunda\n[Jarvis]: respuesta dos";
         assert_eq!(format_history(&msgs), expected);
     }
 
@@ -1365,8 +1444,14 @@ mod tests {
         let tool = cli_tool("sleep 2", empty_history(), tx);
         let start = std::time::Instant::now();
         let result = tool.run(r#"{"task": "slow task"}"#).await;
-        assert!(start.elapsed().as_millis() < 200, "should return immediately");
-        assert!(!result.is_empty(), "should return acknowledgment: {result:?}");
+        assert!(
+            start.elapsed().as_millis() < 200,
+            "should return immediately"
+        );
+        assert!(
+            !result.is_empty(),
+            "should return acknowledgment: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -1461,7 +1546,10 @@ mod tests {
         let tool = RunAgentTool::new(config, task_map, empty_history(), tx);
         let result = tool.run(r#"{"task": "cancel"}"#).await;
         assert!(result.contains("cancelada"), "got: {result:?}");
-        assert!(cancel_rx.try_recv().is_ok(), "cancel channel should have fired");
+        assert!(
+            cancel_rx.try_recv().is_ok(),
+            "cancel channel should have fired"
+        );
     }
 
     #[tokio::test]
@@ -1548,8 +1636,9 @@ mod tests {
     #[test]
     fn parse_jsonrpc_error_response() {
         let v: Value = serde_json::from_str(
-            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid request"}}"#
-        ).unwrap();
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid request"}}"#,
+        )
+        .unwrap();
         let msg = parse_jsonrpc(&v).unwrap();
         match msg {
             JsonRpcMessage::Response { id, result, error } => {
@@ -1566,11 +1655,15 @@ mod tests {
 
     #[test]
     fn initialize_request_uses_camel_case() {
-        let msg = jsonrpc_request(0, "initialize", serde_json::json!({
-            "protocolVersion": 1,
-            "clientCapabilities": {},
-            "clientInfo": {"name": "voicebot", "version": "0.1.0"}
-        }));
+        let msg = jsonrpc_request(
+            0,
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": 1,
+                "clientCapabilities": {},
+                "clientInfo": {"name": "voicebot", "version": "0.1.0"}
+            }),
+        );
         assert_eq!(msg["params"]["protocolVersion"], 1);
         assert!(msg["params"]["clientCapabilities"].is_object());
         assert_eq!(msg["params"]["clientInfo"]["name"], "voicebot");
@@ -1580,10 +1673,14 @@ mod tests {
 
     #[test]
     fn prompt_request_uses_session_id_camel_case() {
-        let msg = jsonrpc_request(2, "session/prompt", serde_json::json!({
-            "sessionId": "abc123",
-            "prompt": [{"type": "text", "text": "hello"}]
-        }));
+        let msg = jsonrpc_request(
+            2,
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": "abc123",
+                "prompt": [{"type": "text", "text": "hello"}]
+            }),
+        );
         assert_eq!(msg["method"], "session/prompt");
         assert_eq!(msg["params"]["sessionId"], "abc123");
         assert_eq!(msg["params"]["prompt"][0]["type"], "text");
@@ -1594,12 +1691,18 @@ mod tests {
 
     #[test]
     fn cancel_notification_uses_request_id() {
-        let msg = jsonrpc_notification("session/cancel", serde_json::json!({
-            "requestId": 2
-        }));
+        let msg = jsonrpc_notification(
+            "session/cancel",
+            serde_json::json!({
+                "requestId": 2
+            }),
+        );
         assert_eq!(msg["method"], "session/cancel");
         assert_eq!(msg["params"]["requestId"], 2);
-        assert!(msg.get("id").is_none(), "cancel must be a notification (no id)");
+        assert!(
+            msg.get("id").is_none(),
+            "cancel must be a notification (no id)"
+        );
     }
 
     // ── Permission response format ───────────────────────────────────────────
@@ -1736,7 +1839,10 @@ mod integration_tests {
             .expect("initialize failed");
 
         let prompt_id = writer
-            .send_prompt(&session_id, "Write a very long essay about the history of computing.")
+            .send_prompt(
+                &session_id,
+                "Write a very long essay about the history of computing.",
+            )
             .await
             .expect("send_prompt failed");
 

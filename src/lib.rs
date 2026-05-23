@@ -28,6 +28,6 @@ pub use audio::buffer::AudioBuffer;
 pub use audio::output::AudioOutput;
 pub use config::Config;
 pub use db::Database;
-pub use llm::{OpenAIClient, LlmSession};
-pub use stt::{WhisperSTTVAD, WhisperSTTVADConfig, SpeechEvent};
+pub use llm::{LlmSession, OpenAIClient};
+pub use stt::{SpeechEvent, WhisperSTTVAD, WhisperSTTVADConfig};
 pub use tts::SentenceSplitter;

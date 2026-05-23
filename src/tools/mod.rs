@@ -20,7 +20,7 @@ pub use current_time::CurrentTimeTool;
 pub use mcp_tool::McpToolProxy;
 pub use open_app::OpenAppTool;
 pub use run_agent::{
-    format_history, ActiveTask, AcpWriter, JsonRpcMessage, PendingInteractionEntry, RunAgentTool,
+    AcpWriter, ActiveTask, JsonRpcMessage, PendingInteractionEntry, RunAgentTool, format_history,
 };
 pub use run_shell::RunShellTool;
 pub use take_screenshot::TakeScreenshotTool;
@@ -58,7 +58,9 @@ impl Default for ToolRegistry {
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self { tools: HashMap::new() }
+        Self {
+            tools: HashMap::new(),
+        }
     }
 
     pub fn register(&mut self, tool: impl Tool + 'static) {
@@ -72,14 +74,19 @@ impl ToolRegistry {
 
     /// Returns the tools array for the OpenAI `tools` request field.
     pub fn tool_definitions(&self) -> Vec<serde_json::Value> {
-        self.tools.values().map(|t| serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": t.name(),
-                "description": t.description(),
-                "parameters": t.parameters(),
-            }
-        })).collect()
+        self.tools
+            .values()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name(),
+                        "description": t.description(),
+                        "parameters": t.parameters(),
+                    }
+                })
+            })
+            .collect()
     }
 
     /// Returns a section to append to the system prompt describing how to call tools.
@@ -117,9 +124,10 @@ impl ToolRegistry {
         let content = after[..end].trim();
 
         let (name, args) = match content.find(':') {
-            Some(pos) => {
-                (content[..pos].trim().to_string(), content[pos + 1..].trim().to_string())
-            }
+            Some(pos) => (
+                content[..pos].trim().to_string(),
+                content[pos + 1..].trim().to_string(),
+            ),
             None => (content.to_string(), String::new()),
         };
 
@@ -128,7 +136,10 @@ impl ToolRegistry {
 
     /// Returns true if the named tool should run in the background.
     pub fn is_background(&self, name: &str) -> bool {
-        self.tools.get(name).map(|t| t.is_background()).unwrap_or(false)
+        self.tools
+            .get(name)
+            .map(|t| t.is_background())
+            .unwrap_or(false)
     }
 
     /// Execute a registered tool by name with the given args.
@@ -211,7 +222,10 @@ mod tests {
     #[test]
     fn parse_returns_none_for_empty_registry() {
         let r = ToolRegistry::new();
-        assert_eq!(r.parse_tool_call("<tool_call>current_time</tool_call>"), None);
+        assert_eq!(
+            r.parse_tool_call("<tool_call>current_time</tool_call>"),
+            None
+        );
     }
 
     #[test]
@@ -234,14 +248,20 @@ mod tests {
         // Output is "HH:MM:SS, Weekday DD Month YYYY" — always has ':'
         let r = registry_with_current_time();
         let result = r.execute("current_time", "").await;
-        assert!(result.contains(':'), "expected time separator ':' in {result:?}");
+        assert!(
+            result.contains(':'),
+            "expected time separator ':' in {result:?}"
+        );
     }
 
     #[tokio::test]
     async fn execute_unknown_tool_returns_error_message() {
         let r = registry_with_current_time();
         let result = r.execute("nonexistent", "").await;
-        assert!(result.contains("nonexistent"), "error message should mention the tool name");
+        assert!(
+            result.contains("nonexistent"),
+            "error message should mention the tool name"
+        );
     }
 
     // ── system_prompt_section ─────────────────────────────────────────────────
@@ -265,7 +285,12 @@ mod tests {
         let defs = r.tool_definitions();
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0]["function"]["name"], "current_time");
-        assert!(!defs[0]["function"]["description"].as_str().unwrap_or("").is_empty());
+        assert!(
+            !defs[0]["function"]["description"]
+                .as_str()
+                .unwrap_or("")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -296,7 +321,9 @@ mod tests {
         let r = registry_with_current_time();
         let llm_output = "<tool_call>current_time</tool_call>";
 
-        let (name, args) = r.parse_tool_call(llm_output).expect("should parse current_time");
+        let (name, args) = r
+            .parse_tool_call(llm_output)
+            .expect("should parse current_time");
         let result = r.execute(&name, &args).await;
 
         assert_eq!(name, "current_time");

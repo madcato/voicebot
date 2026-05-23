@@ -18,7 +18,7 @@ use anyhow::Result;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 use tracing::{debug, info, warn};
 
 // ── Response type ────────────────────────────────────────────────────────────
@@ -37,10 +37,13 @@ fn parse_response(v: &Value) -> Option<(u64, RpcResponse)> {
         return None; // notification or request from server
     }
     let id = v.get("id").and_then(|i| i.as_u64())?;
-    Some((id, RpcResponse {
-        result: v.get("result").cloned(),
-        error: v.get("error").cloned(),
-    }))
+    Some((
+        id,
+        RpcResponse {
+            result: v.get("result").cloned(),
+            error: v.get("error").cloned(),
+        },
+    ))
 }
 
 // ── Tool definition ──────────────────────────────────────────────────────────
@@ -115,7 +118,9 @@ impl McpClient {
         tool_timeout_secs: u64,
     ) -> Result<(Self, Vec<McpToolDef>)> {
         let parts: Vec<&str> = command.split_whitespace().collect();
-        let program = parts.first().copied()
+        let program = parts
+            .first()
+            .copied()
             .ok_or_else(|| anyhow::anyhow!("MCP_COMMAND is empty"))?;
         let args = &parts[1..];
 
@@ -135,9 +140,13 @@ impl McpClient {
             .spawn()
             .map_err(|e| anyhow::anyhow!("MCP: failed to spawn '{}': {}", command, e))?;
 
-        let stdin = child.stdin.take()
+        let stdin = child
+            .stdin
+            .take()
             .ok_or_else(|| anyhow::anyhow!("MCP: no stdin handle"))?;
-        let stdout = child.stdout.take()
+        let stdout = child
+            .stdout
+            .take()
             .ok_or_else(|| anyhow::anyhow!("MCP: no stdout handle"))?;
 
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<RpcResponse>>>> =
@@ -149,7 +158,9 @@ impl McpClient {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 let line = line.trim().to_string();
-                if line.is_empty() { continue; }
+                if line.is_empty() {
+                    continue;
+                }
                 debug!(target: "mcp", "← {line}");
                 match serde_json::from_str::<Value>(&line) {
                     Ok(v) => {
@@ -170,7 +181,11 @@ impl McpClient {
         });
 
         let client = Self {
-            writer: Mutex::new(McpWriter { stdin, child, next_id: 0 }),
+            writer: Mutex::new(McpWriter {
+                stdin,
+                child,
+                next_id: 0,
+            }),
             pending,
             tool_timeout_secs,
         };
@@ -194,14 +209,19 @@ impl McpClient {
     /// Send `initialize` and `notifications/initialized`.
     async fn initialize(&self) -> Result<()> {
         // Send initialize request.
-        let init_id = self.writer.lock().await.send_request(
-            "initialize",
-            serde_json::json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "voicebot", "version": "0.1.0"},
-            }),
-        ).await?;
+        let init_id = self
+            .writer
+            .lock()
+            .await
+            .send_request(
+                "initialize",
+                serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "voicebot", "version": "0.1.0"},
+                }),
+            )
+            .await?;
 
         // Wait for initialize response.
         let resp = self.wait_for_response(init_id).await?;
@@ -211,18 +231,23 @@ impl McpClient {
         debug!(target: "mcp", "initialize OK");
 
         // Send initialized notification (no response expected).
-        self.writer.lock().await.send_notification(
-            "notifications/initialized",
-            serde_json::json!({}),
-        ).await?;
+        self.writer
+            .lock()
+            .await
+            .send_notification("notifications/initialized", serde_json::json!({}))
+            .await?;
 
         Ok(())
     }
 
     /// Call `tools/list` and return the tool definitions.
     async fn list_tools(&self) -> Result<Vec<McpToolDef>> {
-        let id = self.writer.lock().await
-            .send_request("tools/list", serde_json::json!({})).await?;
+        let id = self
+            .writer
+            .lock()
+            .await
+            .send_request("tools/list", serde_json::json!({}))
+            .await?;
 
         let resp = self.wait_for_response(id).await?;
         if let Some(err) = resp.error {
@@ -230,7 +255,8 @@ impl McpClient {
         }
 
         let result = resp.result.unwrap_or_default();
-        let tools_arr = result["tools"].as_array()
+        let tools_arr = result["tools"]
+            .as_array()
             .ok_or_else(|| anyhow::anyhow!("MCP tools/list: missing 'tools' array"))?;
 
         let defs = tools_arr
@@ -238,10 +264,15 @@ impl McpClient {
             .filter_map(|t| {
                 let name = t["name"].as_str()?.to_string();
                 let description = t["description"].as_str().unwrap_or("").to_string();
-                let input_schema = t.get("inputSchema").cloned().unwrap_or_else(|| {
-                    serde_json::json!({"type": "object", "properties": {}})
-                });
-                Some(McpToolDef { name, description, input_schema })
+                let input_schema = t
+                    .get("inputSchema")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
+                Some(McpToolDef {
+                    name,
+                    description,
+                    input_schema,
+                })
             })
             .collect();
 
@@ -250,20 +281,31 @@ impl McpClient {
 
     /// Call `tools/call` and return the text content of the response.
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<String> {
-        let id = self.writer.lock().await.send_request(
-            "tools/call",
-            serde_json::json!({
-                "name": name,
-                "arguments": arguments,
-            }),
-        ).await?;
+        let id = self
+            .writer
+            .lock()
+            .await
+            .send_request(
+                "tools/call",
+                serde_json::json!({
+                    "name": name,
+                    "arguments": arguments,
+                }),
+            )
+            .await?;
 
         let resp = tokio::time::timeout(
             Duration::from_secs(self.tool_timeout_secs),
             self.wait_for_response(id),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("MCP tool '{}' timed out after {}s", name, self.tool_timeout_secs))??;
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "MCP tool '{}' timed out after {}s",
+                name,
+                self.tool_timeout_secs
+            )
+        })??;
 
         if let Some(err) = resp.error {
             anyhow::bail!("MCP tool '{}' error: {err}", name);
@@ -279,7 +321,8 @@ impl McpClient {
     async fn wait_for_response(&self, id: u64) -> Result<RpcResponse> {
         let (tx, rx) = oneshot::channel::<RpcResponse>();
         self.pending.lock().await.insert(id, tx);
-        rx.await.map_err(|_| anyhow::anyhow!("MCP: response channel closed for id={id}"))
+        rx.await
+            .map_err(|_| anyhow::anyhow!("MCP: response channel closed for id={id}"))
     }
 }
 

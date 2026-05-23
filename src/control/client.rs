@@ -83,14 +83,35 @@ pub enum ControlClientError {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientControlEvent {
-    StateChanged { state: String, utterance_id: Option<u64> },
-    Transcript { utterance_id: u64, text: String },
-    LlmToken { utterance_id: u64, token: String },
-    LlmDone { utterance_id: u64, full_text: String },
-    TtsStart { utterance_id: u64 },
-    ToolCall { name: String, result: String },
-    MuteChanged { muted: bool },
-    Error { message: String },
+    StateChanged {
+        state: String,
+        utterance_id: Option<u64>,
+    },
+    Transcript {
+        utterance_id: u64,
+        text: String,
+    },
+    LlmToken {
+        utterance_id: u64,
+        token: String,
+    },
+    LlmDone {
+        utterance_id: u64,
+        full_text: String,
+    },
+    TtsStart {
+        utterance_id: u64,
+    },
+    ToolCall {
+        name: String,
+        result: String,
+    },
+    MuteChanged {
+        muted: bool,
+    },
+    Error {
+        message: String,
+    },
 }
 
 impl ControlClientBuilder {
@@ -323,7 +344,9 @@ impl ControlClient {
     ///
     /// Returns a channel receiver that will receive events as they occur.
     /// The channel has a buffer of 100 events.
-    pub async fn subscribe_events(&self) -> Result<mpsc::Receiver<ClientControlEvent>, ControlClientError> {
+    pub async fn subscribe_events(
+        &self,
+    ) -> Result<mpsc::Receiver<ClientControlEvent>, ControlClientError> {
         let url = format!("{}/control/events", self.base_url);
         let (tx, rx) = mpsc::channel(100);
         let client = self.client.clone();
@@ -543,18 +566,16 @@ impl ControlClient {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
 
             match tokio::time::timeout(remaining, rx.recv()).await {
-                Ok(Some(event)) => {
-                    match event {
-                        ClientControlEvent::LlmToken { token, .. } => {
-                            full_response.push_str(&token);
-                        }
-                        ClientControlEvent::LlmDone { full_text, .. } => {
-                            full_response = full_text;
-                            return Ok(full_response);
-                        }
-                        _ => {}
+                Ok(Some(event)) => match event {
+                    ClientControlEvent::LlmToken { token, .. } => {
+                        full_response.push_str(&token);
                     }
-                }
+                    ClientControlEvent::LlmDone { full_text, .. } => {
+                        full_response = full_text;
+                        return Ok(full_response);
+                    }
+                    _ => {}
+                },
                 Ok(None) => {
                     return Err(ControlClientError::StreamClosed);
                 }
@@ -585,12 +606,16 @@ mod tests {
 
     #[test]
     fn test_parse_sse_event() {
-        let event_text = "data: {\"type\": \"state_changed\", \"state\": \"Idle\", \"utterance_id\": null}";
+        let event_text =
+            "data: {\"type\": \"state_changed\", \"state\": \"Idle\", \"utterance_id\": null}";
         let event = ControlClient::parse_sse_event(event_text);
 
         assert!(event.is_some());
         match event.unwrap() {
-            ClientControlEvent::StateChanged { state, utterance_id } => {
+            ClientControlEvent::StateChanged {
+                state,
+                utterance_id,
+            } => {
                 assert_eq!(state, "Idle");
                 assert_eq!(utterance_id, None);
             }
@@ -600,7 +625,8 @@ mod tests {
 
     #[test]
     fn test_parse_sse_event_transcript() {
-        let event_text = "data: {\"type\": \"transcript\", \"utterance_id\": 42, \"text\": \"Hello\"}";
+        let event_text =
+            "data: {\"type\": \"transcript\", \"utterance_id\": 42, \"text\": \"Hello\"}";
         let event = ControlClient::parse_sse_event(event_text);
 
         assert!(event.is_some());

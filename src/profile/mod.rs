@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-use crate::llm::{OpenAIClient, Message};
+use crate::llm::{Message, OpenAIClient};
 
 /// Minimum confidence required for a fact to be injected into the system prompt.
 const MIN_INJECT_CONFIDENCE: f64 = 0.5;
@@ -126,19 +126,27 @@ fn normalize_key(key: &str) -> String {
 fn strip_code_fence(s: &str) -> &str {
     // Handle ```json ... ``` or ``` ... ```
     let s = s.trim_start_matches("```json").trim_start_matches("```");
-    let s = if let Some(pos) = s.rfind("```") { &s[..pos] } else { s };
+    let s = if let Some(pos) = s.rfind("```") {
+        &s[..pos]
+    } else {
+        s
+    };
     s.trim()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{OpenAIClient, LlmSession};
+    use crate::llm::{LlmSession, OpenAIClient};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn fact(key: &str, value: &str, confidence: f64) -> ProfileFact {
-        ProfileFact { key: key.to_string(), value: value.to_string(), confidence }
+        ProfileFact {
+            key: key.to_string(),
+            value: value.to_string(),
+            confidence,
+        }
     }
 
     // ── build_profile_context ─────────────────────────────────────────────────
@@ -170,7 +178,10 @@ mod tests {
         ];
         let ctx = build_profile_context(&facts);
         assert!(ctx.contains("name: Daniel"));
-        assert!(!ctx.contains("Madrid"), "fact below threshold must be excluded");
+        assert!(
+            !ctx.contains("Madrid"),
+            "fact below threshold must be excluded"
+        );
     }
 
     #[test]
@@ -181,10 +192,7 @@ mod tests {
 
     #[test]
     fn context_formats_each_fact_as_key_colon_value() {
-        let facts = vec![
-            fact("name", "Daniel", 0.95),
-            fact("hobby_1", "Rust", 0.85),
-        ];
+        let facts = vec![fact("name", "Daniel", 0.95), fact("hobby_1", "Rust", 0.85)];
         let ctx = build_profile_context(&facts);
         assert!(ctx.contains("name: Daniel"));
         assert!(ctx.contains("hobby_1: Rust"));
@@ -242,7 +250,11 @@ mod tests {
         assert_eq!(facts.len(), 3);
         assert!(facts.iter().any(|f| f.key == "name" && f.value == "Daniel"));
         assert!(facts.iter().any(|f| f.key == "city" && f.value == "Madrid"));
-        assert!(facts.iter().any(|f| f.key == "job" && f.value == "software engineer"));
+        assert!(
+            facts
+                .iter()
+                .any(|f| f.key == "job" && f.value == "software engineer")
+        );
     }
 
     #[tokio::test]
@@ -296,7 +308,12 @@ mod tests {
             .await;
 
         let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1);
-        let facts = extract_facts(&client, "Me encanta programar en Rust.", "Es un lenguaje excelente.").await;
+        let facts = extract_facts(
+            &client,
+            "Me encanta programar en Rust.",
+            "Es un lenguaje excelente.",
+        )
+        .await;
 
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].key, "hobby_1");
@@ -340,7 +357,10 @@ mod tests {
         let facts = extract_facts(&client, "Soy Daniel.", "Hola.").await;
 
         assert_eq!(facts.len(), 1);
-        assert!(facts[0].confidence <= 1.0, "confidence must be clamped to 1.0");
+        assert!(
+            facts[0].confidence <= 1.0,
+            "confidence must be clamped to 1.0"
+        );
     }
 
     #[tokio::test]
@@ -361,7 +381,10 @@ mod tests {
         let facts = extract_facts(&client, "Me llamo Daniel.", "Hola.").await;
 
         assert_eq!(facts.len(), 1);
-        assert!((facts[0].confidence - 0.8).abs() < 0.001, "default confidence should be 0.8");
+        assert!(
+            (facts[0].confidence - 0.8).abs() < 0.001,
+            "default confidence should be 0.8"
+        );
     }
 
     #[tokio::test]
@@ -392,7 +415,10 @@ mod tests {
 
         let client = OpenAIClient::new(&server.uri(), "test", 256, 0.1);
         let facts = extract_facts(&client, "Hola.", "Hola.").await;
-        assert!(facts.is_empty(), "non-JSON LLM output must yield empty facts without panic");
+        assert!(
+            facts.is_empty(),
+            "non-JSON LLM output must yield empty facts without panic"
+        );
     }
 
     // ── Full injection chain ───────────────────────────────────────────────────
@@ -499,7 +525,10 @@ mod tests {
         assert!(profile_ctx.contains("name: Daniel"));
         assert!(profile_ctx.contains("city: Madrid"));
         assert!(profile_ctx.contains("hobby_1: Rust"));
-        assert!(!profile_ctx.contains("skill"), "confidence 0.3 must be filtered out");
+        assert!(
+            !profile_ctx.contains("skill"),
+            "confidence 0.3 must be filtered out"
+        );
 
         // Step 3: inject into the next session's system prompt
         let base = "Eres Jarvis, el asistente de Daniel.";
@@ -530,18 +559,11 @@ mod tests {
             .try_init();
 
         let _ = dotenvy::dotenv();
-        let llm_url = std::env::var("LLM_URL")
-            .unwrap_or_else(|_| "http://localhost:8080".to_string());
-        let llm_model = std::env::var("LLM_MODEL")
-            .unwrap_or_else(|_| "local-model".to_string());
+        let llm_url =
+            std::env::var("LLM_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
+        let llm_model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "local-model".to_string());
         let llm_api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
-        let client = OpenAIClient::new(
-            &llm_url,
-            &llm_model,
-            400,
-            0.3,
-        )
-        .with_api_key(&llm_api_key);
+        let client = OpenAIClient::new(&llm_url, &llm_model, 400, 0.3).with_api_key(&llm_api_key);
 
         // ── Case 1: User reveals personal facts ─────────────────────────────
         let facts = extract_facts(
@@ -557,18 +579,15 @@ mod tests {
             "LLM should extract at least one fact from a self-introduction"
         );
         assert!(
-            facts.iter().any(|f| f.key == "name" && f.value.to_lowercase().contains("daniel")),
+            facts
+                .iter()
+                .any(|f| f.key == "name" && f.value.to_lowercase().contains("daniel")),
             "Should extract the user's name 'Daniel', got: {:?}",
             facts
         );
 
         // ── Case 2: No user facts present ───────────────────────────────────
-        let facts_empty = extract_facts(
-            &client,
-            "¿Qué hora es?",
-            "Son las 14:00.",
-        )
-        .await;
+        let facts_empty = extract_facts(&client, "¿Qué hora es?", "Son las 14:00.").await;
 
         println!("Facts from factless exchange: {:#?}", facts_empty);
         assert!(

@@ -65,7 +65,8 @@ pub async fn supervise(
                 // treat as immediate exit on next iteration
                 restart_count += 1;
                 if restart_count > MAX_RESTARTS {
-                    let msg = "LLM server could not be restarted. Please restart voicebot.".to_string();
+                    let msg =
+                        "LLM server could not be restarted. Please restart voicebot.".to_string();
                     error!(target: "llm_manager", "{}", msg);
                     let _ = notify_tx.send(msg).await;
                     break;
@@ -99,16 +100,12 @@ fn spawn_process(command: &str) -> Result<Child> {
 }
 
 async fn wait_until_ready(health_url: &str) -> Result<()> {
-    let models_url = format!(
-        "{}/v1/models",
-        health_url.trim_end_matches('/')
-    );
+    let models_url = format!("{}/v1/models", health_url.trim_end_matches('/'));
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()?;
 
-    let deadline = std::time::Instant::now()
-        + std::time::Duration::from_secs(READY_TIMEOUT_SECS);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(READY_TIMEOUT_SECS);
 
     info!(target: "llm_manager", "Waiting for LLM server to be ready at {models_url}...");
 

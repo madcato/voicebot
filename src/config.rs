@@ -631,9 +631,11 @@ mod tests {
                 msgs[0].content
             );
             assert!(msgs[0].content.contains("[CONVERSATION SUMMARY]"));
-            assert!(msgs[0]
-                .content
-                .contains("Resumen de la conversación anterior."));
+            assert!(
+                msgs[0]
+                    .content
+                    .contains("Resumen de la conversación anterior.")
+            );
         });
     }
 }

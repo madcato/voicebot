@@ -60,7 +60,7 @@ impl KokoroTts {
                 1.0,   // speed
                 None,  // initial_silence
                 false, // auto_detect_language (we set it explicitly)
-                true, // force_style
+                true,  // force_style
                 false, // phonemes mode
             )
             .map_err(|e| anyhow::anyhow!("Kokoro TTS: {}", e))

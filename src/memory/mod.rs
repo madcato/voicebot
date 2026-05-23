@@ -2,7 +2,7 @@ use serde::Deserialize;
 use tracing::{debug, info, warn};
 
 use crate::db::{Memory, NewMemory};
-use crate::llm::{OpenAIClient, Message};
+use crate::llm::{Message, OpenAIClient};
 
 /// Maximum number of memories injected into the system prompt.
 const MAX_MEMORIES_IN_PROMPT: usize = 50;
@@ -62,7 +62,10 @@ pub async fn extract_memories(
     existing_memories: &[Memory],
 ) -> MemoryExtractionResult {
     if conversation_text.trim().is_empty() {
-        return MemoryExtractionResult { new_memories: vec![], archive_ids: vec![] };
+        return MemoryExtractionResult {
+            new_memories: vec![],
+            archive_ids: vec![],
+        };
     }
 
     let mut existing_block = String::new();
@@ -102,7 +105,10 @@ pub async fn extract_memories(
         Ok(r) => r,
         Err(e) => {
             warn!(target: "memory", "Memory extraction LLM call failed: {}", e);
-            return MemoryExtractionResult { new_memories: vec![], archive_ids: vec![] };
+            return MemoryExtractionResult {
+                new_memories: vec![],
+                archive_ids: vec![],
+            };
         }
     };
 
@@ -143,11 +149,17 @@ fn parse_memory_response(raw: &str) -> MemoryExtractionResult {
                 }
             }
 
-            MemoryExtractionResult { new_memories, archive_ids }
+            MemoryExtractionResult {
+                new_memories,
+                archive_ids,
+            }
         }
         Err(e) => {
             debug!(target: "memory", "Could not parse memory extraction JSON: {} — raw: {:?}", e, raw);
-            MemoryExtractionResult { new_memories: vec![], archive_ids: vec![] }
+            MemoryExtractionResult {
+                new_memories: vec![],
+                archive_ids: vec![],
+            }
         }
     }
 }
@@ -161,7 +173,11 @@ fn validate_category(cat: &str) -> &str {
 
 fn strip_code_fence(s: &str) -> &str {
     let s = s.trim_start_matches("```json").trim_start_matches("```");
-    let s = if let Some(pos) = s.rfind("```") { &s[..pos] } else { s };
+    let s = if let Some(pos) = s.rfind("```") {
+        &s[..pos]
+    } else {
+        s
+    };
     s.trim()
 }
 
@@ -201,9 +217,7 @@ mod tests {
 
     #[test]
     fn context_caps_at_max_memories() {
-        let memories: Vec<Memory> = (0..60)
-            .map(|i| mem(i, &format!("Memory {i}")))
-            .collect();
+        let memories: Vec<Memory> = (0..60).map(|i| mem(i, &format!("Memory {i}"))).collect();
         let ctx = build_memory_context(&memories);
         let count = ctx.matches("\n- ").count();
         assert_eq!(count, MAX_MEMORIES_IN_PROMPT);

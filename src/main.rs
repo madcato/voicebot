@@ -7,6 +7,8 @@ mod agents;
 mod analysis;
 mod audio;
 mod config;
+#[cfg(feature = "control")]
+mod control;
 mod daemon;
 mod db;
 mod eyes;
@@ -16,15 +18,13 @@ mod mcp;
 mod memory;
 mod pipeline;
 mod profile;
-mod stt;
-mod tools;
-#[cfg(feature = "tui")]
-mod tui;
-mod tts;
 #[cfg(feature = "remote")]
 mod remote;
-#[cfg(feature = "control")]
-mod control;
+mod stt;
+mod tools;
+mod tts;
+#[cfg(feature = "tui")]
+mod tui;
 
 use anyhow::{Context, Result};
 use async_channel::bounded;
@@ -35,9 +35,10 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+use crate::agents::AgentRegistry;
 use crate::agents::ProactiveEvent;
-use crate::analysis::identity::IdentityAnalyzer;
 use crate::analysis::ContextLens;
+use crate::analysis::identity::IdentityAnalyzer;
 use crate::audio::ambient_buffer::AmbientBuffer;
 use crate::audio::audio_capture::{AudioCapture, AudioChunk};
 use crate::audio::buffer::AudioBuffer;
@@ -47,22 +48,21 @@ use crate::config::Config;
 use crate::db::{Database, Memory};
 use crate::llm::{LlmSession, OpenAIClient};
 use crate::pipeline::{
-    build_system_prompt, consolidation_task, llm_task, run_consolidation_cycle, sen_task,
-    PipelineEvents, PipelineFrame, PipelineState, tts_task,
+    PipelineEvents, PipelineFrame, PipelineState, build_system_prompt, consolidation_task,
+    llm_task, run_consolidation_cycle, sen_task, tts_task,
 };
-use crate::agents::AgentRegistry;
 use crate::profile::ProfileFact;
 use crate::stt::{SpeechEvent, WhisperSTTVAD, WhisperSTTVADConfig};
 use crate::tools::{
-    ActiveTask, AcpWriter, ConversationMode, CurrentTimeTool,
-    McpToolProxy, OpenAppTool, PendingInteractionEntry, ReadClipboardTool, RunAgentTool, RunShellTool,
-    SetClipboardTool, SetConversationModeTool, TakeScreenshotTool, ToolRegistry, WebSearchTool,
+    AcpWriter, ActiveTask, ConversationMode, CurrentTimeTool, McpToolProxy, OpenAppTool,
+    PendingInteractionEntry, ReadClipboardTool, RunAgentTool, RunShellTool, SetClipboardTool,
+    SetConversationModeTool, TakeScreenshotTool, ToolRegistry, WebSearchTool,
 };
-use crate::tts::TtsEngine;
-#[cfg(feature = "kokoro")]
-use crate::tts::KokoroTts;
 #[cfg(feature = "avspeech")]
 use crate::tts::AvSpeechTts;
+#[cfg(feature = "kokoro")]
+use crate::tts::KokoroTts;
+use crate::tts::TtsEngine;
 
 #[cfg(test)]
 mod e2e_tests;
@@ -91,7 +91,9 @@ fn main() {
     });
 
     while !quit.load(std::sync::atomic::Ordering::SeqCst) {
-        unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, 0); }
+        unsafe {
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, 0);
+        }
     }
 
     if let Err(e) = handle.join().expect("tokio thread panicked") {
@@ -109,8 +111,8 @@ async fn main() -> Result<()> {
 async fn async_main() -> Result<()> {
     #[cfg(feature = "tui")]
     {
-        let log_file = std::fs::File::create("voicebot.log")
-            .expect("failed to create voicebot.log");
+        let log_file =
+            std::fs::File::create("voicebot.log").expect("failed to create voicebot.log");
         tracing_subscriber::fmt()
             .with_env_filter(
                 EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -140,8 +142,8 @@ async fn async_main() -> Result<()> {
     }
 
     // ── Voice listing shortcut ────────────────────────────────────────────────
-    let list_voices = config.list_voices
-        || std::env::args().any(|a| a == "--list-voices" || a == "list-voices");
+    let list_voices =
+        config.list_voices || std::env::args().any(|a| a == "--list-voices" || a == "list-voices");
     if list_voices {
         match config.tts_provider.as_str() {
             #[cfg(feature = "avspeech")]
@@ -150,7 +152,9 @@ async fn async_main() -> Result<()> {
             }
             #[cfg(not(feature = "avspeech"))]
             "avspeech" => {
-                eprintln!("TTS_PROVIDER=avspeech requires the 'avspeech' feature: cargo run --features avspeech");
+                eprintln!(
+                    "TTS_PROVIDER=avspeech requires the 'avspeech' feature: cargo run --features avspeech"
+                );
                 std::process::exit(1);
             }
             #[cfg(feature = "kokoro")]
@@ -166,11 +170,16 @@ async fn async_main() -> Result<()> {
             }
             #[cfg(not(feature = "kokoro"))]
             "kokoro" => {
-                eprintln!("TTS_PROVIDER=kokoro requires the 'kokoro' feature: cargo run --features kokoro");
+                eprintln!(
+                    "TTS_PROVIDER=kokoro requires the 'kokoro' feature: cargo run --features kokoro"
+                );
                 std::process::exit(1);
             }
             _ => {
-                eprintln!("Unknown TTS_PROVIDER '{}'. Available: avspeech, kokoro", config.tts_provider);
+                eprintln!(
+                    "Unknown TTS_PROVIDER '{}'. Available: avspeech, kokoro",
+                    config.tts_provider
+                );
                 std::process::exit(1);
             }
         }
@@ -183,12 +192,16 @@ async fn async_main() -> Result<()> {
     let (proactive_tx, proactive_rx) = mpsc::channel::<ProactiveEvent>(32);
 
     // ── Secondary LLM client ─────────────────────────────────────────────────
-    let secondary_llm_client: Option<OpenAIClient> =
-        config.secondary_llm_url.as_ref().map(|url| {
-            OpenAIClient::new(url, &config.secondary_llm_model, config.secondary_llm_max_tokens, 0.3)
-                .with_api_key(&config.secondary_llm_api_key)
-                .with_thinking(config.secondary_llm_thinking)
-        });
+    let secondary_llm_client: Option<OpenAIClient> = config.secondary_llm_url.as_ref().map(|url| {
+        OpenAIClient::new(
+            url,
+            &config.secondary_llm_model,
+            config.secondary_llm_max_tokens,
+            0.3,
+        )
+        .with_api_key(&config.secondary_llm_api_key)
+        .with_thinking(config.secondary_llm_thinking)
+    });
     if secondary_llm_client.is_some() {
         info!(
             target: "llm",
@@ -268,28 +281,49 @@ async fn async_main() -> Result<()> {
             info!(target: "agent", "ACP pre-warm [{}]: spawning {}…", agent_name, acp_cmd);
             let (mut writer, mut rx) = match AcpWriter::spawn(&acp_cmd).await {
                 Ok(pair) => pair,
-                Err(e) => { warn!(target: "agent", "ACP pre-warm [{}]: spawn failed: {e}", agent_name); return; }
+                Err(e) => {
+                    warn!(target: "agent", "ACP pre-warm [{}]: spawn failed: {e}", agent_name);
+                    return;
+                }
             };
             let cwd = std::env::current_dir()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
             match writer.initialize(&mut rx, &cwd).await {
-                Ok(sid) => info!(target: "agent", "ACP pre-warm [{}]: session ready (sid={sid})", agent_name),
-                Err(e)  => { warn!(target: "agent", "ACP pre-warm [{}]: init failed: {e}", agent_name); return; }
+                Ok(sid) => {
+                    info!(target: "agent", "ACP pre-warm [{}]: session ready (sid={sid})", agent_name)
+                }
+                Err(e) => {
+                    warn!(target: "agent", "ACP pre-warm [{}]: init failed: {e}", agent_name);
+                    return;
+                }
             }
 
             let sid = writer.session_id.as_ref().unwrap().clone();
             let prompt_id = match writer.send_prompt(&sid, "Responde solo: OK").await {
                 Ok(id) => id,
-                Err(e) => { warn!(target: "agent", "ACP pre-warm [{}]: prompt failed: {e}", agent_name); return; }
+                Err(e) => {
+                    warn!(target: "agent", "ACP pre-warm [{}]: prompt failed: {e}", agent_name);
+                    return;
+                }
             };
             loop {
                 match tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv()).await {
-                    Ok(Some(crate::tools::JsonRpcMessage::Response { id, .. })) if id == prompt_id => break,
-                    Ok(None) => { warn!(target: "agent", "ACP pre-warm [{}]: channel closed during warmup", agent_name); return; }
+                    Ok(Some(crate::tools::JsonRpcMessage::Response { id, .. }))
+                        if id == prompt_id =>
+                    {
+                        break;
+                    }
+                    Ok(None) => {
+                        warn!(target: "agent", "ACP pre-warm [{}]: channel closed during warmup", agent_name);
+                        return;
+                    }
                     Ok(_) => {}
-                    Err(_) => { warn!(target: "agent", "ACP pre-warm [{}]: warmup timed out", agent_name); return; }
+                    Err(_) => {
+                        warn!(target: "agent", "ACP pre-warm [{}]: warmup timed out", agent_name);
+                        return;
+                    }
                 }
             }
             info!(target: "agent", "ACP pre-warm [{}]: warmup complete", agent_name);
@@ -330,7 +364,9 @@ async fn async_main() -> Result<()> {
     // ── Database ──────────────────────────────────────────────────────────────
     let db = Database::new(&config.db_path).await?;
     let session_id = db.get_or_create_session().await?;
-    let (summary, history) = db.get_session_context(session_id, config.llm_history_load_limit).await?;
+    let (summary, history) = db
+        .get_session_context(session_id, config.llm_history_load_limit)
+        .await?;
     info!(
         target: "db",
         "Loaded {} messages from history (summary: {})",
@@ -342,7 +378,11 @@ async fn async_main() -> Result<()> {
         .load_user_profile()
         .await?
         .into_iter()
-        .map(|(key, value, confidence)| ProfileFact { key, value, confidence })
+        .map(|(key, value, confidence)| ProfileFact {
+            key,
+            value,
+            confidence,
+        })
         .collect();
     if !profile_facts.is_empty() {
         info!(target: "profile", "Loaded {} user profile facts", profile_facts.len());
@@ -395,8 +435,9 @@ async fn async_main() -> Result<()> {
     .with_api_key(&config.llm_api_key);
     info!(target: "llm", "LLM endpoint: {}", config.llm_url);
 
-    let background_client =
-        secondary_llm_client.clone().unwrap_or_else(|| llm_client.clone());
+    let background_client = secondary_llm_client
+        .clone()
+        .unwrap_or_else(|| llm_client.clone());
 
     // ── Inference daemon ──────────────────────────────────────────────────────
     if config.daemon_enabled {
@@ -458,35 +499,36 @@ async fn async_main() -> Result<()> {
     // enriches every LLM call without being persisted to the session.
     let context_lens = Arc::new(Mutex::new(ContextLens::new()));
 
-    let mut identity_analyzer: Option<IdentityAnalyzer> =
-        if let Some(ref model_path) = config.speaker_model {
-            match SpeakerVerifier::new(
-                model_path,
-                std::path::Path::new(&config.speaker_enrollment_path),
-                config.speaker_similarity_min,
-                config.speaker_max_profiles,
-            ) {
-                Ok(sv) => {
-                    info!(
-                        target: "speaker",
-                        "Speaker verification enabled (threshold={})",
-                        config.speaker_similarity_min
-                    );
-                    Some(IdentityAnalyzer::new(sv, Arc::clone(&context_lens)))
-                }
-                Err(e) => {
-                    warn!(target: "speaker", "Speaker verification disabled — model load failed: {e}");
-                    None
-                }
+    let mut identity_analyzer: Option<IdentityAnalyzer> = if let Some(ref model_path) =
+        config.speaker_model
+    {
+        match SpeakerVerifier::new(
+            model_path,
+            std::path::Path::new(&config.speaker_enrollment_path),
+            config.speaker_similarity_min,
+            config.speaker_max_profiles,
+        ) {
+            Ok(sv) => {
+                info!(
+                    target: "speaker",
+                    "Speaker verification enabled (threshold={})",
+                    config.speaker_similarity_min
+                );
+                Some(IdentityAnalyzer::new(sv, Arc::clone(&context_lens)))
             }
-        } else {
-            info!(
-                target: "speaker",
-                "Speaker verification disabled \
-                 (place model at models/speaker_embedding.onnx to enable)"
-            );
-            None
-        };
+            Err(e) => {
+                warn!(target: "speaker", "Speaker verification disabled — model load failed: {e}");
+                None
+            }
+        }
+    } else {
+        info!(
+            target: "speaker",
+            "Speaker verification disabled \
+             (place model at models/speaker_embedding.onnx to enable)"
+        );
+        None
+    };
 
     // ── Ambient context buffer ────────────────────────────────────────────────
     let ambient_buffer = Arc::new(std::sync::Mutex::new(AmbientBuffer::new(
@@ -583,8 +625,7 @@ async fn async_main() -> Result<()> {
 
     // Pipeline FSM state — replaces AtomicBool flags (llm_busy, consolidation_active, etc.)
     // Each actor that owns a transition writes it directly; observers subscribe read-only.
-    let (pipeline_state_tx, pipeline_state_rx) =
-        tokio::sync::watch::channel(PipelineState::Idle);
+    let (pipeline_state_tx, pipeline_state_rx) = tokio::sync::watch::channel(PipelineState::Idle);
     let pipeline_state_tx = Arc::new(pipeline_state_tx);
 
     #[cfg(feature = "control")]
@@ -597,7 +638,9 @@ async fn async_main() -> Result<()> {
         let ctrl = control_broadcast.clone();
         tokio::spawn(async move {
             loop {
-                if rx.changed().await.is_err() { break; }
+                if rx.changed().await.is_err() {
+                    break;
+                }
                 let state = rx.borrow().clone();
                 tracing::debug!(target: "fsm", "Pipeline state → {:?}", state);
                 #[cfg(feature = "control")]
@@ -611,8 +654,9 @@ async fn async_main() -> Result<()> {
     // pipeline_state_rx is kept alive and cloned for each consumer below.
 
     #[cfg(feature = "remote")]
-    let remote_tts_tx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<remote::protocol::TtsAudioPacket>>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
+    let remote_tts_tx: Arc<
+        tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<remote::protocol::TtsAudioPacket>>>,
+    > = Arc::new(tokio::sync::Mutex::new(None));
 
     #[cfg(feature = "tui")]
     let (tui_tx, tui_rx) = tokio::sync::mpsc::unbounded_channel::<tui::events::TuiEvent>();
@@ -634,54 +678,73 @@ async fn async_main() -> Result<()> {
 
     // ── Spawn permanent pipeline tasks ────────────────────────────────────────
     {
-        let events_c              = Arc::clone(&events);
-        let pipeline_state_tx_c   = Arc::clone(&pipeline_state_tx);
-        let pipeline_state_rx_c   = pipeline_state_rx.clone();
-        let sentences_tx_c        = sentences_tx.clone();
-        let llm_tx_c              = llm_tx.clone();
-        let t_llm_post_send_c     = Arc::clone(&t_llm_post_send);
-        let llm_session_c         = Arc::clone(&llm_session);
-        let llm_client_c          = llm_client.clone();
-        let db_c                  = db.clone();
-        let tools_c               = Arc::clone(&tools);
-        let shared_history_c      = Arc::clone(&shared_history);
-        let turn_commit_c         = Arc::clone(&turn_commit_counter);
-        let proactive_tx_c        = proactive_tx.clone();
-        let context_lens_c        = Arc::clone(&context_lens);
+        let events_c = Arc::clone(&events);
+        let pipeline_state_tx_c = Arc::clone(&pipeline_state_tx);
+        let pipeline_state_rx_c = pipeline_state_rx.clone();
+        let sentences_tx_c = sentences_tx.clone();
+        let llm_tx_c = llm_tx.clone();
+        let t_llm_post_send_c = Arc::clone(&t_llm_post_send);
+        let llm_session_c = Arc::clone(&llm_session);
+        let llm_client_c = llm_client.clone();
+        let db_c = db.clone();
+        let tools_c = Arc::clone(&tools);
+        let shared_history_c = Arc::clone(&shared_history);
+        let turn_commit_c = Arc::clone(&turn_commit_counter);
+        let proactive_tx_c = proactive_tx.clone();
+        let context_lens_c = Arc::clone(&context_lens);
         #[cfg(feature = "tui")]
         let tui_tx_c = tui_tx.clone();
         #[cfg(feature = "control")]
         let control_broadcast_c = control_broadcast.clone();
         tokio::spawn(async move {
             llm_task(
-                events_c, pipeline_state_tx_c, pipeline_state_rx_c,
-                sentences_tx_c, llm_tx_c, transcript_rx, t_llm_post_send_c,
-                llm_session_c, llm_client_c,
-                db_c, session_id, tools_c, shared_history_c, turn_commit_c,
-                proactive_tx_c, context_lens_c,
+                events_c,
+                pipeline_state_tx_c,
+                pipeline_state_rx_c,
+                sentences_tx_c,
+                llm_tx_c,
+                transcript_rx,
+                t_llm_post_send_c,
+                llm_session_c,
+                llm_client_c,
+                db_c,
+                session_id,
+                tools_c,
+                shared_history_c,
+                turn_commit_c,
+                proactive_tx_c,
+                context_lens_c,
                 #[cfg(feature = "tui")]
                 tui_tx_c,
                 #[cfg(feature = "control")]
                 control_broadcast_c,
-            ).await;
+            )
+            .await;
         });
     }
     {
-        let events_c          = Arc::clone(&events);
-        let sentences_c       = sentences_tx.clone();
-        let t_vad_end_c       = Arc::clone(&t_vad_end);
+        let events_c = Arc::clone(&events);
+        let sentences_c = sentences_tx.clone();
+        let t_vad_end_c = Arc::clone(&t_vad_end);
         let t_llm_post_send_c = Arc::clone(&t_llm_post_send);
         tokio::spawn(async move {
-            sen_task(events_c, llm_rx, sentences_c, t_vad_end_c, t_llm_post_send_c).await;
+            sen_task(
+                events_c,
+                llm_rx,
+                sentences_c,
+                t_vad_end_c,
+                t_llm_post_send_c,
+            )
+            .await;
         });
     }
     {
-        let events_c      = Arc::clone(&events);
-        let t_vad_end_c   = Arc::clone(&t_vad_end);
-        let tts_c         = Arc::clone(&tts);
-        let audio_out_c   = Arc::clone(&audio_output);
+        let events_c = Arc::clone(&events);
+        let t_vad_end_c = Arc::clone(&t_vad_end);
+        let tts_c = Arc::clone(&tts);
+        let audio_out_c = Arc::clone(&audio_output);
         let play_cancel_c = Arc::clone(&play_cancel);
-        let tts_muted_c   = Arc::clone(&tts_muted);
+        let tts_muted_c = Arc::clone(&tts_muted);
         #[cfg(feature = "tui")]
         let tui_tx_c = tui_tx.clone();
         #[cfg(feature = "remote")]
@@ -690,41 +753,62 @@ async fn async_main() -> Result<()> {
         let control_broadcast_c = control_broadcast.clone();
         tokio::spawn(async move {
             tts_task(
-                events_c, t_vad_end_c, sentences_rx, tts_c, audio_out_c, tts_sample_rate,
-                play_cancel_c, tts_muted_c,
+                events_c,
+                t_vad_end_c,
+                sentences_rx,
+                tts_c,
+                audio_out_c,
+                tts_sample_rate,
+                play_cancel_c,
+                tts_muted_c,
                 #[cfg(feature = "tui")]
                 tui_tx_c,
                 #[cfg(feature = "remote")]
                 remote_tts_tx_c,
                 #[cfg(feature = "control")]
                 control_broadcast_c,
-            ).await;
+            )
+            .await;
         });
     }
     {
-        let events_c              = Arc::clone(&events);
-        let pipeline_state_tx_c   = Arc::clone(&pipeline_state_tx);
-        let pipeline_state_rx_c   = pipeline_state_rx.clone();
-        let transcript_tx_c       = transcript_tx.clone();
-        let llm_session_c         = Arc::clone(&llm_session);
-        let background_c          = background_client.clone();
-        let db_c                  = db.clone();
-        let context_tokens        = config.llm_context_tokens;
-        let keep_turns            = config.llm_summary_keep_turns;
-        let threshold_pct         = config.llm_consolidation_threshold_pct;
-        let idle_secs             = config.llm_idle_consolidation_secs;
-        let idle_min_pct          = config.llm_idle_min_context_pct;
-        let base_prompt           = config.llm_system_prompt.clone();
-        let agent_section_c       = agent_section.clone();
-        let tool_section_c        = tool_section.clone();
-        let language_c            = config.language.clone();
+        let events_c = Arc::clone(&events);
+        let pipeline_state_tx_c = Arc::clone(&pipeline_state_tx);
+        let pipeline_state_rx_c = pipeline_state_rx.clone();
+        let transcript_tx_c = transcript_tx.clone();
+        let llm_session_c = Arc::clone(&llm_session);
+        let background_c = background_client.clone();
+        let db_c = db.clone();
+        let context_tokens = config.llm_context_tokens;
+        let keep_turns = config.llm_summary_keep_turns;
+        let threshold_pct = config.llm_consolidation_threshold_pct;
+        let idle_secs = config.llm_idle_consolidation_secs;
+        let idle_min_pct = config.llm_idle_min_context_pct;
+        let base_prompt = config.llm_system_prompt.clone();
+        let agent_section_c = agent_section.clone();
+        let tool_section_c = tool_section.clone();
+        let language_c = config.language.clone();
         tokio::spawn(async move {
             consolidation_task(
-                events_c, pipeline_state_tx_c, pipeline_state_rx_c, transcript_tx_c,
-                llm_session_c, background_c, db_c,
-                session_id, context_tokens, keep_turns, threshold_pct, idle_secs, idle_min_pct,
-                base_prompt, agent_section_c, tool_section_c, language_c,
-            ).await;
+                events_c,
+                pipeline_state_tx_c,
+                pipeline_state_rx_c,
+                transcript_tx_c,
+                llm_session_c,
+                background_c,
+                db_c,
+                session_id,
+                context_tokens,
+                keep_turns,
+                threshold_pct,
+                idle_secs,
+                idle_min_pct,
+                base_prompt,
+                agent_section_c,
+                tool_section_c,
+                language_c,
+            )
+            .await;
         });
     }
 
@@ -790,9 +874,16 @@ async fn async_main() -> Result<()> {
         if needs {
             info!(target: "memory", "Startup: context exceeds idle threshold — running silent consolidation before greeting");
             run_consolidation_cycle(
-                &background_client, &db, session_id, &llm_session,
-                config.llm_summary_keep_turns, &config.llm_system_prompt, &agent_section, &tool_section,
-            ).await;
+                &background_client,
+                &db,
+                session_id,
+                &llm_session,
+                config.llm_summary_keep_turns,
+                &config.llm_system_prompt,
+                &agent_section,
+                &tool_section,
+            )
+            .await;
         }
     }
 
@@ -804,7 +895,10 @@ async fn async_main() -> Result<()> {
         let notification = i18n::get_notification("startup", &config.language)
             .replace("{time_str}", &time_str)
             .replace("{date_str}", &date_str);
-        transcript_tx.send(PipelineFrame::SystemNotification { text: notification }).await.ok();
+        transcript_tx
+            .send(PipelineFrame::SystemNotification { text: notification })
+            .await
+            .ok();
     }
 
     let mut proactive_rx = proactive_rx;
@@ -876,9 +970,6 @@ async fn async_main() -> Result<()> {
                             ProactiveEvent::AgentQuestion { task_id, agent_name, question, options, response_tx } => {
                                 if pipeline_state_rx.borrow().is_busy() {
                                     events.barge_in_tx.send(0).ok();
-                                    play_cancel.store(true, Ordering::SeqCst);
-                                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                                    play_cancel.store(false, Ordering::SeqCst);
                                     if let Some(announcement) = current_agent_announcement.take() {
                                         pending_agent_results.push_front(announcement);
                                     }
@@ -931,9 +1022,6 @@ async fn async_main() -> Result<()> {
 
                             info!(target: "pipeline", "SpeechStart — firing BARGE_IN");
                             events.barge_in_tx.send(utterance_epoch.load(Ordering::SeqCst)).ok();
-                            play_cancel.store(true, Ordering::SeqCst);
-                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                            play_cancel.store(false, Ordering::SeqCst);
                             if let Some(announcement) = current_agent_announcement.take() {
                                 info!(target: "pipeline", "SpeechStart interrupted agent announcement — re-queueing");
                                 pending_agent_results.push_front(announcement);
@@ -1212,9 +1300,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_summarize_real_llm() {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter("info")
-            .try_init();
+        let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
 
         let db_dir = tempfile::TempDir::new().unwrap();
         let db_path = db_dir.path().join("test_summarize.db");
@@ -1224,10 +1310,9 @@ mod tests {
         let session_id = db.get_or_create_session().await.unwrap();
 
         let _ = dotenvy::dotenv();
-        let llm_url = std::env::var("LLM_URL")
-            .unwrap_or_else(|_| "http://localhost:8080".to_string());
-        let llm_model = std::env::var("LLM_MODEL")
-            .unwrap_or_else(|_| "local-model".to_string());
+        let llm_url =
+            std::env::var("LLM_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
+        let llm_model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "local-model".to_string());
         let llm_api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
         let llm_client = crate::llm::OpenAIClient::new(&llm_url, &llm_model, 400, 0.3)
             .with_api_key(&llm_api_key);
@@ -1236,21 +1321,47 @@ mod tests {
         let mut session = crate::llm::LlmSession::new(system_prompt);
 
         let turns = vec![
-            ("What is the capital of France?", "The capital of France is Paris, a city known for the Eiffel Tower and its rich cultural heritage."),
-            ("Tell me about the Rust programming language.", "Rust is a systems programming language focused on safety, speed, and concurrency. It was created by Mozilla."),
-            ("What is photosynthesis?", "Photosynthesis is the process by which plants convert sunlight, water, and carbon dioxide into glucose and oxygen."),
-            ("Who wrote Don Quixote?", "Don Quixote was written by Miguel de Cervantes and published in two parts in 1605 and 1615."),
-            ("Explain quantum computing briefly.", "Quantum computing uses quantum bits or qubits that can exist in superposition, enabling parallel computation for certain problems."),
-            ("What is the tallest mountain on Earth?", "Mount Everest is the tallest mountain on Earth at 8,849 meters above sea level, located in the Himalayas."),
-            ("How does a combustion engine work?", "A combustion engine burns fuel in cylinders, creating expanding gases that push pistons connected to a crankshaft to produce rotary motion."),
-            ("What is the speed of light?", "The speed of light in a vacuum is approximately 299,792,458 meters per second, often rounded to 300,000 km/s."),
+            (
+                "What is the capital of France?",
+                "The capital of France is Paris, a city known for the Eiffel Tower and its rich cultural heritage.",
+            ),
+            (
+                "Tell me about the Rust programming language.",
+                "Rust is a systems programming language focused on safety, speed, and concurrency. It was created by Mozilla.",
+            ),
+            (
+                "What is photosynthesis?",
+                "Photosynthesis is the process by which plants convert sunlight, water, and carbon dioxide into glucose and oxygen.",
+            ),
+            (
+                "Who wrote Don Quixote?",
+                "Don Quixote was written by Miguel de Cervantes and published in two parts in 1605 and 1615.",
+            ),
+            (
+                "Explain quantum computing briefly.",
+                "Quantum computing uses quantum bits or qubits that can exist in superposition, enabling parallel computation for certain problems.",
+            ),
+            (
+                "What is the tallest mountain on Earth?",
+                "Mount Everest is the tallest mountain on Earth at 8,849 meters above sea level, located in the Himalayas.",
+            ),
+            (
+                "How does a combustion engine work?",
+                "A combustion engine burns fuel in cylinders, creating expanding gases that push pistons connected to a crankshaft to produce rotary motion.",
+            ),
+            (
+                "What is the speed of light?",
+                "The speed of light in a vacuum is approximately 299,792,458 meters per second, often rounded to 300,000 km/s.",
+            ),
         ];
 
         for (user_msg, assistant_msg) in &turns {
             session.add_user_turn(user_msg);
             session.add_assistant_turn(assistant_msg);
             db.save_message(session_id, "User", user_msg).await.unwrap();
-            db.save_message(session_id, "Assistant", assistant_msg).await.unwrap();
+            db.save_message(session_id, "Assistant", assistant_msg)
+                .await
+                .unwrap();
         }
 
         let msg_count_before = session.messages.len();
@@ -1273,7 +1384,9 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        db.save_summary(session_id, &summary, through_id).await.unwrap();
+        db.save_summary(session_id, &summary, through_id)
+            .await
+            .unwrap();
         session.apply_summary(&summary, keep_turns);
 
         let msg_count_after = session.messages.len();
@@ -1294,20 +1407,15 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_kv_cache_after_summarize() {
-
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter("info")
-            .try_init();
+        let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
 
         let _ = dotenvy::dotenv();
-        let llm_url = std::env::var("LLM_URL")
-            .unwrap_or_else(|_| "http://localhost:8080".to_string());
-        let llm_model = std::env::var("LLM_MODEL")
-            .unwrap_or_else(|_| "local-model".to_string());
+        let llm_url =
+            std::env::var("LLM_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
+        let llm_model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "local-model".to_string());
         let llm_api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
-        let llm_client =
-            crate::llm::OpenAIClient::new(&llm_url, &llm_model, 400, 0.3)
-                .with_api_key(&llm_api_key);
+        let llm_client = crate::llm::OpenAIClient::new(&llm_url, &llm_model, 400, 0.3)
+            .with_api_key(&llm_api_key);
 
         let db_dir = tempfile::TempDir::new().unwrap();
         let db_path = db_dir.path().join("bench_kv.db");

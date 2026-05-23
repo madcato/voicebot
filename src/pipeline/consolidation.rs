@@ -3,14 +3,14 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
-use crate::db::{Database, Memory};
-use crate::i18n;
-use crate::llm::{OpenAIClient, LlmSession};
-use crate::memory::{build_memory_context, extract_memories};
-use crate::profile::{build_profile_context, extract_facts, ProfileFact};
 use super::frames::PipelineFrame;
 use super::fsm::{PauseReason, PipelineState};
 use super::state::PipelineEvents;
+use crate::db::{Database, Memory};
+use crate::i18n;
+use crate::llm::{LlmSession, OpenAIClient};
+use crate::memory::{build_memory_context, extract_memories};
+use crate::profile::{ProfileFact, build_profile_context, extract_facts};
 
 /// Assemble the full system prompt from its components.
 ///
@@ -54,8 +54,7 @@ pub async fn run_consolidation_cycle(
         let prompt = s.build_summary_prompt(keep_turns);
         let mut conv = String::new();
         for msg in &s.messages[..count.min(s.messages.len())] {
-            if let (Some(role), Some(content)) =
-                (msg["role"].as_str(), msg["content"].as_str())
+            if let (Some(role), Some(content)) = (msg["role"].as_str(), msg["content"].as_str())
                 && (role == "user" || role == "assistant")
             {
                 conv.push_str(role);
@@ -71,7 +70,10 @@ pub async fn run_consolidation_cycle(
     if !conversation_text.is_empty() {
         let facts = extract_facts(background_client, &conversation_text, "").await;
         for fact in facts {
-            if let Err(e) = db.upsert_profile_fact(&fact.key, &fact.value, fact.confidence).await {
+            if let Err(e) = db
+                .upsert_profile_fact(&fact.key, &fact.value, fact.confidence)
+                .await
+            {
                 warn!(target: "profile", "Failed to save profile fact '{}': {}", fact.key, e);
             } else {
                 debug!(target: "profile", "Profile: {} = {} ({:.0}%)", fact.key, fact.value, fact.confidence * 100.0);
@@ -81,7 +83,8 @@ pub async fn run_consolidation_cycle(
 
     // Persistent memories.
     let existing_memories = db.load_active_memories().await.unwrap_or_default();
-    let mem_result = extract_memories(background_client, &conversation_text, &existing_memories).await;
+    let mem_result =
+        extract_memories(background_client, &conversation_text, &existing_memories).await;
     for id in &mem_result.archive_ids {
         if let Err(e) = db.deactivate_memory(*id).await {
             warn!(target: "memory", "Failed to archive memory id={}: {}", id, e);
@@ -89,7 +92,10 @@ pub async fn run_consolidation_cycle(
     }
     if !mem_result.new_memories.is_empty() {
         info!(target: "memory", "Extracted {} new memories", mem_result.new_memories.len());
-        if let Err(e) = db.save_memories_batch(&mem_result.new_memories, session_id).await {
+        if let Err(e) = db
+            .save_memories_batch(&mem_result.new_memories, session_id)
+            .await
+        {
             warn!(target: "memory", "Failed to save memories: {}", e);
         }
     }
@@ -121,7 +127,11 @@ pub async fn run_consolidation_cycle(
     if let Some(ref summary_text) = summary {
         let prev_through_id = db.get_summary_through_id(session_id).await.unwrap_or(0);
         let through_id = db
-            .get_message_id_at_offset(session_id, prev_through_id, turns_to_summarize.saturating_sub(1))
+            .get_message_id_at_offset(
+                session_id,
+                prev_through_id,
+                turns_to_summarize.saturating_sub(1),
+            )
             .await
             .ok()
             .flatten()
@@ -136,11 +146,19 @@ pub async fn run_consolidation_cycle(
     let fresh_profile = db.load_user_profile().await.unwrap_or_default();
     let fresh_profile_facts: Vec<ProfileFact> = fresh_profile
         .into_iter()
-        .map(|(key, value, confidence)| ProfileFact { key, value, confidence })
+        .map(|(key, value, confidence)| ProfileFact {
+            key,
+            value,
+            confidence,
+        })
         .collect();
     let fresh_memories = db.load_active_memories().await.unwrap_or_default();
     let new_system_prompt = build_system_prompt(
-        base_prompt, &fresh_profile_facts, &fresh_memories, agent_section, tool_section,
+        base_prompt,
+        &fresh_profile_facts,
+        &fresh_memories,
+        agent_section,
+        tool_section,
     );
 
     {
@@ -214,8 +232,16 @@ pub async fn consolidation_task(
         let (needs, approx_tokens, current_pct, msg_count, effective_threshold) = {
             let s = llm_session.lock().unwrap();
             let approx = s.approx_tokens();
-            let pct = if context_tokens > 0 { approx * 100 / context_tokens } else { 0 };
-            let effective = if triggered_by_idle { idle_min_context_pct } else { threshold_pct };
+            let pct = if context_tokens > 0 {
+                approx * 100 / context_tokens
+            } else {
+                0
+            };
+            let effective = if triggered_by_idle {
+                idle_min_context_pct
+            } else {
+                threshold_pct
+            };
             let needs = s.needs_consolidation(context_tokens, effective);
             (needs, approx, pct, s.messages.len(), effective)
         };
@@ -240,13 +266,17 @@ pub async fn consolidation_task(
 
             // Wait for LLM to finish its current turn before interrupting.
             loop {
-                if !pipeline_state_rx.borrow().is_busy() { break; }
+                if !pipeline_state_rx.borrow().is_busy() {
+                    break;
+                }
                 pipeline_state_rx.changed().await.ok();
             }
-            transcript_tx.send(PipelineFrame::SystemNotification {
-                text: i18n::get_notification("reorganize_memory", &language)
-                    .to_string(),
-            }).await.ok();
+            transcript_tx
+                .send(PipelineFrame::SystemNotification {
+                    text: i18n::get_notification("reorganize_memory", &language).to_string(),
+                })
+                .await
+                .ok();
 
             loop {
                 tokio::select! {
@@ -255,26 +285,37 @@ pub async fn consolidation_task(
                 }
             }
             tokio::time::sleep(Duration::from_secs(3)).await;
-            let _ = pipeline_state_tx.send(PipelineState::Paused { reason: PauseReason::Consolidation });
+            let _ = pipeline_state_tx.send(PipelineState::Paused {
+                reason: PauseReason::Consolidation,
+            });
             info!(target: "memory", "Pipeline paused — running consolidation...");
         } else {
             info!(target: "memory", "Idle timer — running silent consolidation...");
         }
 
         run_consolidation_cycle(
-            &background_client, &db, session_id, &llm_session,
-            keep_turns, &base_prompt, &agent_section, &tool_section,
+            &background_client,
+            &db,
+            session_id,
+            &llm_session,
+            keep_turns,
+            &base_prompt,
+            &agent_section,
+            &tool_section,
         )
         .await;
 
         if !triggered_by_idle {
             let _ = pipeline_state_tx.send(PipelineState::Idle);
             let now = chrono::Local::now().format("%H:%M").to_string();
-            transcript_tx.send(PipelineFrame::SystemNotification {
-                text: i18n::get_notification("memory_reorganized", &language)
-                    .replace("{now}", &now)
-                    .to_string(),
-            }).await.ok();
+            transcript_tx
+                .send(PipelineFrame::SystemNotification {
+                    text: i18n::get_notification("memory_reorganized", &language)
+                        .replace("{now}", &now)
+                        .to_string(),
+                })
+                .await
+                .ok();
             info!(target: "memory", "Consolidation cycle finished — pipeline resumed");
         }
 

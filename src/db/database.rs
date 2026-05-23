@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::path::Path;
 use uuid::Uuid;
 
@@ -89,11 +89,9 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id)",
-        )
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id)")
+            .execute(&self.pool)
+            .await?;
 
         // User profile: one row per fact key, updated in place.
         sqlx::query(
@@ -122,11 +120,9 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_memories_active ON memories(is_active)",
-        )
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_memories_active ON memories(is_active)")
+            .execute(&self.pool)
+            .await?;
 
         Ok(())
     }
@@ -172,12 +168,10 @@ impl Database {
         session_id: Uuid,
         limit: usize,
     ) -> Result<(Option<String>, Vec<(String, String)>)> {
-        let row = sqlx::query(
-            "SELECT summary, summary_through_id FROM sessions WHERE id = ?",
-        )
-        .bind(session_id.to_string())
-        .fetch_one(&self.pool)
-        .await?;
+        let row = sqlx::query("SELECT summary, summary_through_id FROM sessions WHERE id = ?")
+            .bind(session_id.to_string())
+            .fetch_one(&self.pool)
+            .await?;
 
         let summary: Option<String> = row.try_get("summary")?;
         let through_id: i64 = row.try_get("summary_through_id").unwrap_or(0);
@@ -264,12 +258,10 @@ impl Database {
 
     /// Return the current `summary_through_id` for a session (0 if no summary yet).
     pub async fn get_summary_through_id(&self, session_id: Uuid) -> Result<i64> {
-        let row = sqlx::query(
-            "SELECT summary_through_id FROM sessions WHERE id = ?",
-        )
-        .bind(session_id.to_string())
-        .fetch_one(&self.pool)
-        .await?;
+        let row = sqlx::query("SELECT summary_through_id FROM sessions WHERE id = ?")
+            .bind(session_id.to_string())
+            .fetch_one(&self.pool)
+            .await?;
         Ok(row.try_get("summary_through_id").unwrap_or(0))
     }
 
@@ -283,14 +275,12 @@ impl Database {
         summary: &str,
         through_message_id: i64,
     ) -> Result<()> {
-        sqlx::query(
-            "UPDATE sessions SET summary = ?, summary_through_id = ? WHERE id = ?",
-        )
-        .bind(summary)
-        .bind(through_message_id)
-        .bind(session_id.to_string())
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("UPDATE sessions SET summary = ?, summary_through_id = ? WHERE id = ?")
+            .bind(summary)
+            .bind(through_message_id)
+            .bind(session_id.to_string())
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -352,11 +342,9 @@ impl Database {
 
     /// Load all profile facts ordered by key.
     pub async fn load_user_profile(&self) -> Result<Vec<(String, String, f64)>> {
-        let rows = sqlx::query(
-            "SELECT key, value, confidence FROM user_profile ORDER BY key ASC",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = sqlx::query("SELECT key, value, confidence FROM user_profile ORDER BY key ASC")
+            .fetch_all(&self.pool)
+            .await?;
 
         Ok(rows
             .into_iter()
@@ -374,12 +362,7 @@ impl Database {
     /// An existing fact is only overwritten when the new confidence is strictly
     /// higher — this prevents low-quality inferences from degrading confirmed facts.
     #[allow(dead_code)]
-    pub async fn upsert_profile_fact(
-        &self,
-        key: &str,
-        value: &str,
-        confidence: f64,
-    ) -> Result<()> {
+    pub async fn upsert_profile_fact(&self, key: &str, value: &str, confidence: f64) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO user_profile (key, value, confidence, updated_at)

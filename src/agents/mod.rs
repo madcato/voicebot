@@ -37,8 +37,17 @@ impl std::fmt::Debug for ProactiveEvent {
         match self {
             Self::AgentResult { task, .. } => write!(f, "AgentResult({task:?})"),
             Self::InferenceDaemon { message } => write!(f, "InferenceDaemon({message:?})"),
-            Self::AgentQuestion { task_id, agent_name, question, options, .. } => {
-                write!(f, "AgentQuestion(task={task_id}, agent={agent_name}, q={question:?}, opts={options:?})")
+            Self::AgentQuestion {
+                task_id,
+                agent_name,
+                question,
+                options,
+                ..
+            } => {
+                write!(
+                    f,
+                    "AgentQuestion(task={task_id}, agent={agent_name}, q={question:?}, opts={options:?})"
+                )
             }
         }
     }

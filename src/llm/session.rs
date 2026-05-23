@@ -9,18 +9,30 @@ pub struct Message {
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: "system".into(), content: content.into() }
+        Self {
+            role: "system".into(),
+            content: content.into(),
+        }
     }
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: "user".into(), content: content.into() }
+        Self {
+            role: "user".into(),
+            content: content.into(),
+        }
     }
     #[allow(dead_code)]
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: "assistant".into(), content: content.into() }
+        Self {
+            role: "assistant".into(),
+            content: content.into(),
+        }
     }
     #[allow(dead_code)]
     pub fn tool(content: impl Into<String>) -> Self {
-        Self { role: "tool".into(), content: content.into() }
+        Self {
+            role: "tool".into(),
+            content: content.into(),
+        }
     }
 }
 
@@ -49,10 +61,14 @@ impl LlmSession {
 
     /// Returns the approximate token count of the current session content.
     pub fn approx_tokens(&self) -> usize {
-        let total_chars: usize = self.messages.iter().map(|m| {
-            m["content"].as_str().map_or(0, str::len)
-                + m.get("tool_calls").map_or(0, |tc| tc.to_string().len())
-        }).sum::<usize>()
+        let total_chars: usize = self
+            .messages
+            .iter()
+            .map(|m| {
+                m["content"].as_str().map_or(0, str::len)
+                    + m.get("tool_calls").map_or(0, |tc| tc.to_string().len())
+            })
+            .sum::<usize>()
             + self.original_system_prompt.len()
             + self.summary.as_deref().map_or(0, str::len);
         total_chars * 10 / 35
@@ -118,7 +134,10 @@ impl LlmSession {
         let mut msgs = vec![Message::system(self.system_content())];
         for m in &self.messages {
             if let (Some(role), Some(content)) = (m["role"].as_str(), m["content"].as_str()) {
-                msgs.push(Message { role: role.to_string(), content: content.to_string() });
+                msgs.push(Message {
+                    role: role.to_string(),
+                    content: content.to_string(),
+                });
             }
         }
         msgs
@@ -126,7 +145,8 @@ impl LlmSession {
 
     /// Append a user turn.
     pub fn add_user_turn(&mut self, text: &str) {
-        self.messages.push(serde_json::json!({"role": "user", "content": text}));
+        self.messages
+            .push(serde_json::json!({"role": "user", "content": text}));
     }
 
     /// Append an in-conversation system turn.
@@ -134,12 +154,14 @@ impl LlmSession {
     /// Used to deliver background task results and out-of-band notifications
     /// to the model without impersonating the user.
     pub fn add_system_turn(&mut self, text: &str) {
-        self.messages.push(serde_json::json!({"role": "system", "content": text}));
+        self.messages
+            .push(serde_json::json!({"role": "system", "content": text}));
     }
 
     /// Append the assistant's final response for this turn.
     pub fn add_assistant_turn(&mut self, text: &str) {
-        self.messages.push(serde_json::json!({"role": "assistant", "content": text}));
+        self.messages
+            .push(serde_json::json!({"role": "assistant", "content": text}));
     }
 
     /// Persist tool call exchanges from a completed pipeline turn.
@@ -200,12 +222,13 @@ impl LlmSession {
         let mut conversation = String::new();
         for msg in &self.messages[..summarize_count] {
             if let (Some(role), Some(content)) = (msg["role"].as_str(), msg["content"].as_str())
-                && (role == "user" || role == "assistant") {
-                    conversation.push_str(role);
-                    conversation.push_str(": ");
-                    conversation.push_str(content);
-                    conversation.push_str("\n\n");
-                }
+                && (role == "user" || role == "assistant")
+            {
+                conversation.push_str(role);
+                conversation.push_str(": ");
+                conversation.push_str(content);
+                conversation.push_str("\n\n");
+            }
         }
 
         Some(vec![
@@ -235,10 +258,14 @@ impl LlmSession {
         if self.messages.len() < 4 {
             return false;
         }
-        let total_chars: usize = self.messages.iter().map(|m| {
-            m["content"].as_str().map_or(0, str::len)
-                + m.get("tool_calls").map_or(0, |tc| tc.to_string().len())
-        }).sum::<usize>()
+        let total_chars: usize = self
+            .messages
+            .iter()
+            .map(|m| {
+                m["content"].as_str().map_or(0, str::len)
+                    + m.get("tool_calls").map_or(0, |tc| tc.to_string().len())
+            })
+            .sum::<usize>()
             + self.original_system_prompt.len()
             + self.summary.as_deref().map_or(0, str::len);
         let approx_tokens = total_chars * 10 / 35;
@@ -403,7 +430,7 @@ mod tests {
     #[test]
     fn all_messages_length_equals_system_plus_conversation() {
         let mut s = session_with_turns(3); // 6 conversation messages
-        s.apply_summary("Summary.", 4);    // now 4 messages kept
+        s.apply_summary("Summary.", 4); // now 4 messages kept
         let msgs = s.all_messages();
         assert_eq!(msgs.len(), 1 + 4); // system + 4 kept messages
         assert_eq!(msgs[0].role, "system");
@@ -561,5 +588,4 @@ mod tests {
         assert!(msgs[0].content.contains("[CONVERSATION SUMMARY]"));
         assert!(msgs[0].content.contains("Summary text."));
     }
-
 }

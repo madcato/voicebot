@@ -11,7 +11,10 @@ pub enum PipelineFrame {
     LLMToken { utterance_id: u64, token: String },
 
     /// LLM stream finished; carries the full concatenated response.
-    LLMResponseDone { utterance_id: u64, full_text: String },
+    LLMResponseDone {
+        utterance_id: u64,
+        full_text: String,
+    },
 
     /// A complete sentence ready for TTS synthesis.
     SentenceReady { utterance_id: u64, sentence: String },
@@ -23,7 +26,11 @@ pub enum PipelineFrame {
     SystemNotification { text: String },
 
     /// Result from a background tool/agent, continuing a prior LLM turn.
-    AgentResult { task: String, result: String, tool_call_id: Option<String> },
+    AgentResult {
+        task: String,
+        result: String,
+        tool_call_id: Option<String>,
+    },
 
     /// Text typed via TUI — treated as a user turn (no voice path).
     TextInput { text: String },

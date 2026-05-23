@@ -2,10 +2,10 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc, watch};
 
+use super::broadcast::ControlBroadcast;
 use crate::llm::LlmSession;
 use crate::pipeline::frames::PipelineFrame;
 use crate::pipeline::fsm::PipelineState;
-use super::broadcast::ControlBroadcast;
 
 pub struct ControlState {
     pub broadcast: ControlBroadcast,

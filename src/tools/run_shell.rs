@@ -10,7 +10,7 @@ use super::Tool;
 const DENYLIST: &[&str] = &[
     "rm -rf /",
     "rm -fr /",
-    ":(){",       // fork bomb skeleton
+    ":(){", // fork bomb skeleton
     "mkfs",
     "dd if=/dev/",
     "> /dev/sd",
@@ -83,8 +83,14 @@ impl Tool for RunShellTool {
         let cmd_lower = cmd.to_lowercase();
         for blocked in DENYLIST {
             if cmd_lower.contains(blocked) {
-                warn!("run_shell: blocked dangerous pattern {:?} in command {:?}", blocked, cmd);
-                return format!("Error: command blocked by safety policy (matched {:?}). Ask the user for confirmation before running destructive commands.", blocked);
+                warn!(
+                    "run_shell: blocked dangerous pattern {:?} in command {:?}",
+                    blocked, cmd
+                );
+                return format!(
+                    "Error: command blocked by safety policy (matched {:?}). Ask the user for confirmation before running destructive commands.",
+                    blocked
+                );
             }
         }
 
@@ -186,7 +192,11 @@ mod tests {
         // Generate output larger than MAX_OUTPUT_BYTES
         let result = tool().run("yes x | head -c 10000").await;
         assert!(result.contains("[output truncated]"), "{result:?}");
-        assert!(result.len() <= MAX_OUTPUT_BYTES + 100, "output too long: {}", result.len());
+        assert!(
+            result.len() <= MAX_OUTPUT_BYTES + 100,
+            "output too long: {}",
+            result.len()
+        );
     }
 
     #[tokio::test]

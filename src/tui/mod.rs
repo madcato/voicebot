@@ -8,11 +8,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
+use crossterm::event::{self, Event};
 use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use crossterm::event::{self, Event};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
@@ -31,10 +31,13 @@ pub async fn run(
     tts_muted: Arc<AtomicBool>,
     conv_mode: Arc<Mutex<ConversationMode>>,
 ) -> Result<()> {
-      enable_raw_mode()?;
+    enable_raw_mode()?;
     execute!(io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
     execute!(io::stdout(), crossterm::cursor::Hide)?;
-    execute!(io::stdout(), crossterm::terminal::Clear(crossterm::terminal::ClearType::All))?;
+    execute!(
+        io::stdout(),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+    )?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 

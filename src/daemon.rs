@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::agents::ProactiveEvent;
-use crate::llm::{OpenAIClient, LlmSession, Message};
+use crate::llm::{LlmSession, Message, OpenAIClient};
 
 /// Sentinel the LLM must return when it decides there is nothing to say.
 const NOTHING: &str = "NOTHING";
@@ -137,5 +137,4 @@ mod tests {
         assert!(result.contains("NOTHING"));
         assert!(result.contains("demonio de inferencia"));
     }
-
 }

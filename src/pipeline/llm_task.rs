@@ -4,14 +4,14 @@ use std::time::Instant;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
+use super::frames::PipelineFrame;
+use super::fsm::PipelineState;
+use super::state::PipelineEvents;
 use crate::agents::ProactiveEvent;
 use crate::analysis::ContextLens;
 use crate::db::Database;
 use crate::llm::{LlmSession, OpenAIClient, StreamToken};
-use crate::tools::{format_history, ToolRegistry};
-use super::frames::PipelineFrame;
-use super::fsm::PipelineState;
-use super::state::PipelineEvents;
+use crate::tools::{ToolRegistry, format_history};
 
 /// Monotonically increasing counter for tagging each pipeline run with a unique ID.
 static PIPELINE_RUN_ID: AtomicU64 = AtomicU64::new(0);
@@ -61,19 +61,26 @@ pub async fn llm_task(
         // Decode the incoming frame into (text, tool_continuation, is_text_input).
         let (text, tool_continuation, is_text_input) = match frame {
             PipelineFrame::TranscriptReady { text, .. } => (text, false, false),
-            PipelineFrame::TextInput { text }           => (text, false, true),
-            PipelineFrame::SystemNotification { text }  => (text, false, false),
-            PipelineFrame::AgentResult { tool_call_id: Some(_), .. } => (String::new(), true, false),
+            PipelineFrame::TextInput { text } => (text, false, true),
+            PipelineFrame::SystemNotification { text } => (text, false, false),
+            PipelineFrame::AgentResult {
+                tool_call_id: Some(_),
+                ..
+            } => (String::new(), true, false),
             _ => continue, // unexpected frame type — wait for next
         };
 
         // Wait for consolidation to finish before starting a new turn.
         loop {
-            if !matches!(*pipeline_state_rx.borrow(), PipelineState::Paused { .. }) { break; }
+            if !matches!(*pipeline_state_rx.borrow(), PipelineState::Paused { .. }) {
+                break;
+            }
             pipeline_state_rx.changed().await.ok();
         }
 
-        let _ = pipeline_state_tx.send(PipelineState::Thinking { utterance_id: pipeline_id });
+        let _ = pipeline_state_tx.send(PipelineState::Thinking {
+            utterance_id: pipeline_id,
+        });
 
         if tool_continuation {
             info!(target: "pipeline", "[pipe={}] Tool result delivered — continuing turn", pipeline_id);
@@ -89,7 +96,10 @@ pub async fn llm_task(
                 crate::tui::events::InputSource::Voice
             };
             tui_tx
-                .send(crate::tui::events::TuiEvent::UserMessage { text: text.clone(), source })
+                .send(crate::tui::events::TuiEvent::UserMessage {
+                    text: text.clone(),
+                    source,
+                })
                 .ok();
             tui_tx
                 .send(crate::tui::events::TuiEvent::StateChange(
@@ -165,24 +175,27 @@ pub async fn llm_task(
         'pipeline: {
             'tool_loop: for iter in 0..MAX_TOOL_ITERATIONS {
                 info!(target: "performance", "LLM request [pipe={}]", pipeline_id);
-                let (token_rx, stream_handle) =
-                    match llm_client.stream(&messages, &tool_defs).await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            error!(target: "llm", "LLM error: {}", e);
-                            #[cfg(feature = "tui")]
-                            tui_tx
-                                .send(crate::tui::events::TuiEvent::Error(format!(
-                                    "LLM error: {e}"
-                                )))
-                                .ok();
-                            let _ = sentences_tx.send(super::frames::PipelineFrame::SentenceReady {
+                let (token_rx, stream_handle) = match llm_client.stream(&messages, &tool_defs).await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        error!(target: "llm", "LLM error: {}", e);
+                        #[cfg(feature = "tui")]
+                        tui_tx
+                            .send(crate::tui::events::TuiEvent::Error(format!(
+                                "LLM error: {e}"
+                            )))
+                            .ok();
+                        let _ = sentences_tx
+                            .send(super::frames::PipelineFrame::SentenceReady {
                                 utterance_id: pipeline_id,
-                                sentence: "Lo siento, no pude conectar con el modelo de lenguaje.".to_string(),
-                            }).await;
-                            break 'pipeline;
-                        }
-                    };
+                                sentence: "Lo siento, no pude conectar con el modelo de lenguaje."
+                                    .to_string(),
+                            })
+                            .await;
+                        break 'pipeline;
+                    }
+                };
 
                 *t_llm_post_send.lock().unwrap() = Some(Instant::now());
 
@@ -263,14 +276,18 @@ pub async fn llm_task(
                                 "run_shell" => "Ejecutando.",
                                 _ => "Procesando en segundo plano, le aviso al terminar.",
                             };
-                            let _ = llm_tx.send(super::frames::PipelineFrame::LLMToken {
-                                utterance_id: pipeline_id,
-                                token: ack.to_string(),
-                            }).await;
-                            let _ = llm_tx.send(super::frames::PipelineFrame::LLMResponseDone {
-                                utterance_id: pipeline_id,
-                                full_text: ack.to_string(),
-                            }).await;
+                            let _ = llm_tx
+                                .send(super::frames::PipelineFrame::LLMToken {
+                                    utterance_id: pipeline_id,
+                                    token: ack.to_string(),
+                                })
+                                .await;
+                            let _ = llm_tx
+                                .send(super::frames::PipelineFrame::LLMResponseDone {
+                                    utterance_id: pipeline_id,
+                                    full_text: ack.to_string(),
+                                })
+                                .await;
                             events.llm_post_finished.notify_one();
 
                             let tc_id = format!("bg_{}_{}_{}", pipeline_id, iter, name);
@@ -390,8 +407,9 @@ pub async fn llm_task(
                 let tool_exchanges_c = messages[base_msg_len..].to_vec();
                 tokio::spawn(async move {
                     if !tool_exchanges_c.is_empty() {
-                        if let Err(e) =
-                            db_c.save_tool_exchanges(session_id, &tool_exchanges_c).await
+                        if let Err(e) = db_c
+                            .save_tool_exchanges(session_id, &tool_exchanges_c)
+                            .await
                         {
                             warn!(target: "db", "Failed to save tool exchanges: {}", e);
                         }

@@ -11,9 +11,7 @@ use anyhow::{Context, Result};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use whisper_cpp_plus::{
-    FullParams, SamplingStrategy, WhisperContext, WhisperVadProcessor,
-};
+use whisper_cpp_plus::{FullParams, SamplingStrategy, WhisperContext, WhisperVadProcessor};
 
 /// Events emitted while processing the audio stream.
 #[derive(Debug, Clone)]
@@ -82,8 +80,8 @@ impl WhisperSTTVAD {
             WhisperContext::new(&config.whisper_model).context("Failed to load Whisper model")?,
         );
 
-        let vad = WhisperVadProcessor::new(&config.vad_model)
-            .context("Failed to load VAD model")?;
+        let vad =
+            WhisperVadProcessor::new(&config.vad_model).context("Failed to load VAD model")?;
 
         tracing::info!(
             target: "sttvad",
@@ -128,11 +126,7 @@ impl WhisperSTTVAD {
         Ok(())
     }
 
-    async fn process_probe(
-        &mut self,
-        chunk: &[f32],
-        tx: &mpsc::Sender<SpeechEvent>,
-    ) -> Result<()> {
+    async fn process_probe(&mut self, chunk: &[f32], tx: &mpsc::Sender<SpeechEvent>) -> Result<()> {
         let has_speech = self.vad.detect_speech(chunk);
         let silence = if !has_speech {
             true

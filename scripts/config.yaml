@@ -12,6 +12,15 @@ servers:
           # - gemma-4-31B-it
           # - Qwen3.6-35B-A3B-FP8
           # - Qwen3.6-27B-NVFP4
+      vllm-gemma:
+        port: 8006
+        token: ""
+        models: 
+          - Gemma4-26B-Uncensored
+          # - gemma-4-31B-it-NVFP4
+          # - gemma-4-31B-it
+          # - Qwen3.6-35B-A3B-FP8
+          # - Qwen3.6-27B-NVFP4
       llama-server-amd:
         port: 8001
         token: ""

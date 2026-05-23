@@ -21,7 +21,10 @@ struct ThinkFilter {
 
 impl ThinkFilter {
     fn new() -> Self {
-        Self { in_think: false, pending: String::new() }
+        Self {
+            in_think: false,
+            pending: String::new(),
+        }
     }
 
     /// Feed the next raw token from the SSE stream.
@@ -138,12 +141,7 @@ pub struct OpenAIClient {
 }
 
 impl OpenAIClient {
-    pub fn new(
-        base_url: &str,
-        model: &str,
-        max_tokens: u32,
-        temperature: f32,
-    ) -> Self {
+    pub fn new(base_url: &str, model: &str, max_tokens: u32, temperature: f32) -> Self {
         let client = reqwest::Client::builder()
             .tcp_keepalive(Duration::from_secs(60))
             .tcp_nodelay(true) // Disable Nagle — send SSE tokens immediately
@@ -208,7 +206,7 @@ impl OpenAIClient {
             // mlx-lm requires sampling params per-request (no server-side config).
             "repetition_penalty": 1.1,
             "top_k": 40,
-            "min_p": 0.05,
+            // "min_p": 0.05,
         });
         if !tools.is_empty() {
             payload["tools"] = serde_json::json!(tools);
@@ -263,8 +261,9 @@ impl OpenAIClient {
                     let line = buf[..newline].trim().to_string();
                     buf = buf[newline + 1..].to_string();
 
-                    let Some(data) = line.strip_prefix("data: ") else { continue };
-
+                    let Some(data) = line.strip_prefix("data: ") else {
+                        continue;
+                    };
 
                     if data == "[DONE]" {
                         // Flush any content held back for partial-tag detection.
@@ -274,7 +273,12 @@ impl OpenAIClient {
                         // If a tool call was accumulating but no finish_reason arrived.
                         if let Some(name) = tool_name.take() {
                             tracing::info!(target: "llm", "Emitting ToolCall (via [DONE]): name={} args={}", name, tool_args);
-                            let _ = tx.send(StreamToken::ToolCall { name, args: tool_args.clone() }).await;
+                            let _ = tx
+                                .send(StreamToken::ToolCall {
+                                    name,
+                                    args: tool_args.clone(),
+                                })
+                                .await;
                         }
                         return;
                     }
@@ -291,26 +295,28 @@ impl OpenAIClient {
                     //
                     // Guard: mlx-lm sends `"tool_calls": []` on every content chunk;
                     // only treat it as a real call when the array is non-empty.
-                    let has_tool_call_delta =
-                        if let Some(calls) = json["choices"][0]["delta"]["tool_calls"].as_array() {
-                            if !calls.is_empty() {
-                                if let Some(call) = calls.first() {
-                                    if let Some(name) = call["function"]["name"].as_str()
-                                        && !name.is_empty() {
-                                            tracing::debug!(target: "llm", "Tool call detected: {}", name);
-                                            tool_name = Some(name.to_string());
-                                        }
-                                    if let Some(frag) = call["function"]["arguments"].as_str() {
-                                        tool_args.push_str(frag);
-                                    }
+                    let has_tool_call_delta = if let Some(calls) =
+                        json["choices"][0]["delta"]["tool_calls"].as_array()
+                    {
+                        if !calls.is_empty() {
+                            if let Some(call) = calls.first() {
+                                if let Some(name) = call["function"]["name"].as_str()
+                                    && !name.is_empty()
+                                {
+                                    tracing::debug!(target: "llm", "Tool call detected: {}", name);
+                                    tool_name = Some(name.to_string());
                                 }
-                                true
-                            } else {
-                                false
+                                if let Some(frag) = call["function"]["arguments"].as_str() {
+                                    tool_args.push_str(frag);
+                                }
                             }
+                            true
                         } else {
                             false
-                        };
+                        }
+                    } else {
+                        false
+                    };
 
                     // Now check finish_reason (tool_name may have just been set above).
                     if let Some(finish_reason) = json["choices"][0]["finish_reason"].as_str() {
@@ -321,20 +327,32 @@ impl OpenAIClient {
                             }
                             if let Some(name) = tool_name.take() {
                                 tracing::info!(target: "llm", "Emitting ToolCall (finish_reason=tool_calls): name={} args={}", name, tool_args);
-                                let _ = tx.send(StreamToken::ToolCall { name, args: tool_args.clone() }).await;
+                                let _ = tx
+                                    .send(StreamToken::ToolCall {
+                                        name,
+                                        args: tool_args.clone(),
+                                    })
+                                    .await;
                             }
                             return;
                         }
                     }
 
                     // Skip content processing if this chunk contained tool_calls data.
-                    if has_tool_call_delta { continue; }
+                    if has_tool_call_delta {
+                        continue;
+                    }
 
                     // Regular content token.
                     if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
-                        if content.is_empty() { continue; }
+                        if content.is_empty() {
+                            continue;
+                        }
                         if let Some(filtered) = think.process(content)
-                            && tx.send(StreamToken::Content(filtered)).await.is_err() { return; }
+                            && tx.send(StreamToken::Content(filtered)).await.is_err()
+                        {
+                            return;
+                        }
                     }
                 }
             }
@@ -370,8 +388,16 @@ impl OpenAIClient {
         }
 
         let json: serde_json::Value = response.json().await?;
-        let text = json["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string();
-        Ok(if self.thinking { strip_think_blocks(&text) } else { text })
+        let text = json["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        Ok(if self.thinking {
+            strip_think_blocks(&text)
+        } else {
+            text
+        })
     }
 
     /// One-shot completion with a short token budget. Used for structured
@@ -402,8 +428,16 @@ impl OpenAIClient {
         }
 
         let json: serde_json::Value = response.json().await?;
-        let text = json["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string();
-        Ok(if self.thinking { strip_think_blocks(&text) } else { text })
+        let text = json["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        Ok(if self.thinking {
+            strip_think_blocks(&text)
+        } else {
+            text
+        })
     }
 
     /// One-shot multimodal completion with a single image + text prompt.
@@ -450,14 +484,23 @@ impl OpenAIClient {
             .unwrap_or("")
             .trim()
             .to_string();
-        Ok(if self.thinking { strip_think_blocks(&text) } else { text })
+        Ok(if self.thinking {
+            strip_think_blocks(&text)
+        } else {
+            text
+        })
     }
 
     /// Check if the server is reachable.
     #[allow(dead_code)]
     pub async fn health_check(&self, base_url: &str) -> bool {
         let url = format!("{}/health", base_url.trim_end_matches('/'));
-        self.client.get(&url).send().await.map(|r| r.status().is_success()).unwrap_or(false)
+        self.client
+            .get(&url)
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
     }
 }
 
@@ -475,7 +518,9 @@ mod tests {
     }
 
     fn messages_to_json(msgs: &[Message]) -> Vec<serde_json::Value> {
-        msgs.iter().map(|m| serde_json::json!({"role": m.role, "content": m.content})).collect()
+        msgs.iter()
+            .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
+            .collect()
     }
 
     // ── complete (non-streaming) ───────────────────────────────────────────────
@@ -606,11 +651,16 @@ mod tests {
 
         let client = OpenAIClient::new(&server.uri(), "test-model", 400, 0.7);
         let messages = make_messages();
-        let (mut rx, _handle) = client.stream(&messages_to_json(&messages), &[]).await.unwrap();
+        let (mut rx, _handle) = client
+            .stream(&messages_to_json(&messages), &[])
+            .await
+            .unwrap();
 
         let mut collected = String::new();
         while let Some(token) = rx.recv().await {
-            if let StreamToken::Content(s) = token { collected.push_str(&s); }
+            if let StreamToken::Content(s) = token {
+                collected.push_str(&s);
+            }
         }
         assert_eq!(collected, "Hello world");
     }
@@ -635,11 +685,16 @@ mod tests {
 
         let client = OpenAIClient::new(&server.uri(), "test-model", 400, 0.7);
         let messages = make_messages();
-        let (mut rx, _handle) = client.stream(&messages_to_json(&messages), &[]).await.unwrap();
+        let (mut rx, _handle) = client
+            .stream(&messages_to_json(&messages), &[])
+            .await
+            .unwrap();
 
         let mut collected = String::new();
         while let Some(token) = rx.recv().await {
-            if let StreamToken::Content(s) = token { collected.push_str(&s); }
+            if let StreamToken::Content(s) = token {
+                collected.push_str(&s);
+            }
         }
         assert_eq!(collected, "Hi");
     }
@@ -675,7 +730,10 @@ mod tests {
         let mut f = ThinkFilter::new();
         // "<think>" split as "<th" + "ink>" + content
         assert_eq!(f.process("<th"), None); // buffered as partial tag
-        assert_eq!(f.process("ink>thoughts</think>answer").as_deref(), Some("answer"));
+        assert_eq!(
+            f.process("ink>thoughts</think>answer").as_deref(),
+            Some("answer")
+        );
     }
 
     #[test]
@@ -701,7 +759,11 @@ mod tests {
         f2.process("Hello <thi"); // "<thi" held as partial
         let flushed = f2.flush();
         // Flush should emit the pending partial since it never completed
-        assert!(flushed.as_deref().unwrap_or("").contains("<thi") || flushed.is_none() || flushed.as_deref() == Some("<thi"));
+        assert!(
+            flushed.as_deref().unwrap_or("").contains("<thi")
+                || flushed.is_none()
+                || flushed.as_deref() == Some("<thi")
+        );
     }
 
     #[test]
@@ -769,7 +831,10 @@ mod tests {
         }
 
         let keep_n = 4;
-        assert!(session.needs_summarization(50), "should trigger at small context window");
+        assert!(
+            session.needs_summarization(50),
+            "should trigger at small context window"
+        );
 
         // Build the summarization request and call the mock LLM
         let summary_messages = session.build_summary_prompt(keep_n).unwrap();

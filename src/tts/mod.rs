@@ -1,15 +1,15 @@
-pub mod piper;
-pub mod sentence;
-#[cfg(feature = "kokoro")]
-pub mod kokoro;
 #[cfg(feature = "avspeech")]
 pub mod avspeech;
-
-pub use sentence::SentenceSplitter;
 #[cfg(feature = "kokoro")]
-pub use kokoro::KokoroTts;
+pub mod kokoro;
+pub mod piper;
+pub mod sentence;
+
 #[cfg(feature = "avspeech")]
 pub use avspeech::AvSpeechTts;
+#[cfg(feature = "kokoro")]
+pub use kokoro::KokoroTts;
+pub use sentence::SentenceSplitter;
 
 /// Unified TTS backend.
 ///
@@ -32,23 +32,23 @@ pub enum TtsEngine {
 }
 
 impl TtsEngine {
-  #[allow(unreachable_patterns)]
-     #[allow(unused_variables)]
-     pub fn synthesize(&self, text: &str) -> anyhow::Result<Vec<f32>> {
-         match self {
-             #[cfg(feature = "avspeech")]
-             Self::AvSpeech(t) => t.synthesize(text),
-             #[cfg(feature = "kokoro")]
-             Self::Kokoro(t) => t.synthesize(text),
-             #[cfg(test)]
-             Self::Mock(t) => t.synthesize(text),
-             _ => unreachable!("no TTS backend enabled"),
-         }
-     }
+    #[allow(unreachable_patterns)]
+    #[allow(unused_variables)]
+    pub fn synthesize(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        match self {
+            #[cfg(feature = "avspeech")]
+            Self::AvSpeech(t) => t.synthesize(text),
+            #[cfg(feature = "kokoro")]
+            Self::Kokoro(t) => t.synthesize(text),
+            #[cfg(test)]
+            Self::Mock(t) => t.synthesize(text),
+            _ => unreachable!("no TTS backend enabled"),
+        }
+    }
 
-#[allow(unreachable_patterns)]
-     #[allow(unused_variables)]
-     pub fn sample_rate(&self) -> u32 {
+    #[allow(unreachable_patterns)]
+    #[allow(unused_variables)]
+    pub fn sample_rate(&self) -> u32 {
         match self {
             #[cfg(feature = "avspeech")]
             Self::AvSpeech(t) => t.sample_rate(),

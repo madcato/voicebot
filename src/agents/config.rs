@@ -51,10 +51,7 @@ impl AgentRegistry {
                 .collect();
 
             if !names.is_empty() {
-                let agents = names
-                    .into_iter()
-                    .filter_map(load_agent_from_env)
-                    .collect();
+                let agents = names.into_iter().filter_map(load_agent_from_env).collect();
                 return Self { agents };
             }
         }
@@ -67,7 +64,9 @@ impl AgentRegistry {
         if (has_command || has_mode || has_acp)
             && let Some(agent) = load_legacy_agent()
         {
-            return Self { agents: vec![agent] };
+            return Self {
+                agents: vec![agent],
+            };
         }
 
         // ── No agents configured ────────────────────────────────────────
@@ -114,8 +113,7 @@ impl AgentRegistry {
 fn load_agent_from_env(name: &str) -> Option<AgentConfig> {
     let upper = name.to_uppercase().replace('-', "_");
 
-    let mode = env::var(format!("AGENT_{}_MODE", upper))
-        .unwrap_or_else(|_| "acp".to_string());
+    let mode = env::var(format!("AGENT_{}_MODE", upper)).unwrap_or_else(|_| "acp".to_string());
 
     let command = env::var(format!("AGENT_{}_COMMAND", upper)).ok();
     let acp_command = env::var(format!("AGENT_{}_ACP_COMMAND", upper))
@@ -129,8 +127,7 @@ fn load_agent_from_env(name: &str) -> Option<AgentConfig> {
         return None;
     }
 
-    let acp_warmup = env::var(format!("AGENT_{}_ACP_WARMUP", upper))
-        .as_deref() == Ok("1");
+    let acp_warmup = env::var(format!("AGENT_{}_ACP_WARMUP", upper)).as_deref() == Ok("1");
 
     let when_to_use = env::var(format!("AGENT_{}_WHEN_TO_USE", upper))
         .unwrap_or_else(|_| default_when_to_use(name));
@@ -153,14 +150,13 @@ fn load_agent_from_env(name: &str) -> Option<AgentConfig> {
 fn load_legacy_agent() -> Option<AgentConfig> {
     let command = env::var("AGENT_COMMAND").ok();
     let mode = env::var("AGENT_MODE").unwrap_or_else(|_| "cli".to_string());
-    let acp_command = env::var("AGENT_ACP_COMMAND")
-        .unwrap_or_else(|_| "hermes acp".to_string());
+    let acp_command = env::var("AGENT_ACP_COMMAND").unwrap_or_else(|_| "hermes acp".to_string());
     let acp_warmup = env::var("AGENT_ACP_WARMUP").as_deref() == Ok("1");
 
     // Legacy agents use built-in defaults for when_to_use and instructions.
     let when_to_use = default_when_to_use("hermes");
-    let instructions = env::var("AGENT_PROMPT_INSTRUCTIONS")
-        .unwrap_or_else(|_| default_instructions("hermes"));
+    let instructions =
+        env::var("AGENT_PROMPT_INSTRUCTIONS").unwrap_or_else(|_| default_instructions("hermes"));
 
     Some(AgentConfig {
         name: "hermes".to_string(),
@@ -250,10 +246,7 @@ mod tests {
                 assert_eq!(reg.agents.len(), 1);
                 assert_eq!(reg.agents[0].name, "hermes");
                 assert_eq!(reg.agents[0].mode, "cli");
-                assert_eq!(
-                    reg.agents[0].command.as_deref(),
-                    Some("hermes chat")
-                );
+                assert_eq!(reg.agents[0].command.as_deref(), Some("hermes chat"));
             },
         );
     }

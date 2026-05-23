@@ -50,7 +50,11 @@ mod tests {
         // Example:  "14:05:32, Saturday 08 March 2025"
         let result = CurrentTimeTool.run("").await;
         let parts: Vec<&str> = result.splitn(2, ", ").collect();
-        assert_eq!(parts.len(), 2, "output must contain ', ' separator: {result:?}");
+        assert_eq!(
+            parts.len(),
+            2,
+            "output must contain ', ' separator: {result:?}"
+        );
 
         // Time part: HH:MM:SS
         let time = parts[0];
@@ -93,6 +97,9 @@ mod tests {
     async fn run_ignores_args() {
         // current_time does not use args — any input should still return a valid time
         let result = CurrentTimeTool.run("ignored args").await;
-        assert!(result.contains(':'), "should still return a time: {result:?}");
+        assert!(
+            result.contains(':'),
+            "should still return a time: {result:?}"
+        );
     }
 }

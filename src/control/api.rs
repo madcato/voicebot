@@ -1,12 +1,12 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::Stream;
@@ -14,9 +14,9 @@ use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
 use tracing::error;
 
-use crate::pipeline::frames::PipelineFrame;
 use super::broadcast::ControlEvent;
 use super::state::ControlState;
+use crate::pipeline::frames::PipelineFrame;
 
 const MAX_SSE_BUFFER_SIZE: usize = 1024 * 1024;
 
@@ -46,27 +46,30 @@ async fn sse_events(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = state.broadcast.subscribe();
     let mut total_bytes_sent = 0usize;
-    let stream = futures_util::stream::unfold((rx, total_bytes_sent), |(mut rx, mut total_bytes)| async move {
-        if total_bytes >= MAX_SSE_BUFFER_SIZE {
-            return None;
-        }
-        match rx.recv().await {
-            Ok(event) => {
-                let json = serde_json::to_string(&event).unwrap_or_default();
-                total_bytes += json.len();
-                Some((Ok(Event::default().data(json)), (rx, total_bytes)))
+    let stream = futures_util::stream::unfold(
+        (rx, total_bytes_sent),
+        |(mut rx, mut total_bytes)| async move {
+            if total_bytes >= MAX_SSE_BUFFER_SIZE {
+                return None;
             }
-            Err(RecvError::Lagged(n)) => {
-                let err = ControlEvent::Error {
-                    message: format!("Missed {n} events (subscriber lagged)"),
-                };
-                let json = serde_json::to_string(&err).unwrap_or_default();
-                total_bytes += json.len();
-                Some((Ok(Event::default().data(json)), (rx, total_bytes)))
+            match rx.recv().await {
+                Ok(event) => {
+                    let json = serde_json::to_string(&event).unwrap_or_default();
+                    total_bytes += json.len();
+                    Some((Ok(Event::default().data(json)), (rx, total_bytes)))
+                }
+                Err(RecvError::Lagged(n)) => {
+                    let err = ControlEvent::Error {
+                        message: format!("Missed {n} events (subscriber lagged)"),
+                    };
+                    let json = serde_json::to_string(&err).unwrap_or_default();
+                    total_bytes += json.len();
+                    Some((Ok(Event::default().data(json)), (rx, total_bytes)))
+                }
+                Err(RecvError::Closed) => None,
             }
-            Err(RecvError::Closed) => None,
-        }
-    });
+        },
+    );
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
@@ -102,12 +105,13 @@ async fn post_mute(
     Json(body): Json<MuteBody>,
 ) -> StatusCode {
     state.tts_muted.store(body.muted, Ordering::SeqCst);
-    state.broadcast.send(ControlEvent::MuteChanged { muted: body.muted });
+    state
+        .broadcast
+        .send(ControlEvent::MuteChanged { muted: body.muted });
     StatusCode::NO_CONTENT
 }
 
 async fn post_barge_in(State(state): State<Arc<ControlState>>) -> StatusCode {
-    state.play_cancel.store(true, Ordering::SeqCst);
     let _ = state.barge_in_tx.send(0);
     StatusCode::NO_CONTENT
 }

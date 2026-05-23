@@ -96,14 +96,15 @@ impl SentenceSplitter {
             // last whitespace before MAX_CHARS to avoid holding tokens indefinitely.
             if self.buffer.len() >= EARLY_SPLIT_MAX_CHARS
                 && let Some(pos) = self.buffer[..EARLY_SPLIT_MAX_CHARS].rfind(' ')
-                    && pos >= EARLY_SPLIT_MIN_CHARS {
-                        let sentence = self.buffer[..pos].trim().to_string();
-                        self.buffer = self.buffer[pos + 1..].to_string();
-                        if !sentence.is_empty() {
-                            self.first_emitted = true;
-                            return Some(sentence);
-                        }
-                    }
+                && pos >= EARLY_SPLIT_MIN_CHARS
+            {
+                let sentence = self.buffer[..pos].trim().to_string();
+                self.buffer = self.buffer[pos + 1..].to_string();
+                if !sentence.is_empty() {
+                    self.first_emitted = true;
+                    return Some(sentence);
+                }
+            }
         }
 
         None
@@ -168,7 +169,7 @@ mod tests {
         // "10:" at end of buffer must not fire; only splits when whitespace follows
         let mut s = SentenceSplitter::new();
         assert!(s.push("Son las 10").is_none());
-        assert!(s.push(":").is_none());   // buffer ends with ":", no whitespace yet
+        assert!(s.push(":").is_none()); // buffer ends with ":", no whitespace yet
         assert!(s.push("30").is_none());
         assert!(s.push(" hoy.").is_none());
         assert_eq!(s.flush().as_deref(), Some("Son las 10:30 hoy."));
@@ -179,7 +180,7 @@ mod tests {
         // "3." at end of buffer must not fire
         let mut s = SentenceSplitter::new();
         assert!(s.push("El valor es 3").is_none());
-        assert!(s.push(".").is_none());   // buffer ends with ".", no whitespace yet
+        assert!(s.push(".").is_none()); // buffer ends with ".", no whitespace yet
         assert!(s.push("1415").is_none());
         assert_eq!(s.flush().as_deref(), Some("El valor es 3.1415"));
     }
@@ -202,7 +203,11 @@ mod tests {
         // Second match "sencilla, " at pos ~42 — this is >= 20
         assert!(result.is_some(), "should split at comma after 20+ chars");
         let text = result.unwrap();
-        assert!(text.contains("sencilla,"), "split should include up to the comma: {}", text);
+        assert!(
+            text.contains("sencilla,"),
+            "split should include up to the comma: {}",
+            text
+        );
     }
 
     #[test]
@@ -225,7 +230,10 @@ mod tests {
         s.push(long_text);
         // Should have split at a word boundary before EARLY_SPLIT_MAX_CHARS
         // The buffer is > 80 chars, so it should force a split
-        assert!(s.first_emitted, "should have emitted first sentence via max-chars fallback");
+        assert!(
+            s.first_emitted,
+            "should have emitted first sentence via max-chars fallback"
+        );
     }
 
     #[test]
@@ -234,6 +242,9 @@ mod tests {
         s.push("Primera respuesta. ");
         assert!(s.first_emitted);
         s.flush();
-        assert!(!s.first_emitted, "flush should reset first_emitted for next response");
+        assert!(
+            !s.first_emitted,
+            "flush should reset first_emitted for next response"
+        );
     }
 }

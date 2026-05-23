@@ -3,9 +3,9 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::info;
 
+use super::state::PipelineEvents;
 use crate::pipeline::frames::PipelineFrame;
 use crate::tts::SentenceSplitter;
-use super::state::PipelineEvents;
 
 /// SEN task: receives LLM tokens via typed channel, splits them into sentences,
 /// and forwards complete sentences to tts_task via a second typed channel.

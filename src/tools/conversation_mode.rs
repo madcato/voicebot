@@ -70,12 +70,11 @@ impl Tool for SetConversationModeTool {
 
         let msg = match new_mode {
             ConversationMode::AmbientLocked => "Ambient mode activated.",
-            ConversationMode::Active        => "Active mode restored.",
-            ConversationMode::Ambient       => unreachable!(),
+            ConversationMode::Active => "Active mode restored.",
+            ConversationMode::Ambient => unreachable!(),
         };
 
         *self.mode.lock().unwrap() = new_mode;
         msg.to_string()
     }
 }
-
