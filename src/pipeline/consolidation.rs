@@ -12,9 +12,57 @@ use crate::llm::{LlmSession, OpenAIClient};
 use crate::memory::{build_memory_context, extract_memories};
 use crate::profile::{ProfileFact, build_profile_context, extract_facts};
 
+/// Returns the routing instructions section for the system prompt.
+///
+/// This section tells the LLM when to respond directly vs delegate to Hermes,
+/// helping avoid hallucinated answers and unnecessary agent delegation.
+/// Must be kept under ~500 tokens; written in Spanish.
+pub fn build_routing_section() -> &'static str {
+    "\n\n## CUÁNDO RESPONDER DIRECTAMENTE VS DELEGAR A HERMES\n\n\
+      ✅ Responde DIRECTAMENTE (sin delegar) cuando:\n\
+      - La pregunta tiene una respuesta factual breve que puedes dar \
+      desde tus conocimientos generales.\n\
+      - El usuario pide información sobre el contexto actual de la conversación.\n\
+      - Puedes usar tus herramientas nativas para obtener la respuesta \
+      rápidamente.\n\
+      - Es una tarea de conversación cotidiana (saludos, preguntas simples, \
+      traducciones breves, opinión general).\n\n\
+      🔄 Delega a Hermes cuando:\n\
+      - Necesitas programar, depurar, o modificar código del sistema.\n\
+      - Requieres investigación profunda (múltiples consultas), análisis de \
+      documentos o flujos de múltiples pasos.\n\
+      - Lees documentos grandes (> 1 página) o informes complejos.\n\
+      - La tarea necesita acceso a herramientas externas que tú no tienes \
+      (calendario, explorador de archivos, bases de datos, \
+      gestores de proyectos, agentes especializados).\n\
+      - No estás completamente seguro de la respuesta y delegarías \
+      a un especialista.\n\n\
+      ⚠️ ADVERTENCIA IMPORTANTE:\n\
+      Si no estás completamente seguro de una respuesta factual, \
+      NO inventes datos. Delega a Hermes. Es mejor delegar una vez de más \
+      que dar una respuesta incorrecta. Nunca digas \"según mi conocimiento\" \
+      si podrías estar equivocado — delega.\n\n\
+      📏 REGLA DE PRECEDENCIA:\n\
+      Cuando varias reglas aplican simultáneamente, prioriza la delegación \
+      a Hermes si la incertidumbre supera tu confianza en las herramientas nativas.\n\n\
+      EJEMPLOS:\n\
+      - \"¿Qué hora es?\" → Responde directamente.\n\
+      - \"Busca algo rápido en la web\" → Responde directamente (búsqueda puntual). \
+      Investigación profunda con múltiples fuentes → Delega a Hermes.\n\
+      - \"Refactoriza el módulo de audio para usar async streams\" → \
+      Delega a Hermes.\n\
+      - \"¿Cuál es la capital de Francia?\" → Responde directamente.\n\
+      - \"Analiza el rendimiento del sistema y optimiza los queries lentos\" → \
+      Delega a Hermes.\n\
+      - \"Traduce 'hello world' al español\" → Responde directamente.\n\
+      - \"Lee este documento corto (< 1 página) y resume\" → Responde directamente.\n\
+      - \"Investiga las causas de la caída del servidor ayer y genera \
+      un reporte\" → Delega a Hermes."
+}
+
 /// Assemble the full system prompt from its components.
 ///
-/// Order: base prompt → [USER PROFILE] → [MEMORIES] → [AGENTS] → tool instructions.
+/// Order: base prompt → [USER PROFILE] → [MEMORIES] → [ROUTING] → [AGENTS] → tool instructions.
 pub fn build_system_prompt(
     base_prompt: &str,
     profile_facts: &[ProfileFact],
@@ -23,10 +71,11 @@ pub fn build_system_prompt(
     tool_section: &str,
 ) -> String {
     format!(
-        "{}{}{}{}{}",
+        "{}{}{}{}{}{}",
         base_prompt,
         build_profile_context(profile_facts),
         build_memory_context(memories),
+        build_routing_section(),
         agent_section,
         tool_section,
     )

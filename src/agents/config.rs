@@ -27,7 +27,7 @@ pub struct AgentConfig {
 /// Registry of all configured external agents.
 ///
 /// Created once at startup from environment variables. Supports both the
-/// new multi-agent format (`AGENTS=hermes,opencode`) and the legacy
+/// new multi-agent format (`AGENTS=hermes,<nombre_agente>`) and the legacy
 /// single-agent format (`AGENT_COMMAND` / `AGENT_MODE`).
 #[derive(Debug, Clone)]
 pub struct AgentRegistry {
@@ -173,7 +173,6 @@ fn load_legacy_agent() -> Option<AgentConfig> {
 fn default_acp_command(name: &str) -> String {
     match name {
         "hermes" => "hermes acp".to_string(),
-        "opencode" => "opencode acp".to_string(),
         _ => format!("{} acp", name),
     }
 }
@@ -181,13 +180,11 @@ fn default_acp_command(name: &str) -> String {
 /// Default "when to use" text for known agent names.
 fn default_when_to_use(name: &str) -> String {
     match name {
-        "hermes" => "Tareas generales de investigación, búsqueda web, gestión de calendario, \
-                     análisis de documentos, y tareas que requieren razonamiento extendido \
-                     con acceso a herramientas del sistema."
-            .to_string(),
-        "opencode" => "Tareas de programación complejas: refactorización, análisis de código, \
-                       modificaciones multi-fichero, generación de código, debugging, y \
-                       cualquier tarea que requiera comprensión profunda del codebase."
+        "hermes" => "Único agente externo disponible. Punto de contacto para lo que Voicebot \
+                      no puede resolver con sus propias herramientas: programación y código, \
+                      investigación profunda, gestión de calendario, flujos de múltiples pasos, \
+                      y cualquier tarea que requiera razonamiento extendido o herramientas \
+                      del sistema."
             .to_string(),
         _ => format!("Tareas delegables al agente externo {name}."),
     }
@@ -196,17 +193,14 @@ fn default_when_to_use(name: &str) -> String {
 /// Default instructions for known agent names.
 fn default_instructions(name: &str) -> String {
     match name {
-        "hermes" => "Eres Hermes, un agente experto y ultra-eficiente. Tienes acceso a \
-                     herramientas de computadora, archivos, web, calendario y razonamiento \
-                     extendido. Resuelve la tarea de forma autónoma y devuelve un resultado \
-                     conciso y accionable."
+        "hermes" => "Eres Hermes, el gateway de agentes externos. Puedes redirigir \
+                      internamente a especialistas (programadores, investigadores, etc.). \
+                      Recibe la consulta de Voicebot, coordina los recursos necesarios y devuelves \
+                      una respuesta clara y ejecutable."
             .to_string(),
-        "opencode" => "Eres OpenCode, un agente de programación experto. Tienes acceso completo \
-                       al codebase, herramientas de shell, archivos, y capacidad de editar código. \
-                       Resuelve la tarea de programación de forma autónoma, siguiendo las \
-                       convenciones del proyecto. Devuelve un resumen conciso de los cambios realizados."
-            .to_string(),
-        _ => format!("Eres un agente externo ({name}). Resuelve la tarea delegada de forma autónoma."),
+        _ => format!(
+            "Eres un agente externo ({name}). Resuelve la tarea delegada de forma autónoma."
+        ),
     }
 }
 
@@ -272,17 +266,17 @@ mod tests {
     fn multi_agent_from_env() {
         with_vars(
             [
-                ("AGENTS", Some("hermes,opencode")),
+                ("AGENTS", Some("hermes,generic_test")),
                 ("AGENT_HERMES_MODE", Some("acp")),
                 ("AGENT_HERMES_ACP_COMMAND", Some("hermes acp")),
-                ("AGENT_OPENCODE_MODE", Some("acp")),
-                ("AGENT_OPENCODE_ACP_COMMAND", Some("opencode acp")),
+                ("AGENT_GENERIC_TEST_MODE", Some("acp")),
+                ("AGENT_GENERIC_TEST_ACP_COMMAND", Some("generic_test acp")),
             ],
             || {
                 let reg = AgentRegistry::from_env();
                 assert_eq!(reg.agents.len(), 2);
                 assert_eq!(reg.agents[0].name, "hermes");
-                assert_eq!(reg.agents[1].name, "opencode");
+                assert_eq!(reg.agents[1].name, "generic_test");
             },
         );
     }
@@ -316,14 +310,13 @@ mod tests {
     #[test]
     fn default_acp_command_known_agents() {
         assert_eq!(default_acp_command("hermes"), "hermes acp");
-        assert_eq!(default_acp_command("opencode"), "opencode acp");
         assert_eq!(default_acp_command("unknown"), "unknown acp");
     }
 
     #[test]
     fn capitalize_works() {
         assert_eq!(capitalize("hermes"), "Hermes");
-        assert_eq!(capitalize("opencode"), "Opencode");
+        assert_eq!(capitalize("my_agent"), "My_agent");
         assert_eq!(capitalize(""), "");
     }
 }
