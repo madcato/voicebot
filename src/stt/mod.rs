@@ -7,7 +7,7 @@
 //! in whisper-cpp-plus, re-implemented here so it can be driven from an async
 //! tokio channel instead of a blocking `Read` source.
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -29,6 +29,10 @@ pub struct WhisperSTTVADConfig {
     pub language: String,
     /// Milliseconds of continuous silence required to close a speech segment.
     pub silence_ms: u32,
+    /// Speech probability threshold to transition from silence -> speech.
+    pub vad_start_threshold: f32,
+    /// Speech probability threshold to stay in speech (speech -> silence when below).
+    pub vad_end_threshold: f32,
 }
 
 impl Default for WhisperSTTVADConfig {
@@ -38,6 +42,8 @@ impl Default for WhisperSTTVADConfig {
             vad_model: "models/ggml-silero-vad.bin".to_string(),
             language: "es".to_string(),
             silence_ms: 500,
+            vad_start_threshold: 0.65,
+            vad_end_threshold: 0.45,
         }
     }
 }
@@ -53,13 +59,12 @@ const PRE_ROLL_SAMPLES: usize = SAMPLE_RATE * PRE_ROLL_MS / 1000;
 /// Hard cap on a single speech segment before forcing a cut.
 const MAX_SEGMENT_MS: usize = 20_000;
 const MAX_SEGMENT_SAMPLES: usize = SAMPLE_RATE * MAX_SEGMENT_MS / 1000;
-/// VAD probability threshold: average Silero speech prob above this = speech.
-const VAD_THRESHOLD: f32 = 0.5;
-
 pub struct WhisperSTTVAD {
     ctx: Arc<WhisperContext>,
     vad: WhisperVadProcessor,
     language: String,
+    vad_start_threshold: f32,
+    vad_end_threshold: f32,
 
     // State machine
     in_speech: bool,
@@ -74,6 +79,29 @@ pub struct WhisperSTTVAD {
 
 impl WhisperSTTVAD {
     pub fn new(config: WhisperSTTVADConfig) -> Result<Self> {
+        ensure!(
+            (0.0..=1.0).contains(&config.vad_start_threshold),
+            "vad_start_threshold must be in [0.0, 1.0], got {}",
+            config.vad_start_threshold
+        );
+        ensure!(
+            (0.0..=1.0).contains(&config.vad_end_threshold),
+            "vad_end_threshold must be in [0.0, 1.0], got {}",
+            config.vad_end_threshold
+        );
+
+        let vad_end_threshold = if config.vad_end_threshold > config.vad_start_threshold {
+            tracing::warn!(
+                target: "sttvad",
+                "VAD end threshold ({}) is higher than start threshold ({}). Clamping end to start.",
+                config.vad_end_threshold,
+                config.vad_start_threshold
+            );
+            config.vad_start_threshold
+        } else {
+            config.vad_end_threshold
+        };
+
         let ctx = Arc::new(
             WhisperContext::new(&config.whisper_model).context("Failed to load Whisper model")?,
         );
@@ -83,8 +111,13 @@ impl WhisperSTTVAD {
 
         tracing::info!(
             target: "sttvad",
-            "WhisperSTTVAD ready (whisper: {}, vad: {}, lang: {}, silence_ms: {})",
-            config.whisper_model, config.vad_model, config.language, config.silence_ms
+            "WhisperSTTVAD ready (whisper: {}, vad: {}, lang: {}, silence_ms: {}, start_thr: {:.2}, end_thr: {:.2})",
+            config.whisper_model,
+            config.vad_model,
+            config.language,
+            config.silence_ms,
+            config.vad_start_threshold,
+            vad_end_threshold
         );
 
         let silence_samples_threshold = SAMPLE_RATE * config.silence_ms as usize / 1000;
@@ -93,6 +126,8 @@ impl WhisperSTTVAD {
             ctx,
             vad,
             language: config.language,
+            vad_start_threshold: config.vad_start_threshold,
+            vad_end_threshold,
             in_speech: false,
             speech_buf: Vec::with_capacity(MAX_SEGMENT_SAMPLES),
             pre_roll: VecDeque::with_capacity(PRE_ROLL_SAMPLES),
@@ -126,17 +161,22 @@ impl WhisperSTTVAD {
 
     async fn process_probe(&mut self, chunk: &[f32], tx: &mpsc::Sender<SpeechEvent>) -> Result<()> {
         let has_speech = self.vad.detect_speech(chunk);
-        let silence = if !has_speech {
-            true
+        let avg_prob = if !has_speech {
+            0.0
         } else {
             let probs = self.vad.get_probs();
             if probs.is_empty() {
-                true
+                0.0
             } else {
-                let avg = probs.iter().sum::<f32>() / probs.len() as f32;
-                avg < VAD_THRESHOLD
+                probs.iter().sum::<f32>() / probs.len() as f32
             }
         };
+        let threshold = if self.in_speech {
+            self.vad_end_threshold
+        } else {
+            self.vad_start_threshold
+        };
+        let silence = avg_prob < threshold;
 
         if !self.in_speech {
             if !silence {

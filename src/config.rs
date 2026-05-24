@@ -18,6 +18,10 @@ pub struct Config {
     /// Milliseconds of continuous silence before SpeechEnd fires.
     /// Lower = faster response; higher = fewer false cuts mid-sentence.
     pub vad_silence_ms: u32,
+    /// Speech probability threshold to start a segment (silence -> speech).
+    pub vad_start_threshold: f32,
+    /// Speech probability threshold to keep a segment open (speech -> silence below this).
+    pub vad_end_threshold: f32,
     /// Path to Silero VAD model file (.bin) used by whisper-cpp-plus
     pub vad_model: String,
 
@@ -244,6 +248,15 @@ impl Config {
                 .unwrap_or_else(|_| "500".to_string())
                 .parse()
                 .context("Invalid VAD_SILENCE_MS")?,
+            vad_start_threshold: env::var("VAD_START_THRESHOLD")
+                .or_else(|_| env::var("VAD_THRESHOLD"))
+                .unwrap_or_else(|_| "0.65".to_string())
+                .parse()
+                .context("Invalid VAD_START_THRESHOLD")?,
+            vad_end_threshold: env::var("VAD_END_THRESHOLD")
+                .unwrap_or_else(|_| "0.45".to_string())
+                .parse()
+                .context("Invalid VAD_END_THRESHOLD")?,
             vad_model: env::var("VAD_MODEL")
                 .unwrap_or_else(|_| "models/ggml-silero-vad.bin".to_string()),
 

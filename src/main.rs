@@ -486,6 +486,8 @@ async fn async_main() -> Result<()> {
         vad_model: config.vad_model.clone(),
         language: config.language.clone(),
         silence_ms: config.vad_silence_ms,
+        vad_start_threshold: config.vad_start_threshold,
+        vad_end_threshold: config.vad_end_threshold,
     };
     let mut sttvad = WhisperSTTVAD::new(sttvad_config)?;
     info!(
@@ -1154,6 +1156,8 @@ async fn async_main() -> Result<()> {
                                 let wm = config.whisper_model.clone();
                                 let vm = config.vad_model.clone();
                                 let sms = config.vad_silence_ms;
+                                let vst = config.vad_start_threshold;
+                                let vet = config.vad_end_threshold;
 
                                 tokio::spawn(async move {
                                     let t0 = Instant::now();
@@ -1162,6 +1166,8 @@ async fn async_main() -> Result<()> {
                                         vad_model: vm,
                                         language: lang,
                                         silence_ms: sms,
+                                        vad_start_threshold: vst,
+                                        vad_end_threshold: vet,
                                     };
                                     if let Ok(vad) = WhisperSTTVAD::new(cfg)
                                         && let Ok(text) = vad.transcribe_complete(&audio_for_task)
@@ -1190,6 +1196,8 @@ async fn async_main() -> Result<()> {
                                 let vm = config.vad_model.clone();
                                 let lang = config.language.clone();
                                 let sms = config.vad_silence_ms;
+                                let vst = config.vad_start_threshold;
+                                let vet = config.vad_end_threshold;
 
                                 info!(target: "acp", "Answering pending question for task={} agent={}", entry.task_id, entry.agent_name);
 
@@ -1200,6 +1208,8 @@ async fn async_main() -> Result<()> {
                                         vad_model: vm,
                                         language: lang,
                                         silence_ms: sms,
+                                        vad_start_threshold: vst,
+                                        vad_end_threshold: vet,
                                     };
                                     let answer = if let Ok(vad) = WhisperSTTVAD::new(cfg) {
                                         vad.transcribe_complete(&audio_for_task).unwrap_or_default()

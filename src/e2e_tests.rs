@@ -439,6 +439,8 @@ async fn stt_transcribes_wav_file() {
         vad_model,
         language: "es".to_string(),
         silence_ms: 500,
+        vad_start_threshold: 0.65,
+        vad_end_threshold: 0.45,
     };
     let stt = WhisperSTTVAD::new(config).expect("failed to load Whisper model");
     let audio = load_wav_as_f32(wav_path).expect("failed to load WAV fixture");
@@ -479,6 +481,8 @@ async fn full_pipeline_wav_to_db() {
         vad_model,
         language: "es".to_string(),
         silence_ms: 500,
+        vad_start_threshold: 0.65,
+        vad_end_threshold: 0.45,
     };
     let stt = WhisperSTTVAD::new(config).unwrap();
     let audio = load_wav_as_f32(wav_path).unwrap();
