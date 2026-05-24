@@ -192,6 +192,10 @@ impl E2eHarness {
             let turn_c = Arc::clone(&turn_commit);
             let lens_c = Arc::clone(&context_lens);
             let sid = self.session_id;
+            #[cfg(feature = "tui")]
+            let tui_tx_c = tokio::sync::mpsc::unbounded_channel::<crate::tui::events::TuiEvent>().0;
+            #[cfg(feature = "control")]
+            let control_broadcast_c = crate::control::broadcast::ControlBroadcast::new(16);
             tokio::spawn(async move {
                 llm_task(
                     events_c,
@@ -210,6 +214,10 @@ impl E2eHarness {
                     turn_c,
                     proactive_tx,
                     lens_c,
+                    #[cfg(feature = "tui")]
+                    tui_tx_c,
+                    #[cfg(feature = "control")]
+                    control_broadcast_c,
                 )
                 .await;
             })
@@ -230,6 +238,12 @@ impl E2eHarness {
             let out_c = Arc::clone(&self.audio_output);
             let cancel_c = Arc::clone(&play_cancel);
             let muted_c = Arc::clone(&tts_muted);
+            #[cfg(feature = "tui")]
+            let tui_tx_c = tokio::sync::mpsc::unbounded_channel::<crate::tui::events::TuiEvent>().0;
+            #[cfg(feature = "remote")]
+            let remote_tts_tx_c = Arc::new(tokio::sync::Mutex::new(None));
+            #[cfg(feature = "control")]
+            let control_broadcast_c = crate::control::broadcast::ControlBroadcast::new(16);
             tokio::spawn(async move {
                 tts_task(
                     events_c,
@@ -240,6 +254,12 @@ impl E2eHarness {
                     sample_rate,
                     cancel_c,
                     muted_c,
+                    #[cfg(feature = "tui")]
+                    tui_tx_c,
+                    #[cfg(feature = "remote")]
+                    remote_tts_tx_c,
+                    #[cfg(feature = "control")]
+                    control_broadcast_c,
                 )
                 .await
             })
@@ -427,6 +447,10 @@ async fn stt_transcribes_wav_file() {
         eprintln!("SKIP: Whisper model not found at {model_path}");
         return;
     }
+    if !std::path::Path::new(&vad_model).exists() {
+        eprintln!("SKIP: VAD model not found at {vad_model}");
+        return;
+    }
 
     let wav_path = "tests/fixtures/es_short_greeting.wav";
     if !std::path::Path::new(wav_path).exists() {
@@ -469,6 +493,10 @@ async fn full_pipeline_wav_to_db() {
 
     if !std::path::Path::new(&model_path).exists() {
         eprintln!("SKIP: Whisper model not found");
+        return;
+    }
+    if !std::path::Path::new(&vad_model).exists() {
+        eprintln!("SKIP: VAD model not found at {vad_model}");
         return;
     }
     if !std::path::Path::new(wav_path).exists() {
