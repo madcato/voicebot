@@ -614,8 +614,8 @@ async fn async_main() -> Result<()> {
     let mut last_cleared_commit: u64 = 0;
     let mut speech_buffer_start_offset: usize = 0;
 
-    let mut non_user_streak: u8 = 0;
-    let mut last_speech_at: Instant = Instant::now();
+    let non_user_streak = Arc::new(Mutex::new(0u8));
+    let last_speech_at = Arc::new(Mutex::new(Instant::now()));
 
     // ── Pipeline timing context & events ─────────────────────────────────────
     let t_vad_end: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
@@ -623,6 +623,7 @@ async fn async_main() -> Result<()> {
     let events = Arc::new(PipelineEvents::new());
     let play_cancel = Arc::new(AtomicBool::new(false));
     let tts_muted = Arc::new(AtomicBool::new(false));
+    let shutdown = Arc::new(AtomicBool::new(false));
 
     // Pipeline FSM state — replaces AtomicBool flags (llm_busy, consolidation_active, etc.)
     // Each actor that owns a transition writes it directly; observers subscribe read-only.
@@ -653,6 +654,38 @@ async fn async_main() -> Result<()> {
         });
     }
     // pipeline_state_rx is kept alive and cloned for each consumer below.
+
+    // Periodic Ambient timeout checker — replaces dead SpeechEvent::Silence handler
+    {
+        let conv_mode_clone = conv_mode.clone();
+        let last_speech_at_clone = last_speech_at.clone();
+        let non_user_streak_clone = non_user_streak.clone();
+        let shutdown_clone = shutdown.clone();
+        let clear_secs = config.ambient_clear_secs;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                if shutdown_clone.load(Ordering::SeqCst) {
+                    break;
+                }
+                let elapsed = last_speech_at_clone.lock().unwrap().elapsed().as_secs();
+                if elapsed >= clear_secs {
+                    let mut mode = conv_mode_clone.lock().unwrap();
+                    if *mode == ConversationMode::Active {
+                        *mode = ConversationMode::Ambient;
+                        *non_user_streak_clone.lock().unwrap() = 0;
+                        drop(mode);
+                        info!(
+                            target: "pipeline",
+                            "Ambient mode: {}s of silence — returning to Ambient",
+                            clear_secs
+                        );
+                    }
+                }
+            }
+        });
+    }
 
     #[cfg(feature = "remote")]
     let remote_tts_tx: Arc<
@@ -1019,7 +1052,7 @@ async fn async_main() -> Result<()> {
                             tui_tx.send(tui::events::TuiEvent::StateChange(
                                 tui::events::PipelineState::Listening,
                             )).ok();
-                            last_speech_at = Instant::now();
+                            *last_speech_at.lock().unwrap() = Instant::now();
 
                             info!(target: "pipeline", "SpeechStart — firing BARGE_IN");
                             events.barge_in_tx.send(utterance_epoch.load(Ordering::SeqCst)).ok();
@@ -1081,7 +1114,7 @@ async fn async_main() -> Result<()> {
                             info!(target: "performance", "[+{}ms] VAD end ({}ms speech)", vad_elapsed, duration_ms);
                             *t_vad_end.lock().unwrap() = Some(Instant::now());
 
-                            last_speech_at = Instant::now();
+                            *last_speech_at.lock().unwrap() = Instant::now();
 
                             // ── Speaker identity via IdentityAnalyzer ─────────────
                             let mut is_main_speaker = true;
@@ -1093,20 +1126,22 @@ async fn async_main() -> Result<()> {
                                 speaker_label = result.speaker_label;
 
                                 if !is_main_speaker {
-                                    non_user_streak = non_user_streak.saturating_add(1);
-                                    if non_user_streak >= config.speaker_ambient_trigger {
+                                    let mut streak = non_user_streak.lock().unwrap();
+                                    *streak = streak.saturating_add(1);
+                                    if *streak >= config.speaker_ambient_trigger {
                                         let mut mode = conv_mode.lock().unwrap();
                                         if *mode == ConversationMode::Active {
                                             *mode = ConversationMode::Ambient;
+                                            drop(mode);
                                             info!(
                                                 target: "pipeline",
                                                 "Ambient mode: {} consecutive non-user voices",
-                                                non_user_streak
+                                                *streak
                                             );
                                         }
                                     }
                                 } else {
-                                    non_user_streak = 0;
+                                    *non_user_streak.lock().unwrap() = 0;
                                 }
                             }
 
@@ -1240,20 +1275,6 @@ async fn async_main() -> Result<()> {
                                 text: final_text,
                             }).await.ok();
                         }
-                        SpeechEvent::Silence => {
-                            let mut mode = conv_mode.lock().unwrap();
-                            if *mode == ConversationMode::Active
-                                && last_speech_at.elapsed().as_secs() >= config.ambient_clear_secs
-                            {
-                                *mode = ConversationMode::Ambient;
-                                non_user_streak = 0;
-                                info!(
-                                    target: "pipeline",
-                                    "Ambient mode: {}s of silence — returning to Ambient",
-                                    config.ambient_clear_secs
-                                );
-                            }
-                        }
                     }
                 }
             }
@@ -1262,6 +1283,7 @@ async fn async_main() -> Result<()> {
             info!(target: "voicebot", "Shutting down...");
             events.barge_in_tx.send(0).ok();
             play_cancel.store(true, Ordering::SeqCst);
+            shutdown.store(true, Ordering::SeqCst);
         }
     }
 

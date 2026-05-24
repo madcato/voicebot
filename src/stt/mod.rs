@@ -20,8 +20,6 @@ pub enum SpeechEvent {
     #[allow(dead_code)]
     Speech(String),
     SpeechEnd(String),
-    #[allow(dead_code)]
-    Silence,
 }
 
 #[derive(Clone)]
