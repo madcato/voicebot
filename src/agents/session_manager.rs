@@ -9,6 +9,83 @@ use tokio::sync::{Mutex, mpsc};
 use super::config::AgentConfig;
 use crate::tools::run_agent::{AcpWriter, JsonRpcMessage};
 
+// ── Session events ─────────────────────────────────────────────────────────────
+
+/// Events emitted by ACP sessions for consumption by the terminal display.
+#[derive(Debug, Clone)]
+pub enum SessionEvent {
+    /// An incoming message from the agent (assistant role).
+    AgentMessage {
+        agent_name: String,
+        session_id: String,
+        text: String,
+    },
+    /// An outgoing message sent to the agent (user role).
+    UserMessage {
+        agent_name: String,
+        session_id: String,
+        text: String,
+    },
+    /// A tool call initiated by the agent.
+    ToolCall {
+        agent_name: String,
+        session_id: String,
+        tool_name: String,
+        task_id: String,
+    },
+    /// A tool call completed with a result.
+    ToolResult {
+        agent_name: String,
+        session_id: String,
+        tool_name: String,
+        task_id: String,
+        result: String,
+    },
+    /// Session status changed (started, idle, busy, closed).
+    Status {
+        agent_name: String,
+        session_id: String,
+        status: SessionStatus,
+    },
+    /// An error occurred in the session.
+    Error {
+        agent_name: String,
+        session_id: String,
+        message: String,
+    },
+}
+
+/// Human-readable session status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionStatus {
+    Started,
+    Idle,
+    Busy,
+    Closed,
+}
+
+impl std::fmt::Display for SessionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Started => write!(f, "started"),
+            Self::Idle => write!(f, "idle"),
+            Self::Busy => write!(f, "busy"),
+            Self::Closed => write!(f, "closed"),
+        }
+    }
+}
+
+// ── Channel types ─────────────────────────────────────────────────────────────
+
+/// Shared type aliases for the session-event channel.
+pub type SessionEventTx = mpsc::Sender<SessionEvent>;
+pub type SessionEventRx = mpsc::Receiver<SessionEvent>;
+
+/// Create a bounded event channel (capacity 16).
+pub fn create_session_event_channel() -> (SessionEventTx, SessionEventRx) {
+    mpsc::channel(16)
+}
+
 /// Display-friendly session summary.
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
