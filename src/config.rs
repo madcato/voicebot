@@ -9,7 +9,6 @@ pub enum HermesSessionViewerMode {
     Off,
     Terminal,
     Tui,
-    LogFile,
 }
 
 impl std::str::FromStr for HermesSessionViewerMode {
@@ -20,7 +19,7 @@ impl std::str::FromStr for HermesSessionViewerMode {
             "off" | "0" | "false" => Ok(Self::Off),
             "terminal" | "term" => Ok(Self::Terminal),
             "tui" => Ok(Self::Tui),
-            "logfile" | "log-file" | "log" => Ok(Self::LogFile),
+
             _ => Err(format!("Invalid HermesSessionViewerMode: {s}")),
         }
     }
@@ -716,16 +715,6 @@ mod tests {
             assert_eq!(
                 Config::from_env().unwrap().hermes_session_viewer,
                 HermesSessionViewerMode::Tui
-            );
-        });
-    }
-
-    #[test]
-    fn hermes_session_viewer_parses_logfile() {
-        temp_env::with_var("HERMES_SESSION_VIEWER", Some("logfile"), || {
-            assert_eq!(
-                Config::from_env().unwrap().hermes_session_viewer,
-                HermesSessionViewerMode::LogFile
             );
         });
     }
