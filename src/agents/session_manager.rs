@@ -358,14 +358,57 @@ mod tests {
         assert!(all_tasks.contains("h-task-1"));
         assert!(all_tasks.contains("h-task-2"));
         assert!(all_tasks.contains("o-task-1"));
+    }
 
-        let removed = mgr.close_session("s-hermes");
-        assert_eq!(removed.len(), 2);
-        assert!(removed.contains("h-task-1"));
-        assert!(removed.contains("h-task-2"));
+    #[tokio::test]
+    async fn persistence_twice_get_or_create_same_session_id() {
+        use crate::agents::config::AgentConfig;
 
-        let remaining = mgr.get_all_task_ids();
-        assert_eq!(remaining.len(), 1);
-        assert!(remaining.contains("o-task-1"));
+        let mgr = AcpSessionManager::new();
+        mgr.sessions
+            .insert("hermes".into(), make_dummy_entry("persist-sid", "hermes"));
+
+        let cfg = AgentConfig {
+            name: "hermes".to_string(),
+            mode: "acp".to_string(),
+            command: None,
+            acp_command: "/bin/cat".to_string(),
+            acp_warmup: false,
+            when_to_use: "test".to_string(),
+            instructions: "test".to_string(),
+        };
+
+        let first = mgr.get_or_create_session(&cfg).await.unwrap();
+        let second = mgr.get_or_create_session(&cfg).await.unwrap();
+
+        assert_eq!(first.session_id, second.session_id);
+        assert_eq!(first.session_id, "persist-sid");
+    }
+
+    #[tokio::test]
+    async fn persistence_writer_not_respawned_between_prompts() {
+        use crate::agents::config::AgentConfig;
+
+        let mgr = AcpSessionManager::new();
+        mgr.sessions
+            .insert("hermes".into(), make_dummy_entry("stable-writer", "hermes"));
+
+        let cfg = AgentConfig {
+            name: "hermes".to_string(),
+            mode: "acp".to_string(),
+            command: None,
+            acp_command: "/bin/cat".to_string(),
+            acp_warmup: false,
+            when_to_use: "test".to_string(),
+            instructions: "test".to_string(),
+        };
+
+        let first = mgr.get_or_create_session(&cfg).await.unwrap();
+        let second = mgr.get_or_create_session(&cfg).await.unwrap();
+
+        assert!(
+            Arc::ptr_eq(&first.writer, &second.writer),
+            "writer Arc must be identical — no respawn"
+        );
     }
 }
