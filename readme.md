@@ -415,6 +415,10 @@ Most configuration is done via environment variables (or `.env` file):
 | `AGENT_MODE` | `cli` | `cli` = fire-and-forget subprocess; `acp` = persistent ACP bidirectional mode |
 | `AGENT_ACP_COMMAND` | `hermes acp` | Command to start the ACP process (ACP mode only) |
 | `AGENT_ACP_WARMUP` | `0` | Pre-warm the ACP session at startup. Set `1` to spawn and handshake the ACP process at boot, and send a warmup prompt to force model load before first user request. Requires `AGENT_MODE=acp`. |
+| **Hermes Session Viewer** | | |
+| `HERMES_SESSION_VIEWER` | `off` | Live session viewer mode: `off`, `terminal` (SQLite polling), `tui` (terminal UI panel), or `logfile` (real-time `tail -f` on log file). |
+| `HERMES_SESSION_VIEWER_AUTO_OPEN` | `0` | Automatically open the session viewer when an ACP session starts. Set `1` to enable. |
+| `HERMES_SESSION_IDLE_TIMEOUT_SECS` | `300` | Seconds of inactivity before an ACP session is cleaned up (5 min default). |
 | **Inference Daemon** | | |
 | `DAEMON_ENABLED` | `0` | Set to `1` to enable the background "is there anything worth saying?" proactive reasoning loop |
 | `DAEMON_INTERVAL_SECS` | `1800` | Seconds between daemon proactive-check cycles |
