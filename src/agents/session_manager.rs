@@ -1,11 +1,12 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
 use dashmap::DashMap;
+use tokio::sync::{mpsc, Mutex};
 
 use super::config::AgentConfig;
-use crate::tools::run_agent::AcpWriter;
+use crate::tools::run_agent::{AcpWriter, JsonRpcMessage};
 
 /// Display-friendly session summary.
 #[derive(Debug, Clone)]
@@ -17,9 +18,13 @@ pub struct SessionInfo {
 }
 
 /// Handle to a live ACP session.
+///
+/// The `inbound_rx` receiver is shared via `Arc<Mutex<>>` so multiple tasks
+/// can drain messages from the same ACP subprocess.
 #[derive(Clone)]
 pub struct SessionEntry {
     pub writer: Arc<Mutex<AcpWriter>>,
+    pub inbound_rx: Arc<Mutex<mpsc::Receiver<JsonRpcMessage>>>,
     pub session_id: String,
     pub agent_name: String,
     pub created_at: Instant,
@@ -59,11 +64,17 @@ impl AcpSessionManager {
             return Ok((*entry.value()).clone());
         }
 
-        let (writer, _inbound_rx) = AcpWriter::spawn(&agent_config.acp_command).await?;
+        let (mut writer, mut inbound_rx) = AcpWriter::spawn(&agent_config.acp_command).await?;
+        let cwd = std::env::current_dir()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let session_id = writer.initialize(&mut inbound_rx, &cwd).await?;
         let now = Instant::now();
         let entry = SessionEntry {
             writer: Arc::new(Mutex::new(writer)),
-            session_id: uuid::Uuid::new_v4().to_string(),
+            inbound_rx: Arc::new(Mutex::new(inbound_rx)),
+            session_id,
             agent_name: agent_config.name.clone(),
             created_at: now,
             last_used: now,
@@ -96,8 +107,10 @@ mod tests {
     use super::*;
 
     fn make_dummy_entry(session_id: &str, agent_name: &str) -> SessionEntry {
+        let (_, rx) = tokio::sync::mpsc::channel::<JsonRpcMessage>(1);
         SessionEntry {
             writer: Arc::new(Mutex::new(AcpWriter::dummy())),
+            inbound_rx: Arc::new(Mutex::new(rx)),
             session_id: session_id.to_string(),
             agent_name: agent_name.to_string(),
             created_at: Instant::now(),

@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::Tool;
-use crate::agents::{AgentConfig, ProactiveEvent};
+use crate::agents::{AcpSessionManager, AgentConfig, ProactiveEvent};
 use crate::llm::{Message, OpenAIClient};
 
 // ── History formatting ────────────────────────────────────────────────────────
@@ -228,6 +228,7 @@ pub struct RunAgentTool {
     history: Arc<RwLock<String>>,
     proactive_tx: mpsc::Sender<ProactiveEvent>,
     synthesis_client: Option<std::sync::Arc<OpenAIClient>>,
+    session_manager: Option<Arc<AcpSessionManager>>,
 }
 
 impl RunAgentTool {
@@ -243,7 +244,14 @@ impl RunAgentTool {
             history,
             proactive_tx,
             synthesis_client: None,
+            session_manager: None,
         }
+    }
+
+    /// Attach an optional session manager for persistent ACP sessions.
+    pub fn with_session_manager(mut self, mgr: Arc<AcpSessionManager>) -> Self {
+        self.session_manager = Some(mgr);
+        self
     }
 
     /// Attach a secondary LLM client for result synthesis.
@@ -343,51 +351,85 @@ impl RunAgentTool {
         let acp_command = self.config.acp_command.clone();
         let synthesis_client = self.synthesis_client.clone();
         let agent_name = self.config.name.clone();
+        let config = self.config.clone();
+        let session_mgr = self.session_manager.clone();
 
         tokio::spawn(async move {
-            // ── Spawn ACP process ────────────────────────────────────────────
-            let (mut writer, mut rx) = match AcpWriter::spawn(&acp_command).await {
-                Ok(pair) => pair,
-                Err(e) => {
-                    let _ = proactive_tx
-                        .send(ProactiveEvent::AgentResult {
-                            task: task_c,
-                            result: format!("ACP spawn error: {e}"),
-                            tool_call_id: None,
-                        })
-                        .await;
-                    return;
-                }
+            let writer_arc: Arc<Mutex<AcpWriter>>;
+            let inbound_rx: Arc<Mutex<mpsc::Receiver<JsonRpcMessage>>>;
+            let session_id_owned: String;
+            let owned_process = if let Some(mgr) = session_mgr {
+                let sess = match mgr.get_or_create_session(&config).await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        let _ = proactive_tx
+                            .send(ProactiveEvent::AgentResult {
+                                task: task_c,
+                                result: format!("ACP session error: {e}"),
+                                tool_call_id: None,
+                            })
+                            .await;
+                        return;
+                    }
+                };
+                writer_arc = sess.writer;
+                inbound_rx = sess.inbound_rx;
+                session_id_owned = sess.session_id;
+                false
+            } else {
+                let (mut writer, mut rx) = match AcpWriter::spawn(&acp_command).await {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        let _ = proactive_tx
+                            .send(ProactiveEvent::AgentResult {
+                                task: task_c,
+                                result: format!("ACP spawn error: {e}"),
+                                tool_call_id: None,
+                            })
+                            .await;
+                        return;
+                    }
+                };
+
+                let cwd = std::env::current_dir()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                let sid = match writer.initialize(&mut rx, &cwd).await {
+                    Ok(sid) => sid,
+                    Err(e) => {
+                        let _ = writer.kill().await;
+                        let _ = proactive_tx
+                            .send(ProactiveEvent::AgentResult {
+                                task: task_c,
+                                result: format!("ACP init error: {e}"),
+                                tool_call_id: None,
+                            })
+                            .await;
+                        return;
+                    }
+                };
+                writer_arc = Arc::new(Mutex::new(writer));
+                inbound_rx = Arc::new(Mutex::new(rx));
+                session_id_owned = sid;
+                true
             };
 
-            // ── Initialize ───────────────────────────────────────────────────
-            let cwd = std::env::current_dir()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            let session_id = match writer.initialize(&mut rx, &cwd).await {
-                Ok(sid) => sid,
-                Err(e) => {
-                    let _ = writer.kill().await;
-                    let _ = proactive_tx
-                        .send(ProactiveEvent::AgentResult {
-                            task: task_c,
-                            result: format!("ACP init error: {e}"),
-                            tool_call_id: None,
-                        })
-                        .await;
-                    return;
-                }
-            };
-
-            // ── Open session in Terminal ──────────────────────────────────────
-            writer.open_session_in_terminal().await;
+            let session_id = &session_id_owned;
+            {
+                let w = writer_arc.lock().await;
+                w.open_session_in_terminal().await;
+            }
 
             // ── Send prompt ───────────────────────────────────────────────────
-            let prompt_request_id = match writer.send_prompt(&session_id, &query).await {
+            let prompt_request_id = match {
+                let mut w = writer_arc.lock().await;
+                w.send_prompt(session_id, &query).await
+            } {
                 Ok(id) => id,
                 Err(e) => {
-                    let _ = writer.kill().await;
+                    let mut w = writer_arc.lock().await;
+                    let _ = w.kill().await;
                     let _ = proactive_tx
                         .send(ProactiveEvent::AgentResult {
                             task: task_c,
@@ -417,24 +459,26 @@ impl RunAgentTool {
 
             // ── Collect responses ─────────────────────────────────────────────
             let acp_writer_for_collect: Arc<Mutex<Option<AcpWriter>>> =
-                Arc::new(Mutex::new(Some(writer)));
+                Arc::new(Mutex::new(None));
 
+            let mut rx_guard = inbound_rx.lock().await;
             let result = collect_acp_response(
                 Arc::clone(&acp_writer_for_collect),
-                &mut rx,
+                &mut *rx_guard,
                 proactive_tx.clone(),
-                session_id.clone(),
+                session_id_owned.clone(),
                 prompt_request_id,
                 cancel_rx,
                 task_id.clone(),
                 agent_name.clone(),
             )
             .await;
+            drop(rx_guard);
 
             // ── Cleanup ──────────────────────────────────────────────────────
-            {
-                let mut guard = acp_writer_for_collect.lock().await;
-                if let Some(mut w) = guard.take() {
+            if owned_process {
+                {
+                    let mut w = writer_arc.lock().await;
                     let _ = w.kill().await;
                 }
             }
