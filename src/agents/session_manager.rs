@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -29,6 +30,7 @@ pub struct SessionEntry {
     pub agent_name: String,
     pub created_at: Instant,
     pub last_used: Instant,
+    pub task_ids: HashSet<String>,
 }
 
 impl std::fmt::Debug for SessionEntry {
@@ -75,6 +77,7 @@ impl AcpSessionManager {
             agent_name: agent_config.name.clone(),
             created_at: now,
             last_used: now,
+            task_ids: HashSet::new(),
         };
         self.sessions
             .insert(agent_config.name.clone(), entry.clone());
@@ -82,8 +85,40 @@ impl AcpSessionManager {
     }
 
     /// Close and remove the session identified by `session_id`.
-    pub fn close_session(&self, session_id: &str) {
-        self.sessions.retain(|_, v| v.session_id != session_id);
+    /// Returns the set of task IDs that were associated with this session.
+    pub fn close_session(&self, session_id: &str) -> HashSet<String> {
+        let mut removed_tasks = HashSet::new();
+        self.sessions.retain(|_, v| {
+            if v.session_id == session_id {
+                removed_tasks.extend(v.task_ids.drain());
+                false
+            } else {
+                true
+            }
+        });
+        removed_tasks
+    }
+    
+    pub fn add_task(&self, agent_name: &str, task_id: &str) {
+        if let Some(mut entry) = self.sessions.get_mut(agent_name) {
+            entry.task_ids.insert(task_id.to_string());
+        }
+    }
+    
+    pub fn remove_task(&self, agent_name: &str, task_id: &str) {
+        if let Some(mut entry) = self.sessions.get_mut(agent_name) {
+            entry.task_ids.remove(task_id);
+        }
+    }
+    
+    pub fn get_all_task_ids(&self) -> HashSet<String> {
+        let mut ids = HashSet::new();
+        for entry in self.sessions.iter() {
+            for tid in &entry.task_ids {
+                ids.insert(tid.clone());
+            }
+        }
+        ids
     }
 
     /// Return information about all active sessions.
@@ -119,6 +154,7 @@ mod tests {
             agent_name: agent_name.to_string(),
             created_at: Instant::now(),
             last_used: Instant::now(),
+            task_ids: HashSet::new(),
         }
     }
 
@@ -254,5 +290,82 @@ mod tests {
         let _entry = mgr.get_or_create_session(&cfg).await.expect("found");
         let after_ts = mgr.sessions.get("hermes").unwrap().value().last_used;
         assert!(after_ts >= before_ts, "last_used should have been updated");
+    }
+
+    #[tokio::test]
+    async fn multiple_tasks_same_session_both_visible() {
+        let mgr = AcpSessionManager::new();
+        mgr.sessions
+            .insert("hermes".into(), make_dummy_entry("sess-shared", "hermes"));
+
+        let task_a = "task-a";
+        let task_b = "task-b";
+        mgr.add_task("hermes", task_a);
+        mgr.add_task("hermes", task_b);
+
+        let tasks = mgr.get_all_task_ids();
+        assert!(tasks.contains(task_a));
+        assert!(tasks.contains(task_b));
+        assert_eq!(tasks.len(), 2);
+
+        assert_eq!(mgr.list_sessions().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn close_session_closes_associated_tasks() {
+        let mgr = AcpSessionManager::new();
+        let mut entry = make_dummy_entry("sess-close", "hermes");
+        entry.task_ids.insert("task-x".to_string());
+        entry.task_ids.insert("task-y".to_string());
+        mgr.sessions.insert("hermes".into(), entry);
+
+        let removed = mgr.close_session("sess-close");
+        assert!(removed.contains("task-x"));
+        assert!(removed.contains("task-y"));
+        assert_eq!(removed.len(), 2);
+
+        assert!(mgr.list_sessions().is_empty());
+        assert!(mgr.get_all_task_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_remove_task_roundtrip() {
+        let mgr = AcpSessionManager::new();
+        mgr.sessions
+            .insert("hermes".into(), make_dummy_entry("round-1", "hermes"));
+
+        mgr.add_task("hermes", "rt-task");
+        assert!(mgr.get_all_task_ids().contains("rt-task"));
+
+        mgr.remove_task("hermes", "rt-task");
+        assert!(!mgr.get_all_task_ids().contains("rt-task"));
+    }
+
+    #[tokio::test]
+    async fn tasks_persist_across_multiple_sessions() {
+        let mgr = AcpSessionManager::new();
+        mgr.sessions
+            .insert("hermes".into(), make_dummy_entry("s-hermes", "hermes"));
+        mgr.sessions
+            .insert("oracle".into(), make_dummy_entry("s-oracle", "oracle"));
+
+        mgr.add_task("hermes", "h-task-1");
+        mgr.add_task("oracle", "o-task-1");
+        mgr.add_task("hermes", "h-task-2");
+
+        let all_tasks = mgr.get_all_task_ids();
+        assert_eq!(all_tasks.len(), 3);
+        assert!(all_tasks.contains("h-task-1"));
+        assert!(all_tasks.contains("h-task-2"));
+        assert!(all_tasks.contains("o-task-1"));
+
+        let removed = mgr.close_session("s-hermes");
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains("h-task-1"));
+        assert!(removed.contains("h-task-2"));
+
+        let remaining = mgr.get_all_task_ids();
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining.contains("o-task-1"));
     }
 }
