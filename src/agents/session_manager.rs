@@ -771,4 +771,132 @@ mod tests {
         assert!(!remaining.contains("a-1"));
         assert!(!remaining.contains("a-2"));
     }
+
+    #[test]
+    fn session_status_display_formats_correctly() {
+        assert_eq!(SessionStatus::Started.to_string(), "started");
+        assert_eq!(SessionStatus::Idle.to_string(), "idle");
+        assert_eq!(SessionStatus::Busy.to_string(), "busy");
+        assert_eq!(SessionStatus::Closed.to_string(), "closed");
+    }
+
+    #[test]
+    fn create_session_event_channel_has_capacity() {
+        let (tx, _rx) = create_session_event_channel();
+        assert_eq!(tx.max_capacity(), 16);
+    }
+
+    #[tokio::test]
+    async fn session_entry_debug_contains_fields() {
+        let entry = make_dummy_entry("debug-sid", "debug-agent");
+        let s = format!("{:?}", entry);
+        assert!(s.contains("debug-sid"));
+        assert!(s.contains("debug-agent"));
+        assert!(s.contains("SessionEntry"));
+    }
+
+    #[tokio::test]
+    async fn prewarm_agent_delegates_to_get_or_create() {
+        use crate::agents::config::AgentConfig;
+
+        let mgr = AcpSessionManager::new();
+        mgr.sessions
+            .insert("hermes".into(), make_dummy_entry("prewarm-sid", "hermes"));
+
+        let cfg = AgentConfig {
+            name: "hermes".to_string(),
+            mode: "acp".to_string(),
+            command: None,
+            acp_command: "/bin/cat".to_string(),
+            acp_warmup: false,
+            when_to_use: "test".to_string(),
+            instructions: "test".to_string(),
+        };
+
+        let sid = mgr.prewarm_agent(&cfg).await.unwrap();
+        assert_eq!(sid, "prewarm-sid");
+    }
+
+    #[test]
+    fn add_task_ignores_unknown_agent() {
+        let mgr = AcpSessionManager::new();
+        mgr.add_task("unknown-agent", "some-task");
+        assert!(mgr.get_all_task_ids().is_empty());
+    }
+
+    #[test]
+    fn remove_task_ignores_unknown_agent() {
+        let mgr = AcpSessionManager::new();
+        mgr.remove_task("unknown-agent", "some-task");
+    }
+
+    #[tokio::test]
+    async fn remove_task_ignores_unknown_task_id() {
+        let mgr = AcpSessionManager::new();
+        mgr.sessions
+            .insert("hermes".into(), make_dummy_entry("rm-test", "hermes"));
+        mgr.add_task("hermes", "existing-task");
+        assert_eq!(mgr.get_all_task_ids().len(), 1);
+        mgr.remove_task("hermes", "nonexistent-task");
+        assert_eq!(mgr.get_all_task_ids().len(), 1);
+        assert!(mgr.get_all_task_ids().contains("existing-task"));
+    }
+
+    #[tokio::test]
+    async fn idle_timeout_future_cutoff_keeps_recent_sessions() {
+        let mgr = AcpSessionManager::new();
+        let entry = make_dummy_entry("recent-max", "hermes");
+        mgr.sessions.insert("hermes".into(), entry);
+
+        let removed = mgr.cleanup_idle_sessions(Duration::from_secs(365 * 24 * 60 * 60));
+        assert_eq!(removed, 0);
+        assert_eq!(mgr.list_sessions().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn add_duplicate_task_id_is_idempotent() {
+        let mgr = AcpSessionManager::new();
+        mgr.sessions
+            .insert("hermes".into(), make_dummy_entry("dedup-sid", "hermes"));
+
+        mgr.add_task("hermes", "same-task");
+        mgr.add_task("hermes", "same-task");
+        assert_eq!(mgr.get_all_task_ids().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn close_session_returns_task_ids_for_known_session() {
+        let mgr = AcpSessionManager::new();
+        let mut entry = make_dummy_entry("known-sid", "hermes");
+        entry.task_ids.insert("t1".to_string());
+        mgr.sessions.insert("hermes".into(), entry);
+
+        let removed = mgr.close_session("known-sid");
+        assert!(removed.contains("t1"));
+        assert_eq!(removed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn close_session_multiple_sessions_only_one_removed() {
+        let mgr = AcpSessionManager::new();
+        let mut a = make_dummy_entry("a-sid", "hermes");
+        a.task_ids.insert("at1".to_string());
+        mgr.sessions.insert("hermes".into(), a);
+
+        let mut b = make_dummy_entry("b-sid", "oracle");
+        b.task_ids.insert("bt1".to_string());
+        mgr.sessions.insert("oracle".into(), b);
+
+        let removed = mgr.close_session("a-sid");
+        assert!(removed.contains("at1"));
+        assert!(!removed.contains("bt1"));
+        assert_eq!(mgr.list_sessions().len(), 1);
+        assert_eq!(mgr.list_sessions()[0].session_id, "b-sid");
+    }
+
+    #[tokio::test]
+    async fn session_info_created_at_equals_last_used_initially() {
+        let entry = make_dummy_entry("info-check", "hermes");
+        assert!(entry.created_at <= entry.last_used);
+    }
 }
