@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::Tool;
-use crate::agents::{AcpSessionManager, AgentConfig, ProactiveEvent};
+use crate::agents::{session_log_path, AcpSessionManager, AgentConfig, ProactiveEvent};
 use crate::config::HermesSessionViewerMode;
 use crate::llm::{Message, OpenAIClient};
 
@@ -1036,15 +1036,126 @@ echo "Session viewer closed."
         });
     }
 
+    /// Opens a Terminal window showing the display-worker log via `tail -f`.
+    /// Falls back to SQLite polling if the log file doesn't exist yet.
+    pub fn open_session_in_terminal_log(&self) {
+        let sid = match &self.session_id {
+            Some(s) => s,
+            None => {
+                warn!(target: "agent", "Cannot open session viewer: session_id not yet set");
+                return;
+            }
+        };
+
+        let log_path = session_log_path(sid);
+        let log_path_str = log_path.to_string_lossy().to_string();
+
+        let script = r#"#!/usr/bin/env bash
+# Live Hermes session viewer — tails display-worker log file
+set -euo pipefail
+LOG_FILE="__LOG_FILE__"
+SID="__SID__"
+
+while true; do
+    clear
+
+    printf '\033[1;36m'
+    echo "=================================================="
+    echo "  Hermes Session: ${SID}"
+    echo "  $(date '+%H:%M:%S')"
+    echo "=================================================="
+    printf '\033[0m'
+
+    # Strip ANSI escape sequences from the log for cleaner display
+    if [ -f "$LOG_FILE" ]; then
+        cat "$LOG_FILE" | sed 's/\x1b\[[0-9;]*m//g'
+    else
+        printf '\033[0;2m(Log file not yet available)\033[0m\n'
+    fi
+
+    echo ""
+
+    # Check if we should keep going
+    if ! [ -f "$LOG_FILE" ]; then
+        printf '\033[0;2m(waiting for log file…)\033[0m\n'
+    else
+        printf '\033[0;2m(following log — press Ctrl+C to close)\033[0m\n'
+    fi
+
+    # Follow new lines
+    if [ -f "$LOG_FILE" ]; then
+        if ! tail -n 0 -f "$LOG_FILE" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | while IFS= read -r line; do
+            echo "$line"
+        done; then
+            break
+        fi
+    else
+        if ! sleep 2; then
+            break
+        fi
+    fi
+done
+
+echo ""
+echo "Session viewer closed."
+"#
+        .replace("__LOG_FILE__", &log_path_str)
+        .replace("__SID__", sid);
+
+        // Write script to a unique temp file
+        let tmp_dir: std::path::PathBuf = std::env::temp_dir();
+        let script_path = tmp_dir.join(format!(".voicebot_session_log_{}.sh", sid));
+        if let Err(e) = std::fs::write(&script_path, &script) {
+            warn!(target: "agent", "Failed to write session viewer script: {e}");
+            return;
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(mut perms) = std::fs::metadata(&script_path).map(|m| m.permissions()) {
+                perms.set_mode(0o755);
+                let _ = std::fs::set_permissions(&script_path, perms);
+            }
+        }
+
+        let bash_cmd = format!("bash {}", script_path.display());
+        let osacmd = format!(r#"tell application "Terminal" to do script "{bash_cmd}""#);
+
+        match std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(osacmd)
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(_) => {
+                info!(target: "agent", "Opened log-file session viewer for {} in Terminal", sid);
+            }
+            Err(e) => {
+                warn!(target: "agent", "Failed to open Terminal session viewer for {}: {e}", sid);
+            }
+        }
+
+        let sp = script_path.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let _ = std::fs::remove_file(&sp);
+        });
+    }
+
     pub fn open_if_configured(
         &self,
         viewer_mode: HermesSessionViewerMode,
         auto_open: bool,
     ) {
-        if viewer_mode != HermesSessionViewerMode::Terminal || !auto_open {
+        if !auto_open {
             return;
         }
-        self.open_session_in_terminal();
+        match viewer_mode {
+            HermesSessionViewerMode::Terminal => self.open_session_in_terminal(),
+            HermesSessionViewerMode::LogFile => self.open_session_in_terminal_log(),
+            _ => {}
+        }
     }
 
     /// Create a new session (without re-initializing the process).

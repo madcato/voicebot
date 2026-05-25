@@ -187,4 +187,83 @@ mod tests {
         let path = session_log_path("abc123");
         assert_eq!(path.to_string_lossy(), "/tmp/voicebot_sessions/abc123.log");
     }
+
+    // ── Latency tests ──────────────────────────────────────────────────────────
+
+    use std::time::{Duration, Instant};
+
+    async fn measure_display_latency(n_events: usize) -> Duration {
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "voicebot_latency_{}",
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+
+        let session_id = format!("latency-{}", n_events);
+        let log_path = tmp_dir.join(format!("{session_id}.log"));
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AcpSessionEvent>(16);
+
+        // Rewrite LOG_DIR via a temp env var won't affect the constant, so we
+        // patch the log_path resolution by spawning our own worker-like loop
+        // that writes to our controlled directory.
+        let writer_handle = tokio::spawn(async move {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .expect("cannot open log file");
+            while let Some(event) = rx.recv().await {
+                let line = format_event(&event);
+                writeln!(file, "{line}").ok();
+                flush_file(&mut file);
+            }
+        });
+
+        let start = Instant::now();
+        for i in 0..n_events {
+            tx.send(AcpSessionEvent::AgentMessageChunk(
+                format!("event-{i}"),
+            ))
+            .await
+            .unwrap();
+        }
+        drop(tx);
+        writer_handle.await.ok();
+
+        let elapsed = start.elapsed();
+        std::fs::remove_dir_all(&tmp_dir).ok();
+        elapsed
+    }
+
+    #[tokio::test]
+    async fn test_latency_single_event_under_100ms() {
+        let elapsed = measure_display_latency(1).await;
+        assert!(
+            elapsed.as_millis() < 100,
+            "single event latency {:?} >= 100ms",
+            elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_latency_ten_events_under_100ms() {
+        let elapsed = measure_display_latency(10).await;
+        assert!(
+            elapsed.as_millis() < 100,
+            "10-event latency {:?} >= 100ms",
+            elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_latency_burst_under_100ms() {
+        // Channel capacity is 16, burst should fit entirely.
+        let elapsed = measure_display_latency(16).await;
+        assert!(
+            elapsed.as_millis() < 100,
+            "16-event burst latency {:?} >= 100ms",
+            elapsed
+        );
+    }
 }
