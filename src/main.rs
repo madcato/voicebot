@@ -35,8 +35,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use crate::agents::AgentRegistry;
-use crate::agents::ProactiveEvent;
+use crate::agents::{AcpSessionManager, AgentRegistry, ProactiveEvent};
 use crate::analysis::ContextLens;
 use crate::analysis::identity::IdentityAnalyzer;
 use crate::audio::ambient_buffer::AmbientBuffer;
@@ -54,7 +53,7 @@ use crate::pipeline::{
 use crate::profile::ProfileFact;
 use crate::stt::{SpeechEvent, WhisperSTTVAD, WhisperSTTVADConfig};
 use crate::tools::{
-    AcpWriter, ActiveTask, ConversationMode, CurrentTimeTool, McpToolProxy, OpenAppTool,
+    ActiveTask, ConversationMode, CurrentTimeTool, McpToolProxy, OpenAppTool,
     PendingInteractionEntry, ReadClipboardTool, ReadFileTool, RunAgentTool, RunShellTool,
     SetClipboardTool, SetConversationModeTool, TakeScreenshotTool, ToolRegistry, WebSearchTool,
 };
@@ -253,6 +252,7 @@ async fn async_main() -> Result<()> {
     // ── Agent delegation (multi-agent registry) ───────────────────────────────
     let agent_registry = AgentRegistry::from_env();
     let agent_section = agent_registry.system_prompt_section();
+    let session_manager = Arc::new(AcpSessionManager::new());
 
     for agent in &agent_registry.agents {
         info!(target: "voicebot", "Agent '{}' enabled (mode={})", agent.name, agent.mode);
@@ -267,6 +267,9 @@ async fn async_main() -> Result<()> {
             run_agent_tool = run_agent_tool.with_synthesis(std::sync::Arc::new(sec.clone()));
             info!(target: "voicebot", "run_{} result synthesis via secondary LLM enabled", agent.name);
         }
+        if agent.mode == "acp" {
+            run_agent_tool = run_agent_tool.with_session_manager(Arc::clone(&session_manager));
+        }
         tool_registry.register(run_agent_tool);
     }
 
@@ -275,59 +278,19 @@ async fn async_main() -> Result<()> {
         if agent.mode != "acp" || !agent.acp_warmup {
             continue;
         }
+        let mgr = Arc::clone(&session_manager);
+        let config = agent.clone();
         let agent_name = agent.name.clone();
-        let acp_cmd = agent.acp_command.clone();
 
         tokio::spawn(async move {
-            info!(target: "agent", "ACP pre-warm [{}]: spawning {}…", agent_name, acp_cmd);
-            let (mut writer, mut rx) = match AcpWriter::spawn(&acp_cmd).await {
-                Ok(pair) => pair,
-                Err(e) => {
-                    warn!(target: "agent", "ACP pre-warm [{}]: spawn failed: {e}", agent_name);
-                    return;
-                }
-            };
-            let cwd = std::env::current_dir()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            match writer.initialize(&mut rx, &cwd).await {
+            match mgr.prewarm_agent(&config).await {
                 Ok(sid) => {
-                    info!(target: "agent", "ACP pre-warm [{}]: session ready (sid={sid})", agent_name)
+                    info!(target: "agent", "ACP pre-warm [{}]: session ready (sid={sid})", agent_name);
                 }
                 Err(e) => {
                     warn!(target: "agent", "ACP pre-warm [{}]: init failed: {e}", agent_name);
-                    return;
                 }
             }
-
-            let sid = writer.session_id.as_ref().unwrap().clone();
-            let prompt_id = match writer.send_prompt(&sid, "Responde solo: OK").await {
-                Ok(id) => id,
-                Err(e) => {
-                    warn!(target: "agent", "ACP pre-warm [{}]: prompt failed: {e}", agent_name);
-                    return;
-                }
-            };
-            loop {
-                match tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv()).await {
-                    Ok(Some(crate::tools::JsonRpcMessage::Response { id, .. }))
-                        if id == prompt_id =>
-                    {
-                        break;
-                    }
-                    Ok(None) => {
-                        warn!(target: "agent", "ACP pre-warm [{}]: channel closed during warmup", agent_name);
-                        return;
-                    }
-                    Ok(_) => {}
-                    Err(_) => {
-                        warn!(target: "agent", "ACP pre-warm [{}]: warmup timed out", agent_name);
-                        return;
-                    }
-                }
-            }
-            info!(target: "agent", "ACP pre-warm [{}]: warmup complete", agent_name);
         });
     }
 

@@ -98,6 +98,12 @@ impl AcpSessionManager {
             })
             .collect()
     }
+
+    /// Warm up a single agent session (calls spawn + initialize, stores result).
+    /// Convenience method so callers (e.g. `main.rs`) only need this type.
+    pub async fn prewarm_agent(&self, config: &AgentConfig) -> Result<String> {
+        self.get_or_create_session(config).await.map(|e| e.session_id)
+    }
 }
 
 #[cfg(test)]
