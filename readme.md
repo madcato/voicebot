@@ -415,6 +415,8 @@ Most configuration is done via environment variables (or `.env` file):
 | `AGENT_MODE` | `cli` | `cli` = fire-and-forget subprocess; `acp` = persistent ACP bidirectional mode |
 | `AGENT_ACP_COMMAND` | `hermes acp` | Command to start the ACP process (ACP mode only) |
 | `AGENT_ACP_WARMUP` | `0` | Pre-warm the ACP session at startup. Set `1` to spawn and handshake the ACP process at boot, and send a warmup prompt to force model load before first user request. Requires `AGENT_MODE=acp`. |
+| **ACP Log Viewer** | | |
+| `HERMES_SESSION_VIEWER` | `off` | ACP traffic log viewer: `off` (default) or `logfile`. When `logfile`, all JSON-RPC messages (requests, responses, notifications) are written to `/tmp/voicebot_sessions/{session_id}.log` and a Terminal window is opened with `tail -f`. |
 
 | **Inference Daemon** | | |
 | `DAEMON_ENABLED` | `0` | Set to `1` to enable the background "is there anything worth saying?" proactive reasoning loop |

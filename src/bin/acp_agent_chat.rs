@@ -16,7 +16,7 @@ use tracing::debug;
 use tracing_subscriber::EnvFilter;
 
 // Re-use library modules from the voicebot crate.
-use voicebot::config::Config;
+use voicebot::config::{Config, HermesSessionViewerMode};
 use voicebot::tools::run_agent::{AcpWriter, JsonRpcMessage};
 
 /// How permission requests from the agent are handled.
@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
 
     let cwd = std::env::current_dir()?.to_string_lossy().to_string();
 
-    let session_id = writer.initialize(&mut rx, &cwd).await?;
+    let session_id = writer.initialize(&mut rx, &cwd, HermesSessionViewerMode::Off).await?;
     eprintln!("Session initialized: {session_id}\n");
 
     let writer = Arc::new(Mutex::new(writer));

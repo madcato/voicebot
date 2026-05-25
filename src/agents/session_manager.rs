@@ -7,6 +7,7 @@ use dashmap::DashMap;
 use tokio::sync::{Mutex, mpsc};
 
 use super::config::AgentConfig;
+use crate::config::HermesSessionViewerMode;
 use crate::tools::run_agent::{AcpWriter, JsonRpcMessage};
 
 // ── Session events ─────────────────────────────────────────────────────────────
@@ -151,7 +152,7 @@ impl AcpSessionManager {
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        let session_id = writer.initialize(&mut inbound_rx, &cwd).await?;
+        let session_id = writer.initialize(&mut inbound_rx, &cwd, HermesSessionViewerMode::Off).await?;
         let now = Instant::now();
         let entry = SessionEntry {
             writer: Arc::new(Mutex::new(writer)),

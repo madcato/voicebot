@@ -1,6 +1,26 @@
 use anyhow::{Context, Result};
 use std::env;
 
+/// Mode for the Hermes ACP session log viewer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HermesSessionViewerMode {
+    #[default]
+    Off,
+    LogFile,
+}
+
+impl std::str::FromStr for HermesSessionViewerMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "off" | "0" | "false" => Ok(Self::Off),
+            "logfile" | "log-file" | "log" => Ok(Self::LogFile),
+            _ => Err(format!("Invalid HermesSessionViewerMode: {s}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Config {
@@ -217,7 +237,8 @@ pub struct Config {
     // ── Persistence ───────────────────────────────────────────────────────────
     pub db_path: String,
 
-
+    // ── Hermes ACP session log viewer ───────────────────────────────────────────
+    pub hermes_session_viewer: HermesSessionViewerMode,
 }
 
 impl Config {
@@ -483,6 +504,11 @@ impl Config {
             // DB
             db_path: env::var("DB_PATH").unwrap_or_else(|_| "data/voicebot.db".to_string()),
 
+            // Hermes ACP session log viewer
+            hermes_session_viewer: env::var("HERMES_SESSION_VIEWER")
+                .ok()
+                .and_then(|v| v.parse::<HermesSessionViewerMode>().ok())
+                .unwrap_or(HermesSessionViewerMode::Off),
         };
 
         if config.llm_self_managed && config.llm_command.is_none() {
@@ -655,5 +681,33 @@ mod tests {
         });
     }
 
+    #[test]
+    fn hermes_session_viewer_defaults_to_off() {
+        temp_env::with_var("HERMES_SESSION_VIEWER", None::<&str>, || {
+            assert_eq!(
+                Config::from_env().unwrap().hermes_session_viewer,
+                HermesSessionViewerMode::Off
+            );
+        });
+    }
 
+    #[test]
+    fn hermes_session_viewer_parses_logfile() {
+        temp_env::with_var("HERMES_SESSION_VIEWER", Some("logfile"), || {
+            assert_eq!(
+                Config::from_env().unwrap().hermes_session_viewer,
+                HermesSessionViewerMode::LogFile
+            );
+        });
+    }
+
+    #[test]
+    fn hermes_session_viewer_invalid_falls_back_to_off() {
+        temp_env::with_var("HERMES_SESSION_VIEWER", Some("invalid_value"), || {
+            assert_eq!(
+                Config::from_env().unwrap().hermes_session_viewer,
+                HermesSessionViewerMode::Off
+            );
+        });
+    }
 }
