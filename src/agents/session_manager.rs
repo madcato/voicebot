@@ -19,12 +19,14 @@ pub enum SessionEvent {
         agent_name: String,
         session_id: String,
         text: String,
+        correlation_id: String,
     },
     /// An outgoing message sent to the agent (user role).
     UserMessage {
         agent_name: String,
         session_id: String,
         text: String,
+        correlation_id: String,
     },
     /// A tool call initiated by the agent.
     ToolCall {
@@ -32,6 +34,7 @@ pub enum SessionEvent {
         session_id: String,
         tool_name: String,
         task_id: String,
+        correlation_id: String,
     },
     /// A tool call completed with a result.
     ToolResult {
@@ -40,18 +43,21 @@ pub enum SessionEvent {
         tool_name: String,
         task_id: String,
         result: String,
+        correlation_id: String,
     },
     /// Session status changed (started, idle, busy, closed).
     Status {
         agent_name: String,
         session_id: String,
         status: SessionStatus,
+        correlation_id: String,
     },
     /// An error occurred in the session.
     Error {
         agent_name: String,
         session_id: String,
         message: String,
+        correlation_id: String,
     },
 }
 

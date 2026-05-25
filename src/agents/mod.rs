@@ -23,6 +23,7 @@ pub enum ProactiveEvent {
         task: String,
         result: String,
         tool_call_id: Option<String>,
+        correlation_id: String,
     },
     /// The inference daemon decided there is something worth saying proactively.
     /// `message` is the raw observation text; `run_proactive_pipeline` will
