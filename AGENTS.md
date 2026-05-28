@@ -173,6 +173,51 @@ Migrations live in `src/db/migrations/`.
 
 ---
 
+## Git Workflow
+
+### Branch Strategy
+- **Bugs/fixes**: Work directly on `main`. Small fixes, no feature branch needed.
+- **New features**: Create a feature branch (`feature/<short-name>`). One feature per branch.
+
+### Commit Messages
+- **English only**, short descriptive text identifying the change. No lengthy explanations.
+- Small, focused commits are preferred.
+- Example: `feat: add speaker verification module` or `fix: silence VAD false positives`
+
+### Feature Merge Process
+1. Complete the feature in the feature branch.
+2. Interactive rebase to squash related commits: `git rebase -i main`
+3. Merge into main: `git checkout main && git merge --squash feature/<name>`
+4. Delete the feature branch.
+
+### Code Review
+- **Local**: Review all code manually before committing (you).
+- **CI/remote only**: When explicitly requested, allow the agent to commit, push, check CI logs, fix, and re-commit autonomously.
+- Never auto-commit to main without explicit user instruction.
+
+### Gitea Issues
+- Issues live on Gitea (`tesla.local:3000`).
+- Use the `tea` CLI for all issue operations (never `gh` or raw `curl`).
+- When asked to "Resolve/Open/Plan issue #N", the agent should:
+  1. Fetch issue details with `tea issue view N`.
+  2. Write a plan as a comment on the issue.
+  3. Execute the work.
+  4. Leave final results as a comment on the issue.
+- Labels exist but no issue templates — the agent handles formatting naturally.
+- Always reference the issue number in commit messages when work is issue-driven: `fix: address issue #11 — fix VAD timeout`
+
+### Versioning
+- Semver with pre-release state: `v<major>.<minor>.<patch>-<state><number>`
+- States: `alpha`, `beta`, `rc`
+- Example: `v0.1.13-alpha01`, `v0.1.0-beta.1`
+- Tag on main after validated merge.
+
+### Git Worktrees
+- `oh-my-openagent` (plugin for OpenCode, usable with other agents) uses git worktrees for isolated agent sessions.
+- Each worktree gets its own branch for feature work to avoid dirty main state.
+
+---
+
 ## Common Workflows
 
 ### Running Development
