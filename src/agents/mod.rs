@@ -3,10 +3,10 @@ pub mod session_events;
 pub mod session_manager;
 
 pub use config::{AgentConfig, AgentRegistry};
-pub use session_events::{AcpSessionEvent, parse_session_update, create_event_channel};
+pub use session_events::{AcpSessionEvent, create_event_channel, parse_session_update};
 pub use session_manager::{
-    AcpSessionManager, SessionEntry, SessionEvent, SessionEventRx, SessionEventTx,
-    SessionInfo, SessionStatus, create_session_event_channel,
+    AcpSessionManager, SessionEntry, SessionEvent, SessionEventRx, SessionEventTx, SessionInfo,
+    SessionStatus, create_session_event_channel,
 };
 
 /// Events that trigger proactive speech from Jarvis without a user utterance.

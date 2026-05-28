@@ -660,10 +660,7 @@ impl AcpWriter {
         let mut man = std::mem::ManuallyDrop::new(child);
         Self {
             session_id: None,
-            stdin: man
-                .stdin
-                .take()
-                .expect("no stdin"),
+            stdin: man.stdin.take().expect("no stdin"),
             child: man,
             next_id: 0,
             verbose: Arc::new(AtomicBool::new(false)),
@@ -1757,7 +1754,6 @@ mod tests {
         let msg = serde_json::json!({"jsonrpc": "2.0", "id": 5, "result": result});
         assert_eq!(msg["result"]["outcome"], "cancelled");
     }
-
 }
 
 // ── Integration tests (require running `hermes acp`) ──────────────────────────

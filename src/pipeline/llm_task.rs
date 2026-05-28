@@ -266,7 +266,9 @@ pub async fn llm_task(
                         let db_c = db.clone();
                         let resp_c = llm_text.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = db_c.save_message(session_id, "Assistant", &resp_c).await {
+                            if let Err(e) =
+                                db_c.save_message(session_id, "Assistant", &resp_c).await
+                            {
                                 warn!(target: "db", "Failed to save partial assistant message: {}", e);
                             }
                         });

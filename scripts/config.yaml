@@ -6,8 +6,8 @@ servers:
       vllm:
         port: 8005
         token: ""
-        models: 
-          - Qwen3.6-27B
+        models: []
+          # - Qwen3.6-27B
           # - gemma-4-31B-it-NVFP4
           # - gemma-4-31B-it
           # - Qwen3.6-35B-A3B-FP8
@@ -42,6 +42,8 @@ servers:
         token: ""
         models:
           - "mlx-community/gemma-4-26b-a4b-it-4bit"
+          # - "LiquidAI/LFM2.5-8B-A1B-MLX-4bit"
+          - "LiquidAI/LFM2.5-8B-A1B-MLX-8bit"
           # - "mlx-community/Qwen3.6-35B-A3B-4bit" 
           # - "lmstudio-community/GLM-4.7-Flash-MLX-4bit"
       ollama:

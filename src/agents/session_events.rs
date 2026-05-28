@@ -38,20 +38,33 @@ pub fn parse_session_update(params: &Value, correlation_id: &str) -> Option<AcpS
     match update {
         "agent_message_chunk" => {
             let text = content.get("content")?.get("text")?.as_str()?.to_string();
-            Some(AcpSessionEvent::AgentMessageChunk { text, correlation_id: corr })
+            Some(AcpSessionEvent::AgentMessageChunk {
+                text,
+                correlation_id: corr,
+            })
         }
         "agent_thought_chunk" => {
             let text = content.get("content")?.get("text")?.as_str()?.to_string();
-            Some(AcpSessionEvent::AgentThoughtChunk { text, correlation_id: corr })
+            Some(AcpSessionEvent::AgentThoughtChunk {
+                text,
+                correlation_id: corr,
+            })
         }
         "tool_call" => {
             let name = content.get("name")?.as_str()?.to_string();
-            Some(AcpSessionEvent::ToolCall { name, correlation_id: corr })
+            Some(AcpSessionEvent::ToolCall {
+                name,
+                correlation_id: corr,
+            })
         }
         "tool_call_update" => {
             let name = content.get("name")?.as_str()?.to_string();
             let status = content.get("status")?.as_str()?.to_string();
-            Some(AcpSessionEvent::ToolCallUpdate { name, status, correlation_id: corr })
+            Some(AcpSessionEvent::ToolCallUpdate {
+                name,
+                status,
+                correlation_id: corr,
+            })
         }
         "permission_request" => {
             let description = content.get("description")?.as_str()?.to_string();
@@ -131,14 +144,18 @@ mod tests {
     fn test_parse_agent_message_chunk() {
         let params = make_params("agent_message_chunk", "hello");
         let ev = parse_session_update(&params, "corr-1").expect("should parse");
-        assert!(matches!(ev, AcpSessionEvent::AgentMessageChunk { ref text, .. } if text == "hello"));
+        assert!(
+            matches!(ev, AcpSessionEvent::AgentMessageChunk { ref text, .. } if text == "hello")
+        );
     }
 
     #[test]
     fn test_parse_agent_thought_chunk() {
         let params = make_params("agent_thought_chunk", "thinking...");
         let ev = parse_session_update(&params, "corr-2").expect("should parse");
-        assert!(matches!(ev, AcpSessionEvent::AgentThoughtChunk { ref text, .. } if text == "thinking..."));
+        assert!(
+            matches!(ev, AcpSessionEvent::AgentThoughtChunk { ref text, .. } if text == "thinking...")
+        );
     }
 
     #[test]
@@ -152,7 +169,9 @@ mod tests {
     fn test_parse_tool_call_update() {
         let params = make_tool_update_params("web_search", "completed");
         let ev = parse_session_update(&params, "corr-4").expect("should parse");
-        assert!(matches!(ev, AcpSessionEvent::ToolCallUpdate { ref name, ref status, .. } if name == "web_search" && status == "completed"));
+        assert!(
+            matches!(ev, AcpSessionEvent::ToolCallUpdate { ref name, ref status, .. } if name == "web_search" && status == "completed")
+        );
     }
 
     #[test]
@@ -181,7 +200,13 @@ mod tests {
     #[test]
     fn test_channel_capacity() {
         let (tx, mut rx) = create_event_channel();
-        assert!(tx.try_send(AcpSessionEvent::AgentMessageChunk { text: "test".into(), correlation_id: "".to_string() }).is_ok());
+        assert!(
+            tx.try_send(AcpSessionEvent::AgentMessageChunk {
+                text: "test".into(),
+                correlation_id: "".to_string()
+            })
+            .is_ok()
+        );
         drop(tx);
         assert!(rx.try_recv().is_ok());
     }

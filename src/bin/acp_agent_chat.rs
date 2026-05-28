@@ -48,7 +48,9 @@ async fn main() -> Result<()> {
 
     let cwd = std::env::current_dir()?.to_string_lossy().to_string();
 
-    let session_id = writer.initialize(&mut rx, &cwd, HermesSessionViewerMode::Off).await?;
+    let session_id = writer
+        .initialize(&mut rx, &cwd, HermesSessionViewerMode::Off)
+        .await?;
     eprintln!("Session initialized: {session_id}\n");
 
     let writer = Arc::new(Mutex::new(writer));

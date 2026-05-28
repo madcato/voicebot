@@ -158,11 +158,15 @@ impl E2eHarness {
     /// Reset shared fields before starting a new pipeline run.
     fn _reset_for_run(&self) {
         self.captured.lock().unwrap().clear();
-        self.play_cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.play_cancel
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let _ = self.events.llm_post_finished.notified();
     }
 
-    async fn _spawn_and_send(&self, transcript: &str) -> (
+    async fn _spawn_and_send(
+        &self,
+        transcript: &str,
+    ) -> (
         tokio::task::JoinHandle<()>,
         tokio::task::JoinHandle<()>,
         tokio::task::JoinHandle<()>,
@@ -204,8 +208,7 @@ impl E2eHarness {
             let lens_c = Arc::clone(&context_lens);
             let sid = self.session_id;
             #[cfg(feature = "tui")]
-            let tui_tx_c =
-                tokio::sync::mpsc::unbounded_channel::<crate::tui::events::TuiEvent>().0;
+            let tui_tx_c = tokio::sync::mpsc::unbounded_channel::<crate::tui::events::TuiEvent>().0;
             #[cfg(feature = "control")]
             let control_broadcast_c = crate::control::broadcast::ControlBroadcast::new(16);
             tokio::spawn(async move {
@@ -255,8 +258,7 @@ impl E2eHarness {
             let cancel_c = Arc::clone(&cancel);
             let muted_c = Arc::clone(&tts_muted);
             #[cfg(feature = "tui")]
-            let tui_tx_c =
-                tokio::sync::mpsc::unbounded_channel::<crate::tui::events::TuiEvent>().0;
+            let tui_tx_c = tokio::sync::mpsc::unbounded_channel::<crate::tui::events::TuiEvent>().0;
             #[cfg(feature = "remote")]
             let remote_tts_tx_c = Arc::new(tokio::sync::Mutex::new(None));
             #[cfg(feature = "control")]
@@ -359,7 +361,8 @@ impl E2eHarness {
     /// Signal barge-in: all tasks will cancel current work.
     pub fn barge_in(&self) {
         self.events.barge_in_tx.send(0).ok();
-        self.play_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.play_cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Check that DB contains both User and Assistant messages for this session.
@@ -399,11 +402,7 @@ impl E2eHarness {
     }
 
     /// Run the pipeline, wait until a specific state, then barge-in.
-    pub async fn run_with_barge_in_at_state(
-        &self,
-        transcript: &str,
-        target: &'static str,
-    ) {
+    pub async fn run_with_barge_in_at_state(&self, transcript: &str, target: &'static str) {
         self._reset_for_run();
         let (h_llm, h_sen, h_tts) = self._spawn_and_send(transcript).await;
         let mut state_rx = self.state_rx.clone();
@@ -411,11 +410,8 @@ impl E2eHarness {
         let events = Arc::clone(&self.events);
         tokio::spawn(async move {
             loop {
-                let changed = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    state_rx.changed(),
-                )
-                .await;
+                let changed =
+                    tokio::time::timeout(Duration::from_secs(5), state_rx.changed()).await;
                 match changed {
                     Ok(Ok(())) => {
                         let current = state_rx.borrow();
@@ -441,13 +437,7 @@ impl E2eHarness {
 
     /// Run two consecutive pipeline turns with different mock responses.
     /// Used to verify clean state reset after barge-in.
-    pub async fn run_multi_turn(
-        &self,
-        t1: &str,
-        m1: &str,
-        t2: &str,
-        m2: &str,
-    ) {
+    pub async fn run_multi_turn(&self, t1: &str, m1: &str, t2: &str, m2: &str) {
         self.mock_llm_response(m1).await;
         self.run(t1).await;
         self.mock_llm_response(m2).await;
@@ -475,11 +465,6 @@ impl E2eHarness {
         .await;
         Ok(())
     }
-            }
-        })
-        .await;
-        Ok(())
-    }
 
     pub async fn wait_for_first_sentence(&self) -> Result<(), ()> {
         let captured_rx = self.captured.clone();
@@ -499,11 +484,9 @@ impl E2eHarness {
 
     /// Pause the pipeline by setting state to Paused via the watch channel.
     pub fn pause_pipeline(&self) {
-        let _ = self
-            .state_tx
-            .send(PipelineState::Paused {
-                reason: crate::pipeline::PauseReason::Consolidation,
-            });
+        let _ = self.state_tx.send(PipelineState::Paused {
+            reason: crate::pipeline::PauseReason::Consolidation,
+        });
     }
 
     /// Wait for the pipeline to complete (LLM finished + TTS settled), with timeout.
@@ -518,7 +501,10 @@ impl E2eHarness {
     }
 
     /// Spawn pipeline tasks and send transcript immediately. Returns the JoinHandles.
-    pub async fn spawn_pipeline(&self, transcript: &str) -> (
+    pub async fn spawn_pipeline(
+        &self,
+        transcript: &str,
+    ) -> (
         tokio::task::JoinHandle<()>,
         tokio::task::JoinHandle<()>,
         tokio::task::JoinHandle<()>,
@@ -654,8 +640,10 @@ async fn db_persists_multiple_turns() {
 #[ignore]
 async fn barge_in_during_mixed() {
     let h = E2eHarness::new().await;
-    h.mock_llm_response("La primera respuesta. La segunda respuesta. La tercera respuesta. La cuarta respuesta.")
-        .await;
+    h.mock_llm_response(
+        "La primera respuesta. La segunda respuesta. La tercera respuesta. La cuarta respuesta.",
+    )
+    .await;
     let (h_llm, h_sen, h_tts) = h.spawn_pipeline("Dinos cuatro cosas.").await;
     h.wait_for_state("Speaking").await.ok();
     h.barge_in();
@@ -672,10 +660,7 @@ async fn barge_in_during_mixed() {
         "expected TTS to have started before barge-in"
     );
     let has_partial = h.assert_db_has_partial_save().await;
-    assert!(
-        has_partial,
-        "expected partial response saved"
-    );
+    assert!(has_partial, "expected partial response saved");
 }
 
 /// Barge-in during tool execution.
@@ -716,7 +701,8 @@ async fn barge_in_during_pause() {
 #[ignore]
 async fn barge_in_spam_rapid() {
     let h = E2eHarness::new().await;
-    h.mock_llm_response("Respuesta larga para probar spam.").await;
+    h.mock_llm_response("Respuesta larga para probar spam.")
+        .await;
     let (h_llm, h_sen, h_tts) = h.spawn_pipeline("Consulta spam.").await;
     for _ in 0..5 {
         h.barge_in();
@@ -732,8 +718,10 @@ async fn barge_in_spam_rapid() {
 #[ignore]
 async fn barge_in_multi_sentence() {
     let h = E2eHarness::new().await;
-    h.mock_llm_response("Primera oracion. Segunda oracion. Tercera oracion. Cuarta oracion. Quinta oracion.")
-        .await;
+    h.mock_llm_response(
+        "Primera oracion. Segunda oracion. Tercera oracion. Cuarta oracion. Quinta oracion.",
+    )
+    .await;
     let (h_llm, h_sen, h_tts) = h.spawn_pipeline("Dime cinco cosas.").await;
     h.wait_for_first_sentence().await.ok();
     h.barge_in();
@@ -767,14 +755,12 @@ async fn barge_in_during_idle() {
 #[ignore]
 async fn barge_in_during_thinking_before_token() {
     let h = E2eHarness::new().await;
-    h.mock_llm_response("Respuesta que va a llegar tarde.").await;
+    h.mock_llm_response("Respuesta que va a llegar tarde.")
+        .await;
     // Immediately barge-in
     h.run_immediate_barge_in("Consulta para cancelar.").await;
     let has_partial = h.assert_db_has_partial_save().await;
-    assert!(
-        has_partial,
-        "expected partial save: user + assistant"
-    );
+    assert!(has_partial, "expected partial save: user + assistant");
 }
 
 /// Barge-in while receiving LLM tokens (mid-stream thinking).
@@ -782,8 +768,10 @@ async fn barge_in_during_thinking_before_token() {
 #[ignore]
 async fn barge_in_during_thinking_mid_stream() {
     let h = E2eHarness::new().await;
-    h.mock_llm_response("Primera parte. Segunda parte. Tercera parte.").await;
-    h.run_with_barge_in_at_state("Consulta mid-stream.", "Thinking").await;
+    h.mock_llm_response("Primera parte. Segunda parte. Tercera parte.")
+        .await;
+    h.run_with_barge_in_at_state("Consulta mid-stream.", "Thinking")
+        .await;
     // Partial save may or may not occur mid-stream — verify pipeline responded
     let captured = h.tts_sentences();
     let _has_partial = h.assert_db_has_partial_save().await;
@@ -795,13 +783,12 @@ async fn barge_in_during_thinking_mid_stream() {
 #[ignore]
 async fn barge_in_during_speaking_playing() {
     let h = E2eHarness::new().await;
-    h.mock_llm_response("Respuesta para testear speaking.").await;
-    h.run_with_barge_in_at_state("Consulta playing.", "Speaking").await;
+    h.mock_llm_response("Respuesta para testear speaking.")
+        .await;
+    h.run_with_barge_in_at_state("Consulta playing.", "Speaking")
+        .await;
     let has_partial = h.assert_db_has_partial_save().await;
-    assert!(
-        has_partial,
-        "expected partial save"
-    );
+    assert!(has_partial, "expected partial save");
 }
 
 /// Barge-in while TTS is queueing multiple sentences.
@@ -809,18 +796,17 @@ async fn barge_in_during_speaking_playing() {
 #[ignore]
 async fn barge_in_during_speaking_queueing() {
     let h = E2eHarness::new().await;
-    h.mock_llm_response("Primera. Segunda. Tercera. Cuarta. Quinta.").await;
-    h.run_with_barge_in_at_state("Consulta queueing.", "Speaking").await;
+    h.mock_llm_response("Primera. Segunda. Tercera. Cuarta. Quinta.")
+        .await;
+    h.run_with_barge_in_at_state("Consulta queueing.", "Speaking")
+        .await;
     let captured = h.tts_sentences();
     assert!(
         !captured.is_empty(),
         "expected at least one sentence queued before barge-in"
     );
     let has_partial = h.assert_db_has_partial_save().await;
-    assert!(
-        has_partial,
-        "expected partial save"
-    );
+    assert!(has_partial, "expected partial save");
 }
 
 /// Verify pipeline state resets cleanly after barge-in — two consecutive turns.
@@ -829,7 +815,8 @@ async fn barge_in_during_speaking_queueing() {
 async fn barge_in_clean_state_reset() {
     let h = E2eHarness::new().await;
     // First turn with barge-in
-    h.mock_llm_response("Respuesta parcial que se cancela.").await;
+    h.mock_llm_response("Respuesta parcial que se cancela.")
+        .await;
     h.run_immediate_barge_in("Consulta parcial.").await;
     h.wait_for_complete().await;
     // Second turn should work cleanly

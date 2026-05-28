@@ -152,7 +152,9 @@ impl AcpSessionManager {
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        let session_id = writer.initialize(&mut inbound_rx, &cwd, HermesSessionViewerMode::Off).await?;
+        let session_id = writer
+            .initialize(&mut inbound_rx, &cwd, HermesSessionViewerMode::Off)
+            .await?;
         let now = Instant::now();
         let entry = SessionEntry {
             writer: Arc::new(Mutex::new(writer)),
@@ -182,19 +184,19 @@ impl AcpSessionManager {
         });
         removed_tasks
     }
-    
+
     pub fn add_task(&self, agent_name: &str, task_id: &str) {
         if let Some(mut entry) = self.sessions.get_mut(agent_name) {
             entry.task_ids.insert(task_id.to_string());
         }
     }
-    
+
     pub fn remove_task(&self, agent_name: &str, task_id: &str) {
         if let Some(mut entry) = self.sessions.get_mut(agent_name) {
             entry.task_ids.remove(task_id);
         }
     }
-    
+
     pub fn get_all_task_ids(&self) -> HashSet<String> {
         let mut ids = HashSet::new();
         for entry in self.sessions.iter() {
@@ -221,13 +223,17 @@ impl AcpSessionManager {
     /// Warm up a single agent session (calls spawn + initialize, stores result).
     /// Convenience method so callers (e.g. `main.rs`) only need this type.
     pub async fn prewarm_agent(&self, config: &AgentConfig) -> Result<String> {
-        self.get_or_create_session(config).await.map(|e| e.session_id)
+        self.get_or_create_session(config)
+            .await
+            .map(|e| e.session_id)
     }
 
     /// Remove all sessions idle longer than `timeout`.
     /// Returns the number of sessions removed.
     pub fn cleanup_idle_sessions(&self, timeout: Duration) -> usize {
-        let cutoff = Instant::now().checked_sub(timeout).unwrap_or(Instant::now());
+        let cutoff = Instant::now()
+            .checked_sub(timeout)
+            .unwrap_or(Instant::now());
         let mut removed = 0usize;
         self.sessions.retain(|_, v| {
             if v.last_used <= cutoff {
@@ -561,7 +567,10 @@ mod tests {
         let err = AcpWriter::spawn("/__nonexistent_disk_failure_cmd")
             .await
             .expect_err("spawn should fail for bad path");
-        assert!(!err.to_string().is_empty(), "transient error should produce a non-empty warning message");
+        assert!(
+            !err.to_string().is_empty(),
+            "transient error should produce a non-empty warning message"
+        );
     }
 
     #[tokio::test]
@@ -599,7 +608,10 @@ mod tests {
         let mgr = AcpSessionManager::new();
 
         let removed = mgr.close_session("nonexistent-sid");
-        assert!(removed.is_empty(), "closing unknown session yields no removed tasks (silent warning)");
+        assert!(
+            removed.is_empty(),
+            "closing unknown session yields no removed tasks (silent warning)"
+        );
         assert!(mgr.list_sessions().is_empty());
     }
 
@@ -646,8 +658,10 @@ mod tests {
     #[tokio::test]
     async fn idle_timeout_zero_duration_removes_all() {
         let mgr = AcpSessionManager::new();
-        mgr.sessions.insert("a".into(), make_dummy_entry("a-1", "a"));
-        mgr.sessions.insert("b".into(), make_dummy_entry("b-1", "b"));
+        mgr.sessions
+            .insert("a".into(), make_dummy_entry("a-1", "a"));
+        mgr.sessions
+            .insert("b".into(), make_dummy_entry("b-1", "b"));
 
         let removed = mgr.cleanup_idle_sessions(Duration::from_secs(0));
         assert_eq!(removed, 2);
@@ -679,22 +693,32 @@ mod tests {
             })
             .collect();
 
-        let joined: Vec<Result<String, tokio::task::JoinError>> = futures_util::future::join_all(handles).await;
+        let joined: Vec<Result<String, tokio::task::JoinError>> =
+            futures_util::future::join_all(handles).await;
         let collected: Vec<String> = joined.into_iter().map(|r| r.expect("task join")).collect();
         let stored = mgr.get_all_task_ids();
 
         for tid in &collected {
-            assert!(stored.contains(tid.as_str()), "task {tid} should be visible");
+            assert!(
+                stored.contains(tid.as_str()),
+                "task {tid} should be visible"
+            );
         }
-        assert_eq!(stored.len(), n_tasks, "all {n_tasks} tasks should be stored");
+        assert_eq!(
+            stored.len(),
+            n_tasks,
+            "all {n_tasks} tasks should be stored"
+        );
         assert_eq!(mgr.list_sessions().len(), 1, "should still be one session");
     }
 
     #[tokio::test]
     async fn concurrency_concurrent_add_remove_integrity() {
         let mgr = Arc::new(AcpSessionManager::new());
-        mgr.sessions
-            .insert("hermes".into(), make_dummy_entry("integrity-sess", "hermes"));
+        mgr.sessions.insert(
+            "hermes".into(),
+            make_dummy_entry("integrity-sess", "hermes"),
+        );
 
         let n_pairs = 10;
         let handles: Vec<_> = (0..n_pairs)
@@ -713,8 +737,10 @@ mod tests {
             })
             .collect();
 
-        let joined: Vec<Result<(String, String), tokio::task::JoinError>> = futures_util::future::join_all(handles).await;
-        let pairs: Vec<(String, String)> = joined.into_iter().map(|r| r.expect("task join")).collect();
+        let joined: Vec<Result<(String, String), tokio::task::JoinError>> =
+            futures_util::future::join_all(handles).await;
+        let pairs: Vec<(String, String)> =
+            joined.into_iter().map(|r| r.expect("task join")).collect();
         let stored = mgr.get_all_task_ids();
 
         for (add_id, remove_id) in &pairs {
