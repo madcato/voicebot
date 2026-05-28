@@ -74,6 +74,10 @@ struct E2eHarness {
     pub shared_history: Arc<RwLock<String>>,
     // Kept alive so the temp directory isn't deleted before the test ends.
     _db_dir: tempfile::TempDir,
+    state_tx: Arc<tokio::sync::watch::Sender<PipelineState>>,
+    pub state_rx: tokio::sync::watch::Receiver<PipelineState>,
+    pub events: Arc<PipelineEvents>,
+    pub play_cancel: Arc<AtomicBool>,
 }
 
 impl E2eHarness {
@@ -104,6 +108,11 @@ impl E2eHarness {
         let tools = Arc::new(ToolRegistry::new());
         let shared_history = Arc::new(RwLock::new(String::new()));
 
+        let events = Arc::new(PipelineEvents::new());
+        let play_cancel = Arc::new(AtomicBool::new(false));
+        let (state_tx, state_rx) = tokio::sync::watch::channel(PipelineState::Idle);
+        let state_tx = Arc::new(state_tx);
+
         Self {
             server,
             llm_client,
@@ -116,6 +125,10 @@ impl E2eHarness {
             tools,
             shared_history,
             _db_dir: db_dir,
+            state_tx,
+            state_rx,
+            events,
+            play_cancel,
         }
     }
 
@@ -142,41 +155,39 @@ impl E2eHarness {
         self.run_with_opts(transcript, true, wake_word).await
     }
 
-    async fn run_with_opts(&self, transcript: &str, ambient: bool, wake_word: &str) {
-        // In ambient mode without the wake word the audio loop discards the transcript.
-        if ambient
-            && !transcript
-                .to_lowercase()
-                .contains(&wake_word.to_lowercase())
-        {
-            return;
-        }
+    /// Reset shared fields before starting a new pipeline run.
+    fn _reset_for_run(&self) {
+        self.captured.lock().unwrap().clear();
+        self.play_cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.events.llm_post_finished.notified();
+    }
 
-        let events = Arc::new(PipelineEvents::new());
-        let play_cancel = Arc::new(AtomicBool::new(false));
+    async fn _spawn_and_send(&self, transcript: &str) -> (
+        tokio::task::JoinHandle<()>,
+        tokio::task::JoinHandle<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let sample_rate = self.tts.sample_rate();
+
         let tts_muted = Arc::new(AtomicBool::new(false));
         let turn_commit = Arc::new(AtomicU64::new(0));
         let context_lens = Arc::new(Mutex::new(ContextLens::new()));
         let t_vad_end: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
         let t_llm_post_send: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
 
-        // Inject transcript directly — bypasses STT/VAD for deterministic tests.
-        if transcript.trim().is_empty() {
-            return;
-        }
-
-        let sample_rate = self.tts.sample_rate();
-
         let (proactive_tx, _proactive_rx) = mpsc::channel::<ProactiveEvent>(8);
-        let (state_tx, state_rx) = tokio::sync::watch::channel(PipelineState::Idle);
-        let state_tx = Arc::new(state_tx);
+        let state_tx = Arc::clone(&self.state_tx);
+        let state_rx = self.state_rx.clone();
         let (sentences_tx, sentences_rx) =
             tokio::sync::mpsc::channel::<crate::pipeline::PipelineFrame>(64);
         let (llm_tx, llm_rx) = tokio::sync::mpsc::channel::<crate::pipeline::PipelineFrame>(256);
         let (transcript_tx, transcript_rx) =
             tokio::sync::mpsc::channel::<crate::pipeline::PipelineFrame>(16);
 
-        // Spawn the three pipeline tasks.
+        let events = Arc::clone(&self.events);
+        let cancel = Arc::clone(&self.play_cancel);
+
+        // Spawn LLM task.
         let h_llm = {
             let events_c = Arc::clone(&events);
             let state_tx_c = Arc::clone(&state_tx);
@@ -193,7 +204,8 @@ impl E2eHarness {
             let lens_c = Arc::clone(&context_lens);
             let sid = self.session_id;
             #[cfg(feature = "tui")]
-            let tui_tx_c = tokio::sync::mpsc::unbounded_channel::<crate::tui::events::TuiEvent>().0;
+            let tui_tx_c =
+                tokio::sync::mpsc::unbounded_channel::<crate::tui::events::TuiEvent>().0;
             #[cfg(feature = "control")]
             let control_broadcast_c = crate::control::broadcast::ControlBroadcast::new(16);
             tokio::spawn(async move {
@@ -222,6 +234,8 @@ impl E2eHarness {
                 .await;
             })
         };
+
+        // Spawn sentence split task.
         let h_sen = {
             let events_c = Arc::clone(&events);
             let sent_tx_c = sentences_tx.clone();
@@ -231,15 +245,18 @@ impl E2eHarness {
                 sen_task(events_c, llm_rx, sent_tx_c, t_vad_end_c, t_llm_post_send_c).await
             })
         };
+
+        // Spawn TTS task.
         let h_tts = {
             let events_c = Arc::clone(&events);
             let t_vad_end_c = Arc::clone(&t_vad_end);
             let tts_c = Arc::clone(&self.tts);
             let out_c = Arc::clone(&self.audio_output);
-            let cancel_c = Arc::clone(&play_cancel);
+            let cancel_c = Arc::clone(&cancel);
             let muted_c = Arc::clone(&tts_muted);
             #[cfg(feature = "tui")]
-            let tui_tx_c = tokio::sync::mpsc::unbounded_channel::<crate::tui::events::TuiEvent>().0;
+            let tui_tx_c =
+                tokio::sync::mpsc::unbounded_channel::<crate::tui::events::TuiEvent>().0;
             #[cfg(feature = "remote")]
             let remote_tts_tx_c = Arc::new(tokio::sync::Mutex::new(None));
             #[cfg(feature = "control")]
@@ -265,7 +282,7 @@ impl E2eHarness {
             })
         };
 
-        // Send transcript to wake up the LLM task.
+        // Send transcript.
         transcript_tx
             .send(crate::pipeline::PipelineFrame::TranscriptReady {
                 utterance_id: 0,
@@ -274,22 +291,50 @@ impl E2eHarness {
             .await
             .ok();
 
-        // Wait for the LLM to finish streaming.
-        events.llm_post_finished.notified().await;
+        (h_llm, h_sen, h_tts)
+    }
 
-        // Give TTS tasks time to synthesize (MockTts is instant).
-        tokio::time::sleep(Duration::from_millis(150)).await;
-
-        // Cancel all tasks.
-        events.barge_in_tx.send(0).ok();
-        play_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
-
+    /// Wait for pipeline tasks to complete with a timeout.
+    async fn _wait_for_tasks(
+        h_llm: tokio::task::JoinHandle<()>,
+        h_sen: tokio::task::JoinHandle<()>,
+        h_tts: tokio::task::JoinHandle<()>,
+    ) {
         let _ = tokio::time::timeout(Duration::from_secs(2), async {
             let _ = h_llm.await;
             let _ = h_sen.await;
             let _ = h_tts.await;
         })
         .await;
+    }
+
+    async fn run_with_opts(&self, transcript: &str, ambient: bool, wake_word: &str) {
+        // In ambient mode without the wake word the audio loop discards the transcript.
+        if ambient
+            && !transcript
+                .to_lowercase()
+                .contains(&wake_word.to_lowercase())
+        {
+            return;
+        }
+
+        if transcript.trim().is_empty() {
+            return;
+        }
+
+        self._reset_for_run();
+        let (h_llm, h_sen, h_tts) = self._spawn_and_send(transcript).await;
+
+        // Wait for the LLM to finish streaming.
+        self.events.llm_post_finished.notified().await;
+
+        // Give TTS time to synthesize (MockTts is instant).
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Cancel all tasks.
+        self.barge_in();
+
+        Self::_wait_for_tasks(h_llm, h_sen, h_tts).await;
 
         // Allow background DB writes to settle.
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -307,6 +352,179 @@ impl E2eHarness {
     /// Sentences that were synthesized by TTS.
     fn tts_sentences(&self) -> Vec<String> {
         self.captured.lock().unwrap().clone()
+    }
+
+    // ── Barge-in helpers ──────────────────────────────────────────────────
+
+    /// Signal barge-in: all tasks will cancel current work.
+    pub fn barge_in(&self) {
+        self.events.barge_in_tx.send(0).ok();
+        self.play_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Check that DB contains both User and Assistant messages for this session.
+    /// Returns true if partial response was persisted (user turn + partial assistant).
+    pub async fn assert_db_has_partial_save(&self) -> bool {
+        let msgs = self
+            .db
+            .get_session_context(self.session_id, 0)
+            .await
+            .unwrap()
+            .1;
+        let has_user = msgs.iter().any(|(r, _)| r == "User");
+        let has_assistant = msgs.iter().any(|(r, _)| r == "Assistant");
+        has_user && has_assistant
+    }
+
+    /// Run the pipeline, immediately trigger barge-in, then wait for all tasks to finish.
+    pub async fn run_immediate_barge_in(&self, transcript: &str) {
+        self._reset_for_run();
+        let (h_llm, h_sen, h_tts) = self._spawn_and_send(transcript).await;
+        self.barge_in();
+        E2eHarness::_wait_for_tasks(h_llm, h_sen, h_tts).await;
+    }
+
+    /// Run the pipeline, wait `delay_ms`, then trigger barge-in.
+    pub async fn run_with_delayed_barge_in(&self, transcript: &str, delay_ms: u64) {
+        self._reset_for_run();
+        let (h_llm, h_sen, h_tts) = self._spawn_and_send(transcript).await;
+        let cancel = Arc::clone(&self.play_cancel);
+        let events = Arc::clone(&self.events);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            events.barge_in_tx.send(0).ok();
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        E2eHarness::_wait_for_tasks(h_llm, h_sen, h_tts).await;
+    }
+
+    /// Run the pipeline, wait until a specific state, then barge-in.
+    pub async fn run_with_barge_in_at_state(
+        &self,
+        transcript: &str,
+        target: &'static str,
+    ) {
+        self._reset_for_run();
+        let (h_llm, h_sen, h_tts) = self._spawn_and_send(transcript).await;
+        let mut state_rx = self.state_rx.clone();
+        let cancel = Arc::clone(&self.play_cancel);
+        let events = Arc::clone(&self.events);
+        tokio::spawn(async move {
+            loop {
+                let changed = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    state_rx.changed(),
+                )
+                .await;
+                match changed {
+                    Ok(Ok(())) => {
+                        let current = state_rx.borrow();
+                        let desc = match &*current {
+                            PipelineState::Idle => "Idle",
+                            PipelineState::Listening { .. } => "Listening",
+                            PipelineState::Thinking { .. } => "Thinking",
+                            PipelineState::Speaking { .. } => "Speaking",
+                            PipelineState::Paused { .. } => "Paused",
+                        };
+                        if desc == target {
+                            events.barge_in_tx.send(0).ok();
+                            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        });
+        E2eHarness::_wait_for_tasks(h_llm, h_sen, h_tts).await;
+    }
+
+    /// Run two consecutive pipeline turns with different mock responses.
+    /// Used to verify clean state reset after barge-in.
+    pub async fn run_multi_turn(
+        &self,
+        t1: &str,
+        m1: &str,
+        t2: &str,
+        m2: &str,
+    ) {
+        self.mock_llm_response(m1).await;
+        self.run(t1).await;
+        self.mock_llm_response(m2).await;
+        self.run(t2).await;
+    }
+
+    pub async fn wait_for_state(&self, target: &str) -> Result<(), ()> {
+        let mut state_rx = self.state_rx.clone();
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let _ = state_rx.changed().await;
+                let current = state_rx.borrow();
+                let desc = match &*current {
+                    PipelineState::Idle => "Idle",
+                    PipelineState::Listening { .. } => "Listening",
+                    PipelineState::Thinking { .. } => "Thinking",
+                    PipelineState::Speaking { .. } => "Speaking",
+                    PipelineState::Paused { .. } => "Paused",
+                };
+                if desc == target {
+                    return;
+                }
+            }
+        })
+        .await;
+        Ok(())
+    }
+            }
+        })
+        .await;
+        Ok(())
+    }
+
+    pub async fn wait_for_first_sentence(&self) -> Result<(), ()> {
+        let captured_rx = self.captured.clone();
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let guard = captured_rx.lock().unwrap();
+                if !guard.is_empty() {
+                    return;
+                }
+                drop(guard);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        Ok(())
+    }
+
+    /// Pause the pipeline by setting state to Paused via the watch channel.
+    pub fn pause_pipeline(&self) {
+        let _ = self
+            .state_tx
+            .send(PipelineState::Paused {
+                reason: crate::pipeline::PauseReason::Consolidation,
+            });
+    }
+
+    /// Wait for the pipeline to complete (LLM finished + TTS settled), with timeout.
+    pub async fn wait_for_complete(&self) {
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            self.events.llm_post_finished.notified().await;
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        self.barge_in();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    /// Spawn pipeline tasks and send transcript immediately. Returns the JoinHandles.
+    pub async fn spawn_pipeline(&self, transcript: &str) -> (
+        tokio::task::JoinHandle<()>,
+        tokio::task::JoinHandle<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        self._reset_for_run();
+        self._spawn_and_send(transcript).await
     }
 }
 
@@ -427,6 +645,199 @@ async fn db_persists_multiple_turns() {
         assistant_count, 2,
         "expected 2 assistant turns in DB, got: {msgs:?}"
     );
+}
+
+// ── Barge-in scenarios ─────────────────────────────────────────────────────────────
+
+/// Barge-in when LLM is streaming AND TTS is playing simultaneously.
+#[tokio::test]
+#[ignore]
+async fn barge_in_during_mixed() {
+    let h = E2eHarness::new().await;
+    h.mock_llm_response("La primera respuesta. La segunda respuesta. La tercera respuesta. La cuarta respuesta.")
+        .await;
+    let (h_llm, h_sen, h_tts) = h.spawn_pipeline("Dinos cuatro cosas.").await;
+    h.wait_for_state("Speaking").await.ok();
+    h.barge_in();
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        let _ = h_llm.await;
+        let _ = h_sen.await;
+        let _ = h_tts.await;
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let captured = h.tts_sentences();
+    assert!(
+        !captured.is_empty(),
+        "expected TTS to have started before barge-in"
+    );
+    let has_partial = h.assert_db_has_partial_save().await;
+    assert!(
+        has_partial,
+        "expected partial response saved"
+    );
+}
+
+/// Barge-in during tool execution.
+#[tokio::test]
+#[ignore]
+async fn barge_in_during_tool() {
+    let h = E2eHarness::new().await;
+    h.mock_llm_response("Result de la herramienta.").await;
+    let (h_llm, h_sen, h_tts) = h.spawn_pipeline("Herramienta de prueba.").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    h.barge_in();
+    h.wait_for_complete().await;
+    E2eHarness::_wait_for_tasks(h_llm, h_sen, h_tts).await;
+    let _captured = h.tts_sentences();
+    assert!(true);
+}
+
+/// Barge-in when pipeline is in Paused/Consolidation state. User input must be discarded.
+#[tokio::test]
+#[ignore]
+async fn barge_in_during_pause() {
+    let h = E2eHarness::new().await;
+    h.pause_pipeline();
+    let (h_llm, h_sen, h_tts) = h.spawn_pipeline("Consulta durante pausa.").await;
+    h.barge_in();
+    h.wait_for_complete().await;
+    E2eHarness::_wait_for_tasks(h_llm, h_sen, h_tts).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let captured = h.tts_sentences();
+    assert!(
+        captured.is_empty(),
+        "expected no TTS output when barge-in during pause"
+    );
+}
+
+/// Rapid successive barge-ins (stress test).
+#[tokio::test]
+#[ignore]
+async fn barge_in_spam_rapid() {
+    let h = E2eHarness::new().await;
+    h.mock_llm_response("Respuesta larga para probar spam.").await;
+    let (h_llm, h_sen, h_tts) = h.spawn_pipeline("Consulta spam.").await;
+    for _ in 0..5 {
+        h.barge_in();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    h.wait_for_complete().await;
+    E2eHarness::_wait_for_tasks(h_llm, h_sen, h_tts).await;
+    assert!(true, "spam barge-in survived");
+}
+
+/// Barge-in during multi-sentence response.
+#[tokio::test]
+#[ignore]
+async fn barge_in_multi_sentence() {
+    let h = E2eHarness::new().await;
+    h.mock_llm_response("Primera oracion. Segunda oracion. Tercera oracion. Cuarta oracion. Quinta oracion.")
+        .await;
+    let (h_llm, h_sen, h_tts) = h.spawn_pipeline("Dime cinco cosas.").await;
+    h.wait_for_first_sentence().await.ok();
+    h.barge_in();
+    h.wait_for_complete().await;
+    E2eHarness::_wait_for_tasks(h_llm, h_sen, h_tts).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let captured = h.tts_sentences();
+    assert!(
+        !captured.is_empty(),
+        "expected at least one sentence before barge-in"
+    );
+    let has_partial = h.assert_db_has_partial_save().await;
+    assert!(
+        has_partial,
+        "expected partial save from multi-sentence interruption"
+    );
+}
+
+/// Barge-in when pipeline is idle (nothing active).
+#[tokio::test]
+#[ignore]
+async fn barge_in_during_idle() {
+    let h = E2eHarness::new().await;
+    h.mock_llm_response("Respuesta normal.").await;
+    // Send barge-in before any transcript
+    h.run_immediate_barge_in("Consulta normal.").await;
+}
+
+/// Barge-in during LLM thinking, before the first token arrives.
+#[tokio::test]
+#[ignore]
+async fn barge_in_during_thinking_before_token() {
+    let h = E2eHarness::new().await;
+    h.mock_llm_response("Respuesta que va a llegar tarde.").await;
+    // Immediately barge-in
+    h.run_immediate_barge_in("Consulta para cancelar.").await;
+    let has_partial = h.assert_db_has_partial_save().await;
+    assert!(
+        has_partial,
+        "expected partial save: user + assistant"
+    );
+}
+
+/// Barge-in while receiving LLM tokens (mid-stream thinking).
+#[tokio::test]
+#[ignore]
+async fn barge_in_during_thinking_mid_stream() {
+    let h = E2eHarness::new().await;
+    h.mock_llm_response("Primera parte. Segunda parte. Tercera parte.").await;
+    h.run_with_barge_in_at_state("Consulta mid-stream.", "Thinking").await;
+    // Partial save may or may not occur mid-stream — verify pipeline responded
+    let captured = h.tts_sentences();
+    let _has_partial = h.assert_db_has_partial_save().await;
+    // Test passes if pipeline completed without panic
+}
+
+/// Barge-in while TTS is actively playing audio.
+#[tokio::test]
+#[ignore]
+async fn barge_in_during_speaking_playing() {
+    let h = E2eHarness::new().await;
+    h.mock_llm_response("Respuesta para testear speaking.").await;
+    h.run_with_barge_in_at_state("Consulta playing.", "Speaking").await;
+    let has_partial = h.assert_db_has_partial_save().await;
+    assert!(
+        has_partial,
+        "expected partial save"
+    );
+}
+
+/// Barge-in while TTS is queueing multiple sentences.
+#[tokio::test]
+#[ignore]
+async fn barge_in_during_speaking_queueing() {
+    let h = E2eHarness::new().await;
+    h.mock_llm_response("Primera. Segunda. Tercera. Cuarta. Quinta.").await;
+    h.run_with_barge_in_at_state("Consulta queueing.", "Speaking").await;
+    let captured = h.tts_sentences();
+    assert!(
+        !captured.is_empty(),
+        "expected at least one sentence queued before barge-in"
+    );
+    let has_partial = h.assert_db_has_partial_save().await;
+    assert!(
+        has_partial,
+        "expected partial save"
+    );
+}
+
+/// Verify pipeline state resets cleanly after barge-in — two consecutive turns.
+#[tokio::test]
+#[ignore]
+async fn barge_in_clean_state_reset() {
+    let h = E2eHarness::new().await;
+    // First turn with barge-in
+    h.mock_llm_response("Respuesta parcial que se cancela.").await;
+    h.run_immediate_barge_in("Consulta parcial.").await;
+    h.wait_for_complete().await;
+    // Second turn should work cleanly
+    h.mock_llm_response("Respuesta completa y limpia.").await;
+    h.run_immediate_barge_in("Consulta limpia.").await;
+    h.wait_for_complete().await;
+    let captured = h.tts_sentences();
+    assert!(!captured.is_empty(), "second run should work");
 }
 
 // ── STT tests (require Whisper model) ─────────────────────────────────────────

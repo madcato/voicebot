@@ -115,8 +115,6 @@ pub async fn llm_task(
             });
         }
 
-        let messages_snapshot = llm_session.lock().unwrap().messages.clone();
-
         if !tool_continuation {
             {
                 let mut s = llm_session.lock().unwrap();
@@ -264,6 +262,21 @@ pub async fn llm_task(
                 }
 
                 if cancelled {
+                    if !llm_text.is_empty() {
+                        let db_c = db.clone();
+                        let resp_c = llm_text.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = db_c.save_message(session_id, "Assistant", &resp_c).await {
+                                warn!(target: "db", "Failed to save partial assistant message: {}", e);
+                            }
+                        });
+                        llm_session.lock().unwrap().add_assistant_turn(&llm_text);
+                        info!(
+                            target: "pipeline",
+                            "[pipe={}] Cancelled — partial response saved: {} chars",
+                            pipeline_id, llm_text.len()
+                        );
+                    }
                     break 'pipeline;
                 }
 
@@ -430,10 +443,9 @@ pub async fn llm_task(
         }
 
         if !committed && cancelled {
-            llm_session.lock().unwrap().messages = messages_snapshot;
             info!(
                 target: "pipeline",
-                "[pipe={}] Cancelled — session rolled back",
+                "[pipe={}] Cancelled — user message kept in session",
                 pipeline_id
             );
         }
