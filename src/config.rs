@@ -50,8 +50,12 @@ pub struct Config {
     pub language: String,
 
     // ── STT ──────────────────────────────────────────────────────────────────
+    /// STT backend provider: "whisper" (default) or "parakeet".
+    pub stt_provider: String,
     /// Path to whisper.cpp GGML model file (.bin)
     pub whisper_model: String,
+    /// Path to Parakeet model directory (required when STT_PROVIDER=parakeet).
+    pub parakeet_model_dir: Option<String>,
     /// Number of CPU threads for Whisper decoding (0 = auto).
     /// Set to physical core count for best throughput.
     pub whisper_threads: u32,
@@ -287,8 +291,12 @@ impl Config {
             language: env::var("VOICEBOT_LANGUAGE").unwrap_or_else(|_| "es".to_string()),
 
             // STT
+            stt_provider: env::var("STT_PROVIDER")
+                .unwrap_or_else(|_| "whisper".to_string())
+                .to_lowercase(),
             whisper_model: env::var("WHISPER_MODEL")
                 .unwrap_or_else(|_| "models/ggml-large-v3-turbo.bin".to_string()),
+            parakeet_model_dir: env::var("PARAKEET_MODEL_DIR").ok(),
             whisper_threads: env::var("WHISPER_THREADS")
                 .unwrap_or_else(|_| "0".to_string())
                 .parse()
@@ -513,6 +521,13 @@ impl Config {
 
         if config.llm_self_managed && config.llm_command.is_none() {
             anyhow::bail!("LLM_COMMAND must be set when LLM_SELF_MANAGED=1");
+        }
+
+        if !matches!(config.stt_provider.as_str(), "whisper" | "parakeet") {
+            anyhow::bail!(
+                "Invalid STT_PROVIDER '{}'. Supported values: whisper, parakeet",
+                config.stt_provider
+            );
         }
 
         Ok(config)

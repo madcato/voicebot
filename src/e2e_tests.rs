@@ -834,7 +834,7 @@ async fn barge_in_clean_state_reset() {
 #[tokio::test]
 #[ignore = "requires Whisper + VAD models"]
 async fn stt_transcribes_wav_file() {
-    use crate::stt::{WhisperSTTVAD, WhisperSTTVADConfig};
+    use crate::stt::{WhisperSTTVADConfig, WhisperSttProvider};
 
     let model_path = std::env::var("WHISPER_MODEL")
         .unwrap_or_else(|_| "models/ggml-large-v3-turbo.bin".to_string());
@@ -864,7 +864,7 @@ async fn stt_transcribes_wav_file() {
         vad_start_threshold: 0.65,
         vad_end_threshold: 0.45,
     };
-    let stt = WhisperSTTVAD::new(config).expect("failed to load Whisper model");
+    let stt = WhisperSttProvider::new(config).expect("failed to load Whisper model");
     let audio = load_wav_as_f32(wav_path).expect("failed to load WAV fixture");
     let transcript = stt
         .transcribe_complete(&audio)
@@ -881,7 +881,7 @@ async fn stt_transcribes_wav_file() {
 #[tokio::test]
 #[ignore = "requires Whisper + VAD models"]
 async fn full_pipeline_wav_to_db() {
-    use crate::stt::{WhisperSTTVAD, WhisperSTTVADConfig};
+    use crate::stt::{WhisperSTTVADConfig, WhisperSttProvider};
 
     let model_path = std::env::var("WHISPER_MODEL")
         .unwrap_or_else(|_| "models/ggml-large-v3-turbo.bin".to_string());
@@ -910,7 +910,7 @@ async fn full_pipeline_wav_to_db() {
         vad_start_threshold: 0.65,
         vad_end_threshold: 0.45,
     };
-    let stt = WhisperSTTVAD::new(config).unwrap();
+    let stt = WhisperSttProvider::new(config).unwrap();
     let audio = load_wav_as_f32(wav_path).unwrap();
     let transcript = stt.transcribe_complete(&audio).unwrap();
     println!("STT transcript: {transcript:?}");

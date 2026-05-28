@@ -40,15 +40,16 @@ cargo test -p voicebot <test_name>
 Mono-user voice AI chatbot in Rust. Streaming STT→LLM→TTS pipeline, single process, tokio channels.
 
 ```
-Microphone → VAD (Silero) → STT (whisper-cpp-plus) → LLM (mlx-lm/oMLX SSE) → SentenceSplitter → TTS (AVSpeech/Kokoro) → AudioOutput
+Microphone → VAD (Silero) → STT (whisper-cpp-plus or parakeet-rs) → LLM (mlx-lm/oMLX SSE) → SentenceSplitter → TTS (AVSpeech/Kokoro) → AudioOutput
 ```
 
 ### Key Design Decisions
 
-- **STT→LLM latency trick**: Accumulate partial Whisper transcripts; send full text when VAD signals end-of-speech. LLM server maintains KV-cache implicitly across requests.
+- **STT→LLM latency trick**: Accumulate partial transcripts; send full text when VAD signals end-of-speech. LLM server maintains KV-cache implicitly across requests.
 - **LLM→TTS streaming**: Buffer tokens until punctuation (`. ! ? ; :`), synthesize immediately. While sentence N plays, sentence N+1 is being generated.
-- **Language**: Spanish default (`VOICEBOT_LANGUAGE=es`), English supported. Affects Whisper hint and TTS voice.
+- **Language**: Spanish default (`VOICEBOT_LANGUAGE=es`), English supported. Affects Whisper hint and TTS voice. Parakeet auto-detects 25 languages.
 - **Barge-in**: User speech cancels active pipeline via `CancellationToken` (tokio-util).
+- **Pluggable STT**: Provider trait abstracts Whisper (whisper-cpp-plus) and Parakeet (ONNX). Both share Silero VAD. Select via `STT_PROVIDER` env var.
 
 ---
 
@@ -57,7 +58,7 @@ Microphone → VAD (Silero) → STT (whisper-cpp-plus) → LLM (mlx-lm/oMLX SSE)
 | Directory | Purpose | Public exports (lib.rs) |
 |-----------|---------|------------------------|
 | `src/audio/` | CPAL capture, Silero VAD, resampling (rubato), playback | `AudioBuffer`, `AudioOutput`, `VoiceActivityDetector` |
-| `src/stt/` | whisper-cpp-plus wrapper, 16kHz f32 mono, language detection | `WhisperStt` (alias for `WhisperSttPlus`) |
+| `src/stt/` | Provider trait (`SttProvider`) + Whisper (`WhisperSttProvider`) + Parakeet (`ParakeetSttProvider`, gated) implementations. 16kHz f32 mono. | `SttProvider`, `WhisperSttProvider`, `SpeechEvent`, `create_provider` |
 | `src/llm/` | HTTP client to `/v1/chat/completions`, session management | `OpenAIClient`, `LlmSession` |
 | `src/tts/` | `avspeech.rs` (macOS AVSpeechSynthesizer), `sentence.rs` (boundary splitting), `kokoro.rs` (ONNX) | `SentenceSplitter` |
 | `src/db/` | SQLite persistence: sessions, messages, user_profile, memories | `Database` |
@@ -75,7 +76,7 @@ Microphone → VAD (Silero) → STT (whisper-cpp-plus) → LLM (mlx-lm/oMLX SSE)
 
 - `src/websocket_client.rs` — No longer needed
 - `provider/` — Python LFM2.5-Audio server (not used)
-- `src/stt/whisper.rs` — Deprecated; replaced by `whisper_plus.rs`
+- `src/stt/whisper_plus.rs` — Replaced by provider abstraction; use `src/stt/whisper.rs` (WhisperSttProvider)
 
 **Do not extend legacy modules.** If you find code there, flag it for removal.
 
@@ -90,8 +91,13 @@ Read from `.env` (dotenvy loads automatically):
 AUDIO_SAMPLE_RATE=16000
 AUDIO_CHANNELS=1
 VOICEBOT_LANGUAGE=es          # es (default) or en
+
+# STT Provider
+STT_PROVIDER=whisper          # whisper (default) or parakeet
 WHISPER_MODEL=models/ggml-large-v3-turbo.bin
 WHISPER_THREADS=0             # auto
+PARAKEET_MODEL_DIR=           # required when STT_PROVIDER=parakeet
+                              # Download ONNX export from: https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx
 
 # LLM
 LLM_URL=http://127.0.0.1:8000 # mlx-lm default; oMLX is 8001
@@ -137,6 +143,7 @@ cargo run --bin test_stt_plus --release
 | Feature | Enables | Extra deps | Requirements |
 |---------|---------|------------|--------------|
 | (none) | Core pipeline | whisper-cpp-plus, reqwest, sqlx | — |
+| `parakeet` | NVIDIA Parakeet STT (ONNX) | parakeet-rs | ParakeetTDT model files |
 | `kokoro` | Kokoro ONNX TTS | kokorox | `brew install espeak-ng` |
 | `tui` | Terminal UI | ratatui, crossterm | — |
 | `remote` | WebSocket server | axum, tower | — |
@@ -240,7 +247,9 @@ cargo run --features tui --release
 
 Check these stages:
 - VAD sensitivity: `src/audio/vad.rs` (frame thresholds).
+- STT provider choice: Whisper vs Parakeet (`STT_PROVIDER` env var).
 - Whisper decoding: `src/stt/whisper.rs` (thread count, model size).
+- Parakeet decoding: `src/stt/parakeet.rs` (ONNX Runtime, model size).
 - LLM response time: External server config, context window size.
 - TTS synthesis: `say` vs Kokoro vs AVSpeech backend choice.
 

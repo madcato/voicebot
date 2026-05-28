@@ -1,55 +1,26 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use async_trait::async_trait;
+use parakeet_rs::{ParakeetTDT, Transcriber};
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use whisper_cpp_plus::{FullParams, SamplingStrategy, WhisperContext, WhisperVadProcessor};
+use whisper_cpp_plus::WhisperVadProcessor;
 
 use super::SpeechEvent;
 use super::provider::SttProvider;
-
-#[derive(Clone)]
-pub struct WhisperSTTVADConfig {
-    pub whisper_model: String,
-    pub vad_model: String,
-    pub language: String,
-    /// Milliseconds of continuous silence required to close a speech segment.
-    pub silence_ms: u32,
-    /// Speech probability threshold to transition from silence -> speech.
-    pub vad_start_threshold: f32,
-    /// Speech probability threshold to stay in speech (speech -> silence when below).
-    pub vad_end_threshold: f32,
-}
-
-impl Default for WhisperSTTVADConfig {
-    fn default() -> Self {
-        Self {
-            whisper_model: "models/ggml-large-v3-turbo.bin".to_string(),
-            vad_model: "models/ggml-silero-vad.bin".to_string(),
-            language: "es".to_string(),
-            silence_ms: 500,
-            vad_start_threshold: 0.65,
-            vad_end_threshold: 0.45,
-        }
-    }
-}
+use super::whisper::WhisperSTTVADConfig;
 
 const SAMPLE_RATE: usize = 16_000;
-/// Probe size for the VAD. Silero prefers 20–200 ms windows; 200 ms gives good
-/// accuracy without adding too much latency.
 const VAD_PROBE_MS: usize = 200;
 const VAD_PROBE_SAMPLES: usize = SAMPLE_RATE * VAD_PROBE_MS / 1000;
-/// Audio retained before the VAD onset so the first phoneme isn't clipped.
 const PRE_ROLL_MS: usize = 300;
 const PRE_ROLL_SAMPLES: usize = SAMPLE_RATE * PRE_ROLL_MS / 1000;
-/// Hard cap on a single speech segment before forcing a cut.
 const MAX_SEGMENT_MS: usize = 20_000;
 const MAX_SEGMENT_SAMPLES: usize = SAMPLE_RATE * MAX_SEGMENT_MS / 1000;
 
-pub struct WhisperSttProvider {
-    ctx: Arc<WhisperContext>,
+pub struct ParakeetSttProvider {
+    model: Arc<Mutex<ParakeetTDT>>,
     vad: WhisperVadProcessor,
-    language: String,
     vad_start_threshold: f32,
     vad_end_threshold: f32,
 
@@ -64,56 +35,55 @@ pub struct WhisperSttProvider {
     probe_carry: Vec<f32>,
 }
 
-impl WhisperSttProvider {
-    pub fn new(config: WhisperSTTVADConfig) -> Result<Self> {
+impl ParakeetSttProvider {
+    pub fn new(base: WhisperSTTVADConfig, parakeet_model_dir: Option<&str>) -> Result<Self> {
         ensure!(
-            (0.0..=1.0).contains(&config.vad_start_threshold),
+            (0.0..=1.0).contains(&base.vad_start_threshold),
             "vad_start_threshold must be in [0.0, 1.0], got {}",
-            config.vad_start_threshold
+            base.vad_start_threshold
         );
         ensure!(
-            (0.0..=1.0).contains(&config.vad_end_threshold),
+            (0.0..=1.0).contains(&base.vad_end_threshold),
             "vad_end_threshold must be in [0.0, 1.0], got {}",
-            config.vad_end_threshold
+            base.vad_end_threshold
         );
 
-        let vad_end_threshold = if config.vad_end_threshold > config.vad_start_threshold {
+        let vad_end_threshold = if base.vad_end_threshold > base.vad_start_threshold {
             tracing::warn!(
                 target: "sttvad",
                 "VAD end threshold ({}) is higher than start threshold ({}). Clamping end to start.",
-                config.vad_end_threshold,
-                config.vad_start_threshold
+                base.vad_end_threshold,
+                base.vad_start_threshold
             );
-            config.vad_start_threshold
+            base.vad_start_threshold
         } else {
-            config.vad_end_threshold
+            base.vad_end_threshold
         };
 
-        let ctx = Arc::new(
-            WhisperContext::new(&config.whisper_model).context("Failed to load Whisper model")?,
-        );
+        let model_dir = parakeet_model_dir
+            .ok_or_else(|| anyhow!("PARAKEET_MODEL_DIR must be set when STT_PROVIDER=parakeet"))?;
+        let model = ParakeetTDT::from_pretrained(model_dir, None)
+            .with_context(|| format!("Failed to load Parakeet TDT model from: {}\n\nThe model directory must contain ONNX Runtime files (encoder-model.onnx, decoder_joint-model.onnx, vocab.txt).\nYou may have downloaded the wrong format — parakeet-rs requires the ONNX export, not the HuggingFace Transformers model (.safetensors) or NeMo checkpoint (.nemo).\n\nSolution: download the correct ONNX model from HuggingFace:\n  mkdir -p {}\n  cd {}\n  wget https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/encoder-model.onnx\n  wget https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/decoder_joint-model.onnx\n  wget https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/vocab.txt\n  # Optional external data (if present):\n  wget https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/encoder-model.onnx.data\n", model_dir, model_dir, model_dir))?;
 
-        let vad =
-            WhisperVadProcessor::new(&config.vad_model).context("Failed to load VAD model")?;
+        let vad = WhisperVadProcessor::new(&base.vad_model).context("Failed to load VAD model")?;
 
         tracing::info!(
             target: "sttvad",
-            "WhisperSTTVAD ready (whisper: {}, vad: {}, lang: {}, silence_ms: {}, start_thr: {:.2}, end_thr: {:.2})",
-            config.whisper_model,
-            config.vad_model,
-            config.language,
-            config.silence_ms,
-            config.vad_start_threshold,
+            "ParakeetSttProvider ready (parakeet: {}, vad: {}, lang: {}, silence_ms: {}, start_thr: {:.2}, end_thr: {:.2})",
+            model_dir,
+            base.vad_model,
+            base.language,
+            base.silence_ms,
+            base.vad_start_threshold,
             vad_end_threshold
         );
 
-        let silence_samples_threshold = SAMPLE_RATE * config.silence_ms as usize / 1000;
+        let silence_samples_threshold = SAMPLE_RATE * base.silence_ms as usize / 1000;
 
         Ok(Self {
-            ctx,
+            model: Arc::new(Mutex::new(model)),
             vad,
-            language: config.language,
-            vad_start_threshold: config.vad_start_threshold,
+            vad_start_threshold: base.vad_start_threshold,
             vad_end_threshold,
             in_speech: false,
             speech_buf: Vec::with_capacity(MAX_SEGMENT_SAMPLES),
@@ -124,9 +94,6 @@ impl WhisperSttProvider {
         })
     }
 
-    /// Feed a chunk of 16 kHz mono f32 audio. Emits events as the VAD/state
-    /// machine advances. Transcription happens synchronously on the caller
-    /// thread (blocking); it's acceptable for a single-user interactive loop.
     pub async fn process_audio(&mut self, audio: &[f32], tx: &mpsc::Sender<SpeechEvent>) -> Result<()> {
         if audio.is_empty() {
             return Ok(());
@@ -193,10 +160,9 @@ impl WhisperSttProvider {
                     audio.len() as f32 / SAMPLE_RATE as f32
                 );
 
-                let ctx = Arc::clone(&self.ctx);
-                let language = self.language.clone();
+                let model = Arc::clone(&self.model);
                 let text = tokio::task::spawn_blocking(move || -> Result<String> {
-                    transcribe(&ctx, &language, &audio)
+                    transcribe(&model, &audio)
                 })
                 .await
                 .context("transcription task join")??;
@@ -216,54 +182,38 @@ impl WhisperSttProvider {
         Ok(())
     }
 
-    /// Blocking one-shot transcription (used as a fallback / sanity check).
-    #[allow(dead_code)]
     pub fn transcribe_complete(&self, audio: &[f32]) -> Result<String> {
-        transcribe(&self.ctx, &self.language, audio)
+        transcribe(&self.model, audio)
     }
 }
 
 #[async_trait]
-impl SttProvider for WhisperSttProvider {
+impl SttProvider for ParakeetSttProvider {
     fn provider_name(&self) -> &'static str {
-        "whisper"
+        "parakeet"
     }
 
     async fn process_audio(&mut self, audio: &[f32], tx: &mpsc::Sender<SpeechEvent>) -> Result<()> {
-        WhisperSttProvider::process_audio(self, audio, tx).await
+        ParakeetSttProvider::process_audio(self, audio, tx).await
     }
 
     fn transcribe_complete(&self, audio: &[f32]) -> Result<String> {
-        WhisperSttProvider::transcribe_complete(self, audio)
+        ParakeetSttProvider::transcribe_complete(self, audio)
     }
 }
 
-pub type WhisperSTTVAD = WhisperSttProvider;
-
-fn transcribe(ctx: &WhisperContext, language: &str, audio: &[f32]) -> Result<String> {
+fn transcribe(model: &Arc<Mutex<ParakeetTDT>>, audio: &[f32]) -> Result<String> {
     if audio.is_empty() {
         return Ok(String::new());
     }
 
-    let mut state = ctx.create_state()?;
-    let params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 })
-        .language(language)
-        .print_special(false)
-        .print_progress(false)
-        .print_realtime(false)
-        .print_timestamps(false)
-        .no_timestamps(true)
-        .single_segment(true);
+    let mut model = model
+        .lock()
+        .map_err(|_| anyhow!("Parakeet model lock poisoned"))?;
 
-    state.full(params, audio)?;
+    let result = model
+        .transcribe_samples(audio.to_vec(), SAMPLE_RATE as u32, 1, None)
+        .context("Parakeet transcription failed")?;
 
-    let n = state.full_n_segments();
-    let mut text = String::new();
-    for i in 0..n {
-        if let Ok(seg) = state.full_get_segment_text(i) {
-            text.push_str(seg.trim());
-            text.push(' ');
-        }
-    }
-    Ok(text.trim().to_string())
+    Ok(result.text.trim().to_string())
 }

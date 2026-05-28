@@ -8,7 +8,9 @@ There is no inter-service communication; everything runs in-process.
 
 ```
 Microphone → AudioCapture (CPAL)
-           → WhisperSTTVAD (Silero VAD + Whisper transcription, whisper-cpp-plus)
+           → SttProvider (trait: WhisperSttProvider or ParakeetSttProvider)
+             → Silero VAD (shared across providers)
+             → Whisper transcription (whisper-cpp-plus) OR Parakeet TDT (ONNX)
            → LLM (OpenAI-compatible SSE streaming)
            → SentenceSplitter    ← fires per sentence as tokens arrive
            → TTS synthesizer     ← AvSpeech or Kokoro; sentence N overlaps playback of N-1
@@ -41,8 +43,10 @@ src/
 │   └── speaker.rs             # Speaker verification (ONNX)
 │
 ├── stt/
-│   ├── mod.rs                 # WhisperSTTVAD — integrated STT+VAD (whisper-cpp-plus)
-│   └── whisper.rs             # Legacy WhisperStt wrapper (deprecated, whisper-rs)
+│   ├── mod.rs                 # SpeechEvent enum, module re-exports
+│   ├── provider.rs            # SttProvider trait + create_provider() factory
+│   ├── whisper.rs             # WhisperSttProvider (whisper-cpp-plus)
+│   └── parakeet.rs            # ParakeetSttProvider (ONNX, --features parakeet)
 │
 ├── llm/
 │   ├── mod.rs                 # OpenAIClient, LlmSession, Message
@@ -142,36 +146,43 @@ All its public methods are marked `#[allow(dead_code)]`. It is kept for referenc
 
 ---
 
-### STT — `WhisperSTTVAD`
+### STT — Provider Architecture
 
-Location: `src/stt/mod.rs`
+Location: `src/stt/`
 
-VAD and transcription are integrated into a single struct that processes audio chunks
-via an async tokio channel. Built on whisper-cpp-plus.
+The STT layer uses a provider trait with two implementations. Both share the same Silero VAD
+state machine; only the transcription backend differs.
 
 ```rust
-pub struct WhisperSTTVAD {
-    ctx: Arc<WhisperContext>,
-    vad: WhisperVadProcessor,       // Silero VAD from whisper-cpp-plus
-    // ... state machine fields
-}
-
-impl WhisperSTTVAD {
-    pub fn new(config: WhisperSTTVADConfig) -> Result<Self>;
-
-    /// Feed a chunk of 16 kHz mono f32 audio. Emits SpeechEvent via channel.
-    pub async fn process_audio(
-        &mut self,
-        audio: &[f32],
-        tx: &mpsc::Sender<SpeechEvent>,
-    ) -> Result<()>;
+#[async_trait]
+pub trait SttProvider: Send {
+    fn provider_name(&self) -> &'static str;
+    async fn process_audio(&mut self, audio: &[f32], tx: &mpsc::Sender<SpeechEvent>) -> Result<()>;
+    fn transcribe_complete(&self, audio: &[f32]) -> Result<String>;
 }
 
 pub enum SpeechEvent {
     SpeechStart,
     Speech(String),
     SpeechEnd(String),
-    Silence,
+}
+```
+
+**Providers:**
+- `WhisperSttProvider` (`src/stt/whisper.rs`) — whisper-cpp-plus, 99 languages
+- `ParakeetSttProvider` (`src/stt/parakeet.rs`) — ParakeetTDT ONNX, 25 languages, `--features parakeet`
+
+Factory: `create_provider(config: &Config) -> Result<Box<dyn SttProvider>>`
+
+#### `WhisperSttProvider`
+
+Built on whisper-cpp-plus. Processes audio chunks via an async tokio channel.
+
+```rust
+pub struct WhisperSttProvider {
+    ctx: Arc<WhisperContext>,
+    vad: WhisperVadProcessor,       // Silero VAD from whisper-cpp-plus
+    // ... state machine fields
 }
 ```
 

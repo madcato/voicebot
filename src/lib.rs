@@ -29,5 +29,8 @@ pub use audio::output::AudioOutput;
 pub use config::Config;
 pub use db::Database;
 pub use llm::{LlmSession, OpenAIClient};
-pub use stt::{SpeechEvent, WhisperSTTVAD, WhisperSTTVADConfig};
+pub use stt::{
+    SpeechEvent, SttProvider, WhisperSTTVAD, WhisperSTTVADConfig, WhisperSttProvider,
+    create_provider,
+};
 pub use tts::SentenceSplitter;

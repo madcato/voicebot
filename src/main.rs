@@ -51,7 +51,7 @@ use crate::pipeline::{
     llm_task, run_consolidation_cycle, sen_task, tts_task,
 };
 use crate::profile::ProfileFact;
-use crate::stt::{SpeechEvent, WhisperSTTVAD, WhisperSTTVADConfig};
+use crate::stt::{SpeechEvent, SttProvider, create_provider};
 use crate::tools::{
     ActiveTask, ConversationMode, CurrentTimeTool, McpToolProxy, OpenAppTool,
     PendingInteractionEntry, ReadClipboardTool, ReadFileTool, RunAgentTool, RunShellTool,
@@ -445,19 +445,12 @@ async fn async_main() -> Result<()> {
     }
 
     // ── STT + VAD unified processor ────────────────────────────────────────────
-    let sttvad_config = WhisperSTTVADConfig {
-        whisper_model: config.whisper_model.clone(),
-        vad_model: config.vad_model.clone(),
-        language: config.language.clone(),
-        silence_ms: config.vad_silence_ms,
-        vad_start_threshold: config.vad_start_threshold,
-        vad_end_threshold: config.vad_end_threshold,
-    };
-    let mut sttvad = WhisperSTTVAD::new(sttvad_config)?;
+    let mut stt_provider: Box<dyn SttProvider> = create_provider(&config)?;
     info!(
         target: "stt",
-        "Initialized unified WhisperSTTVAD (whisper: {}, vad: {})",
-        config.whisper_model, config.vad_model
+        "Initialized STT provider '{}' (configured: {})",
+        stt_provider.provider_name(),
+        config.stt_provider
     );
 
     // ── Analysis Ring: ContextLens + IdentityAnalyzer ─────────────────────────
@@ -1007,7 +1000,7 @@ async fn async_main() -> Result<()> {
                     chunk.samples
                 };
 
-                sttvad.process_audio(&mono, &stt_tx).await.ok();
+                stt_provider.process_audio(&mono, &stt_tx).await.ok();
 
                 while let Ok(event) = stt_rx.try_recv() {
                     match event {
@@ -1065,7 +1058,7 @@ async fn async_main() -> Result<()> {
                             let mut segment_text = final_stream_text;
 
                             if segment_text.trim().is_empty()
-                                && let Ok(text) = sttvad.transcribe_complete(&audio)
+                                && let Ok(text) = stt_provider.transcribe_complete(&audio)
                             {
                                 segment_text = text;
                             }
@@ -1116,25 +1109,12 @@ async fn async_main() -> Result<()> {
                                 let amb_c = Arc::clone(&ambient_buffer);
                                 let label = speaker_label.clone();
                                 let audio_for_task = audio.clone();
-                                let lang = config.language.clone();
-                                let wm = config.whisper_model.clone();
-                                let vm = config.vad_model.clone();
-                                let sms = config.vad_silence_ms;
-                                let vst = config.vad_start_threshold;
-                                let vet = config.vad_end_threshold;
+                                let stt_cfg = config.clone();
 
                                 tokio::spawn(async move {
                                     let t0 = Instant::now();
-                                    let cfg = WhisperSTTVADConfig {
-                                        whisper_model: wm,
-                                        vad_model: vm,
-                                        language: lang,
-                                        silence_ms: sms,
-                                        vad_start_threshold: vst,
-                                        vad_end_threshold: vet,
-                                    };
-                                    if let Ok(vad) = WhisperSTTVAD::new(cfg)
-                                        && let Ok(text) = vad.transcribe_complete(&audio_for_task)
+                                    if let Ok(provider) = create_provider(&stt_cfg)
+                                        && let Ok(text) = provider.transcribe_complete(&audio_for_task)
                                         && !text.is_empty()
                                     {
                                         amb_c.lock().unwrap().push(label.clone(), text.clone());
@@ -1156,27 +1136,14 @@ async fn async_main() -> Result<()> {
                             // ── ACP permission gate (FIFO queue) ──────────────────
                             if let Some(entry) = pending_agent_questions.pop_front() {
                                 let audio_for_task = audio.clone();
-                                let wm = config.whisper_model.clone();
-                                let vm = config.vad_model.clone();
-                                let lang = config.language.clone();
-                                let sms = config.vad_silence_ms;
-                                let vst = config.vad_start_threshold;
-                                let vet = config.vad_end_threshold;
+                                let stt_cfg = config.clone();
 
                                 info!(target: "acp", "Answering pending question for task={} agent={}", entry.task_id, entry.agent_name);
 
                                 tokio::spawn(async move {
                                     let t0 = Instant::now();
-                                    let cfg = WhisperSTTVADConfig {
-                                        whisper_model: wm,
-                                        vad_model: vm,
-                                        language: lang,
-                                        silence_ms: sms,
-                                        vad_start_threshold: vst,
-                                        vad_end_threshold: vet,
-                                    };
-                                    let answer = if let Ok(vad) = WhisperSTTVAD::new(cfg) {
-                                        vad.transcribe_complete(&audio_for_task).unwrap_or_default()
+                                    let answer = if let Ok(provider) = create_provider(&stt_cfg) {
+                                        provider.transcribe_complete(&audio_for_task).unwrap_or_default()
                                     } else {
                                         String::new()
                                     };

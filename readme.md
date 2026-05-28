@@ -38,7 +38,9 @@ Voicebot is built from the ground up for voice interaction:
 ### Core Voice Pipeline
 
 - Real-time voice capture (CPAL) with VAD (Silero) and pre-roll buffer
-- Whisper STT via `whisper-cpp-plus` (Metal GPU on macOS, CoreML Neural Engine available)
+- **Pluggable STT** — select Whisper (default) or NVIDIA Parakeet via environment variable
+  - **Whisper** via `whisper-cpp-plus` (Metal GPU on macOS, CoreML Neural Engine available, 99 languages)
+  - **Parakeet** via ONNX Runtime (25 languages, offline, `--features parakeet`)
 - Streaming LLM via mlx-lm or oMLX (Apple MLX, KV-cache reuse, sub-second latency)
 - Sentence-by-sentence TTS playback (AVSpeechSynthesizer or Kokoro ONNX) - speaks while generating next sentence
 - Barge-in - user speech cancels active pipeline instantly
@@ -155,11 +157,19 @@ wget https://hgpu.space/file/hjz3n4QwZbU/Qwen2.5-7B-Instruct-Q4_K_M.gguf -O ./mo
 
 **VAD Model (Silero):**
 
-The Silero VAD model is used by `whisper-cpp-plus` for voice activity detection:
+The Silero VAD model is used by both Whisper and Parakeet providers for voice activity detection:
 
 ```bash
 # Download Silero VAD model
 wget https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx -O ./models/ggml-silero-vad.bin
+```
+
+**Optional: Parakeet STT Models (requires `--features parakeet`):**
+
+```bash
+# Download Parakeet TDT model (25 languages, offline)
+# From HuggingFace: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2
+# Place tokenizer.json, config.json, and ONNX files in the directory below
 ```
 
 **Optional: Kokoro TTS Models:**
@@ -376,6 +386,9 @@ Most configuration is done via environment variables (or `.env` file):
 | `VOICEBOT_LANGUAGE` | `es` | Language for STT and TTS |
 | `VAD_SILENCE_MS` | `200` | Silence threshold (ms) before processing speech |
 | `VAD_MODEL` | `models/ggml-silero-vad.bin` | Path to Silero VAD model file |
+| **STT Provider** | | |
+| `STT_PROVIDER` | `whisper` | STT backend: `whisper` (default) or `parakeet` (requires `--features parakeet`) |
+| `PARAKEET_MODEL_DIR` | - | Path to Parakeet ONNX model directory (required when `STT_PROVIDER=parakeet`) |
 | **STT (Whisper)** | | |
 | `WHISPER_MODEL` | *required* | Path to Whisper `.bin` model |
 | `WHISPER_THREADS` | `0` (auto) | CPU threads for Whisper decoding |
@@ -463,6 +476,45 @@ See [.env.example](.env.example) for complete environment variable reference.
 
 ---
 
+### STT Provider Selection
+
+Voicebot supports two STT backends, selectable at runtime via `STT_PROVIDER`:
+
+#### Whisper (default)
+
+No extra build flags needed. Uses `whisper-cpp-plus` with Metal GPU on macOS.
+
+```bash
+STT_PROVIDER=whisper cargo run
+```
+
+**Models:** Download from [HuggingFace](https://huggingface.co/ggerganov/whisper.cpp) (ggml-small.bin, ggml-large-v3-turbo.bin, etc.)
+
+**Languages:** 99 languages. Set `VOICEBOT_LANGUAGE=es` or `VOICEBOT_LANGUAGE=en`.
+
+#### Parakeet (requires `--features parakeet`)
+
+Uses NVIDIA's ParakeetTDT model via ONNX Runtime. Fully offline. Supports 25 languages including Spanish.
+
+```bash
+# Build with parakeet support
+cargo build --release --features parakeet
+
+# Run with parakeet
+STT_PROVIDER=parakeet PARAKEET_MODEL_DIR=./models/parakeet-tdt-0.6b-v2 cargo run
+```
+
+**Models:** Download the ONNX export from [HuggingFace](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx). Required files: `encoder-model.onnx`, `decoder_joint-model.onnx`, `vocab.txt` (and optionally `encoder-model.onnx.data`).
+
+**Languages:** 25 languages with auto-detection. The `VOICEBOT_LANGUAGE` hint is ignored — ParakeetTDT detects language automatically.
+
+**Notes:**
+- Both providers use the same Silero VAD (no change to VAD behavior)
+- Parakeet is batch-based: audio is buffered during speech, then transcribed on silence
+- ONNX Runtime adds ~200 MB to the binary size — feature-gated to keep default builds lean
+
+---
+
 ## Development
 
 ### Build commands
@@ -488,6 +540,9 @@ cargo build --release --features control
 
 # Build with speaker verification
 cargo build --release --features speaker
+
+# Build with Parakeet STT (ONNX Runtime, 25 languages)
+cargo build --release --features parakeet
 
 # Run with debug
 cargo run
